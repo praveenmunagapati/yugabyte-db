@@ -11,8 +11,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 
-#ifndef YB_UTIL_SHARED_LOCK_H
-#define YB_UTIL_SHARED_LOCK_H
+#pragma once
 
 #include <shared_mutex>
 
@@ -20,7 +19,7 @@
 
 namespace yb {
 
-// A wrapper around Boost shared lock that supports thread annotations.
+// A wrapper around std::shared_lock that supports thread annotations.
 template<typename Mutex>
 class SCOPED_CAPABILITY SharedLock {
  public:
@@ -32,5 +31,3 @@ class SCOPED_CAPABILITY SharedLock {
 };
 
 } // namespace yb
-
-#endif  // YB_UTIL_SHARED_LOCK_H

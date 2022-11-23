@@ -102,6 +102,7 @@ _copyPlannedStmt(const PlannedStmt *from)
 	COPY_NODE_FIELD(utilityStmt);
 	COPY_LOCATION_FIELD(stmt_location);
 	COPY_LOCATION_FIELD(stmt_len);
+	COPY_SCALAR_FIELD(yb_num_referenced_relations);
 
 	return newnode;
 }
@@ -223,6 +224,8 @@ _copyModifyTable(const ModifyTable *from)
 	COPY_SCALAR_FIELD(exclRelRTI);
 	COPY_NODE_FIELD(exclRelTlist);
 	COPY_NODE_FIELD(ybPushdownTlist);
+	COPY_NODE_FIELD(ybReturningColumns);
+	COPY_NODE_FIELD(ybColumnRefs);
 	COPY_NODE_FIELD(no_update_index_list);
 	COPY_SCALAR_FIELD(no_row_trigger);
 
@@ -451,6 +454,25 @@ _copySeqScan(const SeqScan *from)
 }
 
 /*
+ * _copyYbSeqScan
+ */
+static YbSeqScan *
+_copyYbSeqScan(const YbSeqScan *from)
+{
+	YbSeqScan    *newnode = makeNode(YbSeqScan);
+
+	/*
+	 * copy node superclass fields
+	 */
+	CopyScanFields((const Scan *) from, (Scan *) newnode);
+
+	COPY_NODE_FIELD(remote.qual);
+	COPY_NODE_FIELD(remote.colrefs);
+
+	return newnode;
+}
+
+/*
  * _copySampleScan
  */
 static SampleScan *
@@ -493,7 +515,12 @@ _copyIndexScan(const IndexScan *from)
 	COPY_NODE_FIELD(indexorderby);
 	COPY_NODE_FIELD(indexorderbyorig);
 	COPY_NODE_FIELD(indexorderbyops);
+	COPY_NODE_FIELD(indextlist);
 	COPY_SCALAR_FIELD(indexorderdir);
+	COPY_NODE_FIELD(index_remote.qual);
+	COPY_NODE_FIELD(index_remote.colrefs);
+	COPY_NODE_FIELD(rel_remote.qual);
+	COPY_NODE_FIELD(rel_remote.colrefs);
 
 	return newnode;
 }
@@ -519,6 +546,9 @@ _copyIndexOnlyScan(const IndexOnlyScan *from)
 	COPY_NODE_FIELD(indexorderby);
 	COPY_NODE_FIELD(indextlist);
 	COPY_SCALAR_FIELD(indexorderdir);
+	COPY_NODE_FIELD(remote.qual);
+	COPY_NODE_FIELD(remote.colrefs);
+	COPY_NODE_FIELD(yb_indexqual_for_recheck);
 
 	return newnode;
 }
@@ -854,6 +884,30 @@ _copyNestLoop(const NestLoop *from)
 	return newnode;
 }
 
+/*
+ * _copyYbBatchedNestLoop
+ */
+static YbBatchedNestLoop *
+_copyYbBatchedNestLoop(const YbBatchedNestLoop *from)
+{
+	YbBatchedNestLoop   *newnode = makeNode(YbBatchedNestLoop);
+
+	/*
+	 * copy node superclass fields
+	 */
+	CopyJoinFields((const Join *) from, (Join *) newnode);
+	COPY_NODE_FIELD(nl.nestParams);
+
+	/*
+	 * copy remainder of node
+	 */
+	COPY_NODE_FIELD(innerHashAttNos);
+	COPY_NODE_FIELD(outerParamExprs);
+	COPY_NODE_FIELD(hashOps);
+
+	return newnode;
+}
+
 
 /*
  * _copyMergeJoin
@@ -1155,6 +1209,7 @@ _copyNestLoopParam(const NestLoopParam *from)
 
 	COPY_SCALAR_FIELD(paramno);
 	COPY_NODE_FIELD(paramval);
+	COPY_SCALAR_FIELD(yb_batch_size);
 
 	return newnode;
 }
@@ -1238,6 +1293,17 @@ _copyPartitionPruneStepCombine(const PartitionPruneStepCombine *from)
 	COPY_SCALAR_FIELD(step.step_id);
 	COPY_SCALAR_FIELD(combineOp);
 	COPY_NODE_FIELD(source_stepids);
+
+	return newnode;
+}
+
+static PartitionPruneStepFuncOp *
+_copyPartitionPruneStepFuncOp(const PartitionPruneStepFuncOp *from)
+{
+	PartitionPruneStepFuncOp *newnode = makeNode(PartitionPruneStepFuncOp);
+
+	COPY_SCALAR_FIELD(step.step_id);
+	COPY_NODE_FIELD(exprs);
 
 	return newnode;
 }
@@ -3163,6 +3229,7 @@ _copyAlterTableCmd(const AlterTableCmd *from)
 	COPY_NODE_FIELD(def);
 	COPY_SCALAR_FIELD(behavior);
 	COPY_SCALAR_FIELD(missing_ok);
+	COPY_SCALAR_FIELD(yb_is_add_primary_key);
 
 	return newnode;
 }
@@ -3331,18 +3398,6 @@ _copyOptSplit(const OptSplit *from)
 	return newnode;
 }
 
-static OptTableGroup *
-_copyOptTableGroup(const OptTableGroup *from)
-{
-	OptTableGroup *newnode = makeNode(OptTableGroup);
-
-	COPY_SCALAR_FIELD(has_tablegroup);
-	COPY_STRING_FIELD(tablegroup_name);
-
-	return newnode;
-}
-
-
 /*
  * CopyCreateStmtFields
  *
@@ -3362,7 +3417,7 @@ CopyCreateStmtFields(const CreateStmt *from, CreateStmt *newnode)
 	COPY_NODE_FIELD(options);
 	COPY_SCALAR_FIELD(oncommit);
 	COPY_STRING_FIELD(tablespacename);
-	COPY_NODE_FIELD(tablegroup);
+	COPY_STRING_FIELD(tablegroupname);
 	COPY_SCALAR_FIELD(if_not_exists);
 	COPY_NODE_FIELD(split_options);
 }
@@ -3477,7 +3532,6 @@ _copyIndexStmt(const IndexStmt *from)
 	COPY_SCALAR_FIELD(relationId);
 	COPY_STRING_FIELD(accessMethod);
 	COPY_STRING_FIELD(tableSpace);
-	COPY_NODE_FIELD(tablegroup);
 	COPY_NODE_FIELD(indexParams);
 	COPY_NODE_FIELD(indexIncludingParams);
 	COPY_NODE_FIELD(options);
@@ -4024,16 +4078,10 @@ _copyCreateTableGroupStmt(const CreateTableGroupStmt *from)
 	CreateTableGroupStmt *newnode = makeNode(CreateTableGroupStmt);
 
 	COPY_STRING_FIELD(tablegroupname);
+	COPY_STRING_FIELD(tablespacename);
+	COPY_NODE_FIELD(owner);
 	COPY_NODE_FIELD(options);
-	return newnode;
-}
-
-static DropTableGroupStmt *
-_copyDropTableGroupStmt(const DropTableGroupStmt *from)
-{
-	DropTableGroupStmt *newnode = makeNode(DropTableGroupStmt);
-
-	COPY_STRING_FIELD(tablegroupname);
+	COPY_SCALAR_FIELD(implicit);
 	return newnode;
 }
 
@@ -4845,6 +4893,19 @@ _copyRowBounds(const RowBounds *from)
 	return newnode;
 }
 
+static YbExprParamDesc *
+_copyYbExprParamDesc(const YbExprParamDesc *from)
+{
+	YbExprParamDesc *newnode = makeNode(YbExprParamDesc);
+
+	COPY_SCALAR_FIELD(attno);
+	COPY_SCALAR_FIELD(typid);
+	COPY_SCALAR_FIELD(typmod);
+	COPY_SCALAR_FIELD(collid);
+
+	return newnode;
+}
+
 /*
  * copyObjectImpl -- implementation of copyObject(); see nodes/nodes.h
  *
@@ -4909,6 +4970,9 @@ copyObjectImpl(const void *from)
 		case T_SeqScan:
 			retval = _copySeqScan(from);
 			break;
+		case T_YbSeqScan:
+			retval = _copyYbSeqScan(from);
+			break;
 		case T_SampleScan:
 			retval = _copySampleScan(from);
 			break;
@@ -4959,6 +5023,9 @@ copyObjectImpl(const void *from)
 			break;
 		case T_NestLoop:
 			retval = _copyNestLoop(from);
+			break;
+		case T_YbBatchedNestLoop:
+			retval = _copyYbBatchedNestLoop(from);
 			break;
 		case T_MergeJoin:
 			retval = _copyMergeJoin(from);
@@ -5447,9 +5514,6 @@ copyObjectImpl(const void *from)
 		case T_CreateTableGroupStmt:
 			retval = _copyCreateTableGroupStmt(from);
 			break;
-		case T_DropTableGroupStmt:
-			retval = _copyDropTableGroupStmt(from);
-			break;
 		case T_CreateTableSpaceStmt:
 			retval = _copyCreateTableSpaceStmt(from);
 			break;
@@ -5738,9 +5802,6 @@ copyObjectImpl(const void *from)
 		case T_OptSplit:
 			retval = _copyOptSplit(from);
 			break;
-		case T_OptTableGroup:
-			retval = _copyOptTableGroup(from);
-			break;
 
 			/*
 			 * MISCELLANEOUS NODES
@@ -5759,6 +5820,10 @@ copyObjectImpl(const void *from)
 
 		case T_RowBounds:
 			retval = _copyRowBounds(from);
+			break;
+
+		case T_YbExprParamDesc:
+			retval = _copyYbExprParamDesc(from);
 			break;
 
 		default:

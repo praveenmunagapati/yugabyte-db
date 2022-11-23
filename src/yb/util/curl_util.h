@@ -29,17 +29,16 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_CURL_UTIL_H
-#define YB_UTIL_CURL_UTIL_H
+#pragma once
 
-#include <curl/curl.h>
 #include <string>
 #include <vector>
 
 #include <boost/optional.hpp>
 
 #include "yb/gutil/macros.h"
-#include "yb/util/status.h"
+
+#include "yb/util/status_fwd.h"
 
 typedef void CURL;
 
@@ -60,7 +59,7 @@ class EasyCurl {
   // Any existing data in the buffer is replaced.
   // The optional param 'headers' holds additional headers.
   // e.g. {"Accept-Encoding: gzip"}
-  CHECKED_STATUS FetchURL(
+  Status FetchURL(
       const std::string& url,
       faststring* dst,
       int64_t timeout_sec = kDefaultTimeoutSec,
@@ -68,13 +67,13 @@ class EasyCurl {
 
   // Issue an HTTP POST to the given URL with the given data.
   // Returns results in 'dst' as above.
-  CHECKED_STATUS PostToURL(
+  Status PostToURL(
       const std::string& url,
       const std::string& post_data,
       faststring* dst,
       int64_t timeout_sec = kDefaultTimeoutSec);
 
-  CHECKED_STATUS PostToURL(
+  Status PostToURL(
       const std::string& url,
       const std::string& post_data,
       const std::string& content_type,
@@ -89,10 +88,18 @@ class EasyCurl {
     return_headers_ = v;
   }
 
+  void set_follow_redirects(bool v) {
+    follow_redirects_ = v;
+  }
+
+  void set_ca_cert(const std::string& v) {
+    ca_cert_ = v;
+  }
+
  private:
   // Do a request. If 'post_data' is non-NULL, does a POST.
   // Otherwise, does a GET.
-  CHECKED_STATUS DoRequest(
+  Status DoRequest(
       const std::string& url,
       const boost::optional<const std::string>& post_data,
       const boost::optional<const std::string>& content_type,
@@ -103,9 +110,11 @@ class EasyCurl {
   CURL* curl_;
   // Whether to return the HTTP headers with the response.
   bool return_headers_ = false;
+  // Whether to follow HTTP redirects.
+  bool follow_redirects_ = false;
+  // Path to CA certificates. Defaults to system-wide registered CAs if not set.
+  std::string ca_cert_;
   DISALLOW_COPY_AND_ASSIGN(EasyCurl);
 };
 
 } // namespace yb
-
-#endif /* YB_UTIL_CURL_UTIL_H */

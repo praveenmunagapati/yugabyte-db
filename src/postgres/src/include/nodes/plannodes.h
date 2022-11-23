@@ -99,6 +99,14 @@ typedef struct PlannedStmt
 	/* statement location in source string (copied from Query) */
 	int			stmt_location;	/* start location, or -1 if unknown */
 	int			stmt_len;		/* length in bytes; 0 means "rest of string" */
+
+	/* YB specific fields */
+
+	/*
+	 * Number of relations that are still referenced by the plan after
+	 * constraint exclusion and partition pruning.
+	 */
+	int		yb_num_referenced_relations;
 } PlannedStmt;
 
 /* macro for fetching the Plan associated with a SubPlan node */
@@ -240,8 +248,10 @@ typedef struct ModifyTable
 	Index		exclRelRTI;		/* RTI of the EXCLUDED pseudo relation */
 	List	   *exclRelTlist;	/* tlist of the EXCLUDED pseudo relation */
 
-	List	   *ybPushdownTlist; /* tlist for the pushed down SET expressions */
-	bool	   no_row_trigger; /* planner has checked no triggers apply */
+	List	   *ybPushdownTlist;	/* tlist for the pushdown SET expressions */
+	List	   *ybReturningColumns;	/* columns to fetch from DocDB */
+	List	   *ybColumnRefs;	/* colrefs to evaluate pushdown expressions */
+	bool		no_row_trigger; /* planner has checked no triggers apply */
 	List	   *no_update_index_list; /* OIDs of indexes to be aren't updated */
 } ModifyTable;
 
@@ -358,6 +368,23 @@ typedef struct Scan
 typedef Scan SeqScan;
 
 /* ----------------
+ *		YB table sequential scan node
+ * ----------------
+ */
+
+typedef struct PushdownExprs
+{
+	List *qual;
+	List *colrefs;
+} PushdownExprs;
+
+typedef struct YbSeqScan
+{
+	Scan		scan;
+	PushdownExprs remote;
+} YbSeqScan;
+
+/* ----------------
  *		table sample scan node
  * ----------------
  */
@@ -414,7 +441,10 @@ typedef struct IndexScan
 	List	   *indexorderby;	/* list of index ORDER BY exprs */
 	List	   *indexorderbyorig;	/* the same in original form */
 	List	   *indexorderbyops;	/* OIDs of sort ops for ORDER BY exprs */
+	List	   *indextlist;		/* TargetEntry list describing index's cols */
 	ScanDirection indexorderdir;	/* forward or backward or don't care */
+	PushdownExprs index_remote;
+	PushdownExprs rel_remote;
 } IndexScan;
 
 /* ----------------
@@ -442,6 +472,13 @@ typedef struct IndexOnlyScan
 	List	   *indexorderby;	/* list of index ORDER BY exprs */
 	List	   *indextlist;		/* TargetEntry list describing index's cols */
 	ScanDirection indexorderdir;	/* forward or backward or don't care */
+	PushdownExprs remote;
+	/*
+	 * yb_indexqual_for_recheck is the modified version of indexqual.
+	 * It is used in tuple recheck step only.
+	 * In majority of cases it is NULL which means that indexqual will be used for tuple recheck.
+	 */
+	List	   *yb_indexqual_for_recheck;
 } IndexOnlyScan;
 
 /* ----------------
@@ -708,11 +745,29 @@ typedef struct NestLoop
 	List	   *nestParams;		/* list of NestLoopParam nodes */
 } NestLoop;
 
+typedef struct YbBatchedNestLoop
+{
+	NestLoop nl;
+
+	/*
+	 * Only relevant if we're using the hash batching strategy.
+	 */
+	List	   *hashOps;		 /* List of operators to hash with for local
+									join phase of batching */
+	List	   *innerHashAttNos; /* List of attributes of inner tuple that
+									are to be hashed if we are using the hash
+									strategy. */
+	List	   *outerParamExprs; /* List of expressions on outer tuple that
+									are to be hashed if we are using the hash
+									strategy. */
+} YbBatchedNestLoop;
+
 typedef struct NestLoopParam
 {
 	NodeTag		type;
 	int			paramno;		/* number of the PARAM_EXEC Param to set */
 	Var		   *paramval;		/* outer-relation Var to assign to Param */
+	int	   		yb_batch_size;	/* Batch size of this param. */
 } NestLoopParam;
 
 /* ----------------
@@ -1196,6 +1251,11 @@ typedef struct PartitionPruneStepCombine
 	List	   *source_stepids;
 } PartitionPruneStepCombine;
 
+typedef struct PartitionPruneStepFuncOp
+{
+	PartitionPruneStep step;
+	List       *exprs;
+} PartitionPruneStepFuncOp;
 
 /*
  * Plan invalidation info

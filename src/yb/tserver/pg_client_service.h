@@ -11,35 +11,75 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_PG_CLIENT_SERVICE_H
-#define YB_TSERVER_PG_CLIENT_SERVICE_H
+#pragma once
+
+#include <functional>
+#include <future>
 
 #include "yb/client/client_fwd.h"
 
 #include "yb/rpc/rpc_fwd.h"
 
+#include "yb/tserver/tserver_fwd.h"
 #include "yb/tserver/pg_client.service.h"
 
 namespace yb {
+
+class XClusterSafeTimeMap;
+
 namespace tserver {
 
 #define YB_PG_CLIENT_METHODS \
-    (Heartbeat)(AlterDatabase)(AlterTable)(BackfillIndex)(CreateDatabase) \
-    (CreateSequencesDataTable)(CreateTable)(CreateTablegroup)(DropDatabase)(DropTable) \
-    (DropTablegroup)(GetCatalogMasterVersion)(GetDatabaseInfo)(IsInitDbDone) \
-    (ListLiveTabletServers)(OpenTable)(ReserveOids)(TabletServerCount)(TruncateTable)
-
-using TransactionPoolProvider = std::function<client::TransactionPool*()>;
+    (AlterDatabase) \
+    (AlterTable) \
+    (BackfillIndex) \
+    (CreateDatabase) \
+    (CreateSequencesDataTable) \
+    (CreateTable) \
+    (CreateTablegroup) \
+    (DeleteDBSequences) \
+    (DeleteSequenceTuple) \
+    (DropDatabase) \
+    (DropTable) \
+    (DropTablegroup) \
+    (FinishTransaction) \
+    (GetCatalogMasterVersion) \
+    (GetDatabaseInfo) \
+    (GetTableDiskSize) \
+    (Heartbeat) \
+    (InsertSequenceTuple) \
+    (IsInitDbDone) \
+    (ListLiveTabletServers) \
+    (OpenTable) \
+    (ReadSequenceTuple) \
+    (ReserveOids) \
+    (RollbackToSubTransaction) \
+    (SetActiveSubTransaction) \
+    (TabletServerCount) \
+    (TruncateTable) \
+    (UpdateSequenceTuple) \
+    (ValidatePlacement) \
+    (CheckIfPitrActive) \
+    (GetTserverCatalogVersionInfo) \
+    /**/
 
 class PgClientServiceImpl : public PgClientServiceIf {
  public:
   explicit PgClientServiceImpl(
+      std::reference_wrapper<const TabletServerIf> tablet_server,
       const std::shared_future<client::YBClient*>& client_future,
+      const scoped_refptr<ClockBase>& clock,
       TransactionPoolProvider transaction_pool_provider,
       const scoped_refptr<MetricEntity>& entity,
-      rpc::Scheduler* scheduler);
+      rpc::Scheduler* scheduler,
+      const XClusterSafeTimeMap* xcluster_safe_time_map);
 
   ~PgClientServiceImpl();
+
+  void Perform(
+      const PgPerformRequestPB* req, PgPerformResponsePB* resp, rpc::RpcContext context) override;
+
+  void InvalidateTableCache();
 
 #define YB_PG_CLIENT_METHOD_DECLARE(r, data, method) \
   void method( \
@@ -57,5 +97,3 @@ class PgClientServiceImpl : public PgClientServiceIf {
 
 }  // namespace tserver
 }  // namespace yb
-
-#endif  // YB_TSERVER_PG_CLIENT_SERVICE_H

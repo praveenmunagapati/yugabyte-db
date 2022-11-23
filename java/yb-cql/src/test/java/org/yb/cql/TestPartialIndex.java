@@ -20,14 +20,10 @@ import com.datastax.driver.core.Row;
 import com.datastax.driver.core.SimpleStatement;
 import com.datastax.driver.core.Statement;
 
-import org.yb.minicluster.BaseMiniClusterTest;
 import org.yb.util.Pair;
 
 import static org.yb.AssertionWrappers.assertTrue;
 
-import org.yb.Common;
-import org.yb.IndexInfo;
-import org.yb.client.GetTableSchemaResponse;
 import org.yb.YBTestRunner;
 
 import org.junit.runner.RunWith;
@@ -557,6 +553,8 @@ public class TestPartialIndex extends BaseCQLTest {
         includeClause, predicate),
       strongConsistency);
 
+    waitForReadPermsOnAllIndexes(testTableName);
+
     // Delete complete row.
     // --------------------
     //       ________________________________________________________________________
@@ -730,6 +728,8 @@ public class TestPartialIndex extends BaseCQLTest {
         isUnique ? "UNIQUE" : "", testTableName, String.join(", ", indexedCols),
         includeClause, predicate),
       strongConsistency);
+
+    waitForReadPermsOnAllIndexes(testTableName);
 
     // Insert (No existing row with same pk)
     // --------------------------------------
@@ -1251,29 +1251,12 @@ public class TestPartialIndex extends BaseCQLTest {
         strongConsistency);
     }
 
+    waitForReadPermsOnAllIndexes(testTableName);
+
     String query = String.format("select %s from %s where %s",
       String.join(",", selectCols), testTableName, whereClause);
     String queryWithoutIndexes = String.format("select %s from %s where %s",
       String.join(",", selectCols), testTableName, whereClauseWithoutIndexes);
-
-    while (true) {
-      boolean all_indexes_have_read_perms = true;
-      GetTableSchemaResponse response = miniCluster.getClient().getTableSchema(
-        DEFAULT_TEST_KEYSPACE, testTableName);
-      List<IndexInfo> indexes = response.getIndexes();
-
-      for (IndexInfo index : indexes) {
-        if (index.getIndexPermissions() !=
-              Common.IndexPermissions.INDEX_PERM_READ_WRITE_AND_DELETE) {
-          LOG.info("Found index with permissions=" + index.getIndexPermissions() +
-            " != INDEX_PERM_READ_WRITE_AND_DELETE");
-          all_indexes_have_read_perms = false;
-          break;
-        }
-      }
-      if (all_indexes_have_read_perms) break;
-      Thread.sleep(100);
-    }
 
     // We just execute three SELECT statements to get metadata cache of all tservers on the same
     // schema version post the index creation. If that doesn't happen we might choose a wrong
@@ -2619,17 +2602,63 @@ public class TestPartialIndex extends BaseCQLTest {
     runInvalidStmt("create index idx on " + testTableName + "(v1) where json_col->>'title' = NULL");
     runInvalidStmt("create index idx on " + testTableName + "(v1) where map_col[1] = 1");
     runInvalidStmt("create index idx on " + testTableName + "(v1) where list_col[1] = 1");
+    waitForReadPermsOnAllIndexes(testTableName);
     session.execute("drop table " + testTableName);
   }
 
   @Test
-  public void testDropColUsedInIdxPredicate() throws Exception {
-    createTable(String.format("create table %s (h1 int primary key, v1 int)", testTableName),
-      true /* strongConsistency */);
-    createIndex(String.format("CREATE INDEX idx ON %s(v1) WHERE v1 != NULL", testTableName),
-      true /* strongConsistency */);
+  public void testAlterCol() throws Exception {
+    createTable(String.format("create table %s (h1 int primary key, v1 int, v2 int)",
+                              testTableName),
+                true /* strongConsistency */);
+
+    // Add, rename, drop column without presence of any secondary index.
+    session.execute(String.format("alter table %s add v3 int", testTableName));
+    session.execute(String.format("alter table %s rename v3 to v33", testTableName));
+    session.execute(String.format("alter table %s rename v33 to v3", testTableName));
+    session.execute(String.format("alter table %s drop v3", testTableName));
+
+    // Add, rename, drop column with presence of a partial index. Check for these cases -
+    //   1. Indexed col - Drop (fails), rename
+    //   2. Col in predicate - Drop (fails), rename
+    //   3. New col - Add, rename, drop
+    createIndex(String.format("CREATE INDEX idx ON %s(v1) WHERE v2 != NULL", testTableName),
+                true /* strongConsistency */);
+    waitForReadPermsOnAllIndexes(testTableName);
+
     runInvalidStmt(String.format("alter table %s drop v1", testTableName),
-      "Can't drop column used in an index. Remove 'idx' index first and try again");
+                   "Can't drop column used in an index. Remove 'idx' index first and try again");
+    session.execute(String.format("alter table %s rename v1 to v11", testTableName));
+    session.execute(String.format("alter table %s rename v11 to v1", testTableName));
+
+    runInvalidStmt(String.format("alter table %s drop v2", testTableName),
+                   "Can't drop column used in an index. Remove 'idx' index first and try again");
+    session.execute(String.format("alter table %s rename v2 to v22", testTableName));
+    session.execute(String.format("alter table %s rename v22 to v2", testTableName));
+
+    session.execute(String.format("alter table %s add v3 int", testTableName));
+    session.execute(String.format("alter table %s rename v3 to v33", testTableName));
+    session.execute(String.format("alter table %s rename v33 to v3", testTableName));
+    session.execute(String.format("alter table %s drop v3", testTableName));
+
+    // Add, rename, drop column with presence of a non-partial index. Check for these cases -
+    //   1. Indexed col - Drop (fails), rename
+    //   2. Non-indexed col - Rename, drop, re-add
+    // #10364 - In case of a non-partial index, if we tried to drop a column that wasn't in the
+    // index, it resulted in seg fault.
+    session.execute("drop index idx");
+    createIndex(String.format("CREATE INDEX idx ON %s(v1)", testTableName),
+                true /* strongConsistency */);
+    waitForReadPermsOnAllIndexes(testTableName);
+    runInvalidStmt(String.format("alter table %s drop v1", testTableName),
+                   "Can't drop column used in an index. Remove 'idx' index first and try again");
+    session.execute(String.format("alter table %s rename v1 to v11", testTableName));
+    session.execute(String.format("alter table %s rename v11 to v1", testTableName));
+
+    session.execute(String.format("alter table %s rename v2 to v22", testTableName));
+    session.execute(String.format("alter table %s rename v22 to v2", testTableName));
+    session.execute(String.format("alter table %s drop v2", testTableName));
+    session.execute(String.format("alter table %s add v2 int", testTableName));
   }
 
   @Test
@@ -2639,6 +2668,7 @@ public class TestPartialIndex extends BaseCQLTest {
       String.format("create table test (k int primary key, v int)"), true /* strongConsistency */);
     session.execute("create index idx on test(v) where v != NULL");
     session.execute("create index idx2 on test(v) where v = NULL");
+    waitForReadPermsOnAllIndexes("test");
     session.execute("insert into test (k, v) values (1, 1)");
     assertQueryRowsUnordered("select * from test where v != NULL",
                              "Row[1, 1]");
@@ -2675,6 +2705,7 @@ public class TestPartialIndex extends BaseCQLTest {
             "v4 > -9223372036854775807 and v4 < 9223372036854775806 and " +
         "v5 >= -9999999999999999999 and v5 <= 9999999999999999999 and v5 > 1 and v5 < 2 and " +
         "v6 = true and v7 != 'hello';");
+    waitForReadPermsOnAllIndexes("test");
     assertQueryRowsUnordered("select options from system_schema.indexes where index_name = 'idx'",
         "Row[{target=r1, h1, predicate=v1 >= -128 AND v1 <= 127 AND v1 > -127 AND v1 < 126 AND " +
           "v2 >= -32768 AND v2 <= 32767 AND v2 > -32767 AND v2 < 3276 AND " +

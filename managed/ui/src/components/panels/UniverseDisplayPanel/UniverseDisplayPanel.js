@@ -4,21 +4,23 @@ import React, { Component } from 'react';
 import { Link } from 'react-router';
 import { Row, Col } from 'react-bootstrap';
 import { isFinite } from 'lodash';
+
 import { YBLoading } from '../../common/indicators';
 import { getPromiseState } from '../../../utils/PromiseUtils';
 import { YBCost, DescriptionItem } from '../../../components/common/descriptors';
 import { UniverseStatusContainer } from '../../../components/universes';
-import './UniverseDisplayPanel.scss';
 import { isNonEmptyObject } from '../../../utils/ObjectUtils';
 import { YBButton } from '../../common/forms/fields';
 import {
   getPrimaryCluster,
-  getReadOnlyCluster,
   getClusterProviderUUIDs,
-  getProviderMetadata
+  getProviderMetadata,
+  getUniverseNodeCount
 } from '../../../utils/UniverseUtils';
 import { isNotHidden, isDisabled } from '../../../utils/LayoutUtils';
-import moment from 'moment';
+import { TimestampWithTimezone } from '../../common/timestampWithTimezone/TimestampWithTimezone';
+
+import './UniverseDisplayPanel.scss';
 
 class CTAButton extends Component {
   render() {
@@ -47,7 +49,6 @@ class UniverseDisplayItem extends Component {
     if (!isNonEmptyObject(primaryCluster) || !isNonEmptyObject(primaryCluster.userIntent)) {
       return <span />;
     }
-    const readOnlyCluster = getReadOnlyCluster(universe.universeDetails.clusters);
     const clusterProviderUUIDs = getClusterProviderUUIDs(universe.universeDetails.clusters);
     const clusterProviders = providers.data.filter((p) => clusterProviderUUIDs.includes(p.uuid));
     const replicationFactor = <span>{`${primaryCluster.userIntent.replicationFactor}`}</span>;
@@ -55,18 +56,25 @@ class UniverseDisplayItem extends Component {
       return getProviderMetadata(provider).name;
     });
     const universeProviderText = universeProviders.join(', ');
-    let nodeCount = primaryCluster.userIntent.numNodes;
-    if (isNonEmptyObject(readOnlyCluster)) {
-      nodeCount += readOnlyCluster.userIntent.numNodes;
-    }
+
+    const nodeCount = getUniverseNodeCount(universe.universeDetails.nodeDetailsSet);
+    const isPricingKnown = universe.resources?.pricingKnown;
+    const pricePerHour = universe.pricePerHour;
     const numNodes = <span>{nodeCount}</span>;
     let costPerMonth = <span>n/a</span>;
-    if (isFinite(universe.pricePerHour)) {
-      costPerMonth = <YBCost value={universe.pricePerHour} multiplier={'month'} />;
+    if (isFinite(pricePerHour)) {
+      costPerMonth = <YBCost
+        value={pricePerHour}
+        multiplier={'month'}
+        isPricingKnown={isPricingKnown}
+      />;
     }
-    const universeCreationDate = universe.creationDate
-      ? moment(universe.creationDate).format('MM/DD/YYYY')
-      : '';
+    const universeCreationDate = universe.creationDate ? (
+      <TimestampWithTimezone timeFormat="MM/DD/YYYY" timestamp={universe.creationDate} />
+    ) : (
+      ''
+    );
+
     return (
       <Col sm={4} md={3} lg={2}>
         <Link to={'/universes/' + universe.universeUUID}>
@@ -75,6 +83,7 @@ class UniverseDisplayItem extends Component {
               <UniverseStatusContainer
                 currentUniverse={universe}
                 refreshUniverseData={refreshUniverseData}
+                shouldDisplayTaskButton={false}
               />
             </div>
             <div className="display-name">{universe.name}</div>

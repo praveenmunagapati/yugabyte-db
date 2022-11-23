@@ -145,8 +145,9 @@ public class AssertHelper {
     assertEquals(expectedMessage, ybpSuccess.message);
   }
 
+  /** If using @Transactional you will have to use assertPlatformExceptionInTransaction */
   public static Result assertPlatformException(ThrowingRunnable runnable) {
-    return assertThrows(PlatformServiceException.class, runnable).getResult();
+    return assertThrows(PlatformServiceException.class, runnable).buildResult();
   }
 
   public static Metric assertMetricValue(

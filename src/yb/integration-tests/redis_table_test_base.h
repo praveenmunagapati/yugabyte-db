@@ -11,12 +11,10 @@
 // under the License.
 //
 
-#ifndef YB_INTEGRATION_TESTS_REDIS_TABLE_TEST_BASE_H_
-#define YB_INTEGRATION_TESTS_REDIS_TABLE_TEST_BASE_H_
+#pragma once
 
 #include <string>
 
-#include "yb/yql/redis/redisserver/redis_parser.h"
 #include "yb/integration-tests/yb_table_test_base.h"
 
 namespace yb {
@@ -42,5 +40,3 @@ class RedisTableTestBase : public YBTableTestBase {
 
 }  // namespace integration_tests
 }  // namespace yb
-
-#endif  // YB_INTEGRATION_TESTS_REDIS_TABLE_TEST_BASE_H_

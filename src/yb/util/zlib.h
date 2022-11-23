@@ -14,13 +14,12 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-#ifndef YB_UTIL_ZLIB_H
-#define YB_UTIL_ZLIB_H
+#pragma once
 
 #include <iosfwd>
 
 #include "yb/util/slice.h"
-#include "yb/util/status.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 namespace zlib {
@@ -42,5 +41,3 @@ Status Uncompress(const Slice& compressed, std::ostream* out);
 
 } // namespace zlib
 } // namespace yb
-
-#endif /* YB_UTIL_ZLIB_H */

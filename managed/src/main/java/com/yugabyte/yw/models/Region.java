@@ -15,6 +15,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonManagedReference;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.yugabyte.yw.cloud.PublicCloudConstants.Architecture;
 import com.yugabyte.yw.common.PlatformServiceException;
 import com.yugabyte.yw.models.helpers.ProviderAndRegion;
 import io.ebean.Ebean;
@@ -63,14 +64,14 @@ public class Region extends Model {
   @ApiModelProperty(
       value = "Cloud provider region code",
       example = "us-west-2",
-      accessMode = READ_ONLY)
+      accessMode = READ_WRITE)
   public String code;
 
   @Column(length = 100, nullable = false)
   @ApiModelProperty(
       value = "Cloud provider region name",
       example = "US West (Oregon)",
-      accessMode = READ_WRITE)
+      accessMode = READ_ONLY)
   public String name;
 
   @ApiModelProperty(
@@ -100,12 +101,12 @@ public class Region extends Model {
   @JsonManagedReference("region-zones")
   public List<AvailabilityZone> zones;
 
+  @ApiModelProperty(accessMode = READ_ONLY)
   @Column(nullable = false, columnDefinition = "boolean default true")
-  public Boolean active = true;
+  private Boolean active = true;
 
-  @JsonIgnore
-  public Boolean isActive() {
-    return active;
+  public boolean isActive() {
+    return active == null || active;
   }
 
   @JsonIgnore
@@ -117,6 +118,7 @@ public class Region extends Model {
 
     public String sg_id; // Security group ID.
     public String vnet; // Vnet key.
+    public Architecture arch; // ybImage architecture.
   }
 
   @DbJson
@@ -129,7 +131,6 @@ public class Region extends Model {
       details = new RegionDetails();
     }
     details.sg_id = securityGroupId;
-    save();
   }
 
   @ApiModelProperty(required = false)
@@ -146,7 +147,6 @@ public class Region extends Model {
       details = new RegionDetails();
     }
     details.vnet = vnetName;
-    save();
   }
 
   @ApiModelProperty(required = false)
@@ -158,13 +158,28 @@ public class Region extends Model {
     return null;
   }
 
+  public void setArchitecture(Architecture arch) {
+    if (details == null) {
+      details = new RegionDetails();
+    }
+    details.arch = arch;
+  }
+
+  @ApiModelProperty(required = false)
+  public Architecture getArchitecture() {
+    if (details != null) {
+      return details.arch;
+    }
+    return null;
+  }
+
   @DbJson
   @Column(columnDefinition = "TEXT")
   private Map<String, String> config;
 
   @JsonProperty("config")
   public void setConfig(Map<String, String> configMap) {
-    Map<String, String> currConfig = this.getConfig();
+    Map<String, String> currConfig = this.getUnmaskedConfig();
     for (String key : configMap.keySet()) {
       currConfig.put(key, configMap.get(key));
     }
@@ -173,11 +188,11 @@ public class Region extends Model {
 
   @JsonProperty("config")
   public Map<String, String> getMaskedConfig() {
-    return maskConfigNew(getConfig());
+    return maskConfigNew(getUnmaskedConfig());
   }
 
   @JsonIgnore
-  public Map<String, String> getConfig() {
+  public Map<String, String> getUnmaskedConfig() {
     if (this.config == null) {
       return new HashMap<>();
     } else {
@@ -232,6 +247,10 @@ public class Region extends Model {
   @Deprecated()
   public static Region get(UUID regionUUID) {
     return find.query().fetch("provider").where().idEq(regionUUID).findOne();
+  }
+
+  public static List<Region> findByUuids(Collection<UUID> uuids) {
+    return Region.find.query().where().idIn(uuids).findList();
   }
 
   public static Region getByCode(Provider provider, String code) {

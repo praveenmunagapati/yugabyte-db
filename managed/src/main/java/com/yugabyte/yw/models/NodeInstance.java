@@ -20,14 +20,23 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.UUID;
 import javax.persistence.Column;
 import javax.persistence.Entity;
 import javax.persistence.Id;
+import lombok.AccessLevel;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
+import lombok.Setter;
+import org.apache.commons.collections.CollectionUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import play.libs.Json;
 
+@Data
+@EqualsAndHashCode(callSuper = false)
 @Entity
 @ApiModel(description = "A single node instance, attached to a provider and availability zone")
 public class NodeInstance extends Model {
@@ -35,44 +44,36 @@ public class NodeInstance extends Model {
 
   @Id
   @ApiModelProperty(value = "The node's UUID", accessMode = READ_ONLY)
-  public UUID nodeUuid;
+  private UUID nodeUuid;
 
   @Column
   @ApiModelProperty(value = "The node's type code", example = "c5large")
-  public String instanceTypeCode;
+  private String instanceTypeCode;
 
   @Column(nullable = false)
   @ApiModelProperty(value = "The node's name", example = "India node")
   private String nodeName;
 
-  public String getNodeName() {
-    return nodeName;
-  }
-
-  public void setNodeName(String name) {
-    nodeName = name;
-    // This parses the JSON if first time accessing details.
-    NodeInstanceData details = getDetails();
-    details.nodeName = name;
-    setDetails(details);
-  }
-
   @Column(nullable = false)
   @ApiModelProperty(value = "The node instance's name", example = "Mumbai instance")
-  public String instanceName;
+  private String instanceName;
 
   @Column(nullable = false)
   @ApiModelProperty(value = "The availability zone's UUID")
-  public UUID zoneUuid;
+  private UUID zoneUuid;
 
   @Column(nullable = false)
   @ApiModelProperty(value = "True if the node is in use")
-  public boolean inUse;
+  private boolean inUse;
 
+  @Getter(AccessLevel.NONE)
+  @Setter(AccessLevel.NONE)
   @Column(nullable = false)
   @ApiModelProperty(value = "Node details (as a JSON object)")
   private String nodeDetailsJson;
 
+  @Getter(AccessLevel.NONE)
+  @Setter(AccessLevel.NONE)
   // Preserving the details into a structured class.
   @ApiModelProperty(value = "Node details")
   private NodeInstanceData nodeDetails;
@@ -88,9 +89,18 @@ public class NodeInstance extends Model {
     }
     return nodeDetails;
   }
+
+  public void setNodeName(String name) {
+    nodeName = name;
+    // This parses the JSON if first time accessing details.
+    NodeInstanceData details = getDetails();
+    details.nodeName = name;
+    setDetails(details);
+  }
+
   // Method sets node name to empty string and inUse to false and persists the value
   public void clearNodeDetails() {
-    this.inUse = false;
+    this.setInUse(false);
     this.setNodeName("");
     this.save();
   }
@@ -168,7 +178,7 @@ public class NodeInstance extends Model {
         int index = 0;
         for (String nodeName : nodeNames) {
           NodeInstance node = nodes.get(index);
-          node.inUse = true;
+          node.setInUse(true);
           node.setNodeName(nodeName);
           outputMap.put(nodeName, node);
           ++index;
@@ -208,17 +218,28 @@ public class NodeInstance extends Model {
   // TODO: this is a temporary hack until we manage to plumb through the node UUID through the task
   // framework.
   public static NodeInstance getByName(String name) {
+    return maybeGetByName(name)
+        .orElseThrow(() -> new RuntimeException("Expecting to find a node with name: " + name));
+  }
+
+  public static Optional<NodeInstance> maybeGetByName(String name) {
     List<NodeInstance> nodes = NodeInstance.find.query().where().eq("node_name", name).findList();
-    if (nodes == null || nodes.size() != 1) {
+    if (CollectionUtils.isEmpty(nodes)) {
+      return Optional.empty();
+    }
+    if (nodes.size() > 1) {
       throw new RuntimeException("Expecting to find a single node with name: " + name);
     }
-    return nodes.get(0);
+    return Optional.of(nodes.get(0));
+  }
+
+  public static List<NodeInstance> getAll() {
+    return NodeInstance.find.all();
   }
 
   public static NodeInstance create(UUID zoneUuid, NodeInstanceData formData) {
     NodeInstance node = new NodeInstance();
     node.zoneUuid = zoneUuid;
-    node.inUse = false;
     node.instanceTypeCode = formData.instanceType;
     String instanceName = formData.instanceName;
     if (instanceName == null) instanceName = "";

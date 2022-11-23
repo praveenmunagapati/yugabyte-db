@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_MUTEX_H
-#define YB_UTIL_MUTEX_H
+#pragma once
 
 #include <pthread.h>
 #include <sys/types.h>
@@ -82,7 +81,7 @@ class Mutex {
 
   // All private data is implicitly protected by native_handle_.
   // Be VERY careful to only access members under that lock.
-  pid_t owning_tid_;
+  uint64_t owning_tid_;
   std::unique_ptr<StackTrace> stack_trace_;
 #endif
 
@@ -152,4 +151,3 @@ class MutexLock {
 };
 
 } // namespace yb
-#endif /* YB_UTIL_MUTEX_H */

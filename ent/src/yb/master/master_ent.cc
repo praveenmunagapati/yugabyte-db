@@ -20,10 +20,11 @@
 #include "yb/server/hybrid_clock.h"
 #include "yb/server/secure.h"
 
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/ntp_clock.h"
+#include "yb/util/result.h"
 
-DEFINE_int32(master_backup_svc_queue_length, 50,
+DEFINE_UNKNOWN_int32(master_backup_svc_queue_length, 50,
              "RPC queue length for master backup service");
 TAG_FLAG(master_backup_svc_queue_length, advanced);
 
@@ -57,21 +58,29 @@ Status Master::RegisterServices() {
 
 Status Master::SetupMessengerBuilder(rpc::MessengerBuilder* builder) {
   RETURN_NOT_OK(super::SetupMessengerBuilder(builder));
-  if (!FLAGS_cert_node_filename.empty()) {
-    secure_context_ = VERIFY_RESULT(server::SetupSecureContext(
-        server::DefaultRootDir(*fs_manager_),
-        FLAGS_cert_node_filename,
-        server::SecureContextType::kInternal,
-        builder));
-  } else {
-    const string &hosts = !options_.server_broadcast_addresses.empty()
-                        ? options_.server_broadcast_addresses
-                        : options_.rpc_opts.rpc_bind_addresses;
-    secure_context_ = VERIFY_RESULT(server::SetupSecureContext(
-        hosts, *fs_manager_, server::SecureContextType::kInternal, builder));
-  }
+
+  secure_context_ = VERIFY_RESULT(
+      server::SetupInternalSecureContext(options_.HostsString(), *fs_manager_, builder));
 
   return Status::OK();
+}
+
+Status Master::ReloadKeysAndCertificates() {
+  if (!secure_context_) {
+    return Status::OK();
+  }
+
+  return server::ReloadSecureContextKeysAndCertificates(
+        secure_context_.get(),
+        fs_manager_->GetDefaultRootDir(),
+        server::SecureContextType::kInternal,
+        options_.HostsString());
+}
+
+std::string Master::GetCertificateDetails() {
+  if(!secure_context_) return "";
+
+  return secure_context_.get()->GetCertificateDetails();
 }
 
 } // namespace enterprise

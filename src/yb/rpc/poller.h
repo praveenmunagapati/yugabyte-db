@@ -11,18 +11,16 @@
 // under the License.
 //
 
-#ifndef YB_RPC_POLLER_H
-#define YB_RPC_POLLER_H
+#pragma once
 
 #include <condition_variable>
-#include <mutex>
-
-#include "yb/rpc/rpc_fwd.h"
 
 #include "yb/gutil/thread_annotations.h"
 
+#include "yb/rpc/rpc_fwd.h"
+
+#include "yb/util/status_fwd.h"
 #include "yb/util/monotime.h"
-#include "yb/util/status.h"
 
 namespace yb {
 namespace rpc {
@@ -64,5 +62,3 @@ class Poller {
 
 } // namespace rpc
 } // namespace yb
-
-#endif // YB_RPC_POLLER_H

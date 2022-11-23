@@ -12,7 +12,18 @@
 //
 
 #include "yb/client/snapshot_test_util.h"
+
 #include "yb/client/client_fwd.h"
+#include "yb/client/table.h"
+
+#include "yb/common/common_fwd.h"
+#include "yb/common/wire_protocol.h"
+
+#include "yb/rpc/rpc_controller.h"
+
+#include "yb/util/backoff_waiter.h"
+#include "yb/util/format.h"
+#include "yb/util/status_format.h"
 
 using namespace std::literals;
 
@@ -45,18 +56,21 @@ Result<Snapshots> SnapshotTestUtil::ListSnapshots(
   if (!snapshot_id.IsNil()) {
     req.set_snapshot_id(snapshot_id.data(), snapshot_id.size());
   }
+  auto options = req.mutable_detail_options();
+  options->set_show_namespace_details(true);
+  options->set_show_udtype_details(true);
+  options->set_show_table_details(true);
+  options->set_show_tablet_details(true);
 
   rpc::RpcController controller;
   controller.set_timeout(60s);
   RETURN_NOT_OK(VERIFY_RESULT(MakeBackupServiceProxy()).ListSnapshots(req, &resp, &controller));
-  if (resp.has_error()) {
-    return StatusFromPB(resp.error().status());
-  }
+  RETURN_NOT_OK(ResponseStatus(resp));
   LOG(INFO) << "Snapshots: " << resp.ShortDebugString();
   return std::move(resp.snapshots());
 }
 
-CHECKED_STATUS SnapshotTestUtil::VerifySnapshot(
+Status SnapshotTestUtil::VerifySnapshot(
     const TxnSnapshotId& snapshot_id, master::SysSnapshotEntryPB::State state,
     size_t expected_num_tablets, size_t expected_num_namespaces, size_t expected_num_tables) {
   auto snapshots = VERIFY_RESULT(ListSnapshots());
@@ -77,19 +91,19 @@ CHECKED_STATUS SnapshotTestUtil::VerifySnapshot(
   size_t num_namespaces = 0, num_tables = 0, num_tablets = 0;
   for (const auto& entry : snapshot.entry().entries()) {
     switch (entry.type()) {
-      case master::SysRowEntry::TABLET:
+      case master::SysRowEntryType::TABLET:
         ++num_tablets;
         break;
-      case master::SysRowEntry::TABLE:
+      case master::SysRowEntryType::TABLE:
         ++num_tables;
         break;
-      case master::SysRowEntry::NAMESPACE:
+      case master::SysRowEntryType::NAMESPACE:
         ++num_namespaces;
         break;
       default:
         return STATUS_FORMAT(
             IllegalState, "Unexpected entry type: $0",
-            master::SysRowEntry::Type_Name(entry.type()));
+            master::SysRowEntryType_Name(entry.type()));
     }
   }
   SCHECK_EQ(num_namespaces, expected_num_namespaces, IllegalState,
@@ -101,7 +115,7 @@ CHECKED_STATUS SnapshotTestUtil::VerifySnapshot(
   return Status::OK();
 }
 
-CHECKED_STATUS SnapshotTestUtil::WaitSnapshotInState(
+Status SnapshotTestUtil::WaitSnapshotInState(
     const TxnSnapshotId& snapshot_id, master::SysSnapshotEntryPB::State state,
     MonoDelta duration) {
   auto state_name = master::SysSnapshotEntryPB::State_Name(state);
@@ -119,7 +133,7 @@ CHECKED_STATUS SnapshotTestUtil::WaitSnapshotInState(
   return status;
 }
 
-CHECKED_STATUS SnapshotTestUtil::WaitSnapshotDone(
+Status SnapshotTestUtil::WaitSnapshotDone(
     const TxnSnapshotId& snapshot_id, MonoDelta duration) {
   return WaitSnapshotInState(snapshot_id, master::SysSnapshotEntryPB::COMPLETE, duration);
 }
@@ -136,6 +150,7 @@ Result<TxnSnapshotRestorationId> SnapshotTestUtil::StartRestoration(
     req.set_restore_ht(restore_at.ToUint64());
   }
   RETURN_NOT_OK(VERIFY_RESULT(MakeBackupServiceProxy()).RestoreSnapshot(req, &resp, &controller));
+  RETURN_NOT_OK(ResponseStatus(resp));
   return FullyDecodeTxnSnapshotRestorationId(resp.restoration_id());
 }
 
@@ -184,6 +199,7 @@ Result<TxnSnapshotId> SnapshotTestUtil::StartSnapshot(const TableHandle& table) 
   id->set_table_id(table.table()->id());
   master::CreateSnapshotResponsePB resp;
   RETURN_NOT_OK(VERIFY_RESULT(MakeBackupServiceProxy()).CreateSnapshot(req, &resp, &controller));
+  RETURN_NOT_OK(ResponseStatus(resp));
   return FullyDecodeTxnSnapshotId(resp.snapshot_id());
 }
 
@@ -193,7 +209,7 @@ Result<TxnSnapshotId> SnapshotTestUtil::CreateSnapshot(const TableHandle& table)
   return snapshot_id;
 }
 
-CHECKED_STATUS SnapshotTestUtil::DeleteSnapshot(const TxnSnapshotId& snapshot_id) {
+Status SnapshotTestUtil::DeleteSnapshot(const TxnSnapshotId& snapshot_id) {
   master::DeleteSnapshotRequestPB req;
   master::DeleteSnapshotResponsePB resp;
 
@@ -201,13 +217,11 @@ CHECKED_STATUS SnapshotTestUtil::DeleteSnapshot(const TxnSnapshotId& snapshot_id
   controller.set_timeout(60s);
   req.set_snapshot_id(snapshot_id.data(), snapshot_id.size());
   RETURN_NOT_OK(VERIFY_RESULT(MakeBackupServiceProxy()).DeleteSnapshot(req, &resp, &controller));
-  if (resp.has_error()) {
-    return StatusFromPB(resp.error().status());
-  }
+  RETURN_NOT_OK(ResponseStatus(resp));
   return Status::OK();
 }
 
-CHECKED_STATUS SnapshotTestUtil::WaitAllSnapshotsDeleted() {
+Status SnapshotTestUtil::WaitAllSnapshotsDeleted() {
   RETURN_NOT_OK(WaitFor([this]() -> Result<bool> {
     auto snapshots = VERIFY_RESULT(ListSnapshots());
     SCHECK_EQ(snapshots.size(), 1, IllegalState, "Wrong number of snapshots");
@@ -221,7 +235,7 @@ CHECKED_STATUS SnapshotTestUtil::WaitAllSnapshotsDeleted() {
   return Status::OK();
 }
 
-CHECKED_STATUS SnapshotTestUtil::WaitAllSnapshotsCleaned() {
+Status SnapshotTestUtil::WaitAllSnapshotsCleaned() {
   return WaitFor([this]() -> Result<bool> {
     return VERIFY_RESULT(ListSnapshots()).empty();
   }, kWaitTimeout * kTimeMultiplier, "Snapshot cleanup");
@@ -238,23 +252,26 @@ Result<ImportedSnapshotData> SnapshotTestUtil::StartImportSnapshot(
 
   RETURN_NOT_OK(
       VERIFY_RESULT(MakeBackupServiceProxy()).ImportSnapshotMeta(req, &resp, &controller));
-  if (resp.has_error()) {
-    return StatusFromPB(resp.error().status());
-  }
-
+  RETURN_NOT_OK(ResponseStatus(resp));
   LOG(INFO) << "Imported snapshot metadata: " << resp.DebugString();
-
   return resp.tables_meta();
 }
 
 Result<SnapshotScheduleId> SnapshotTestUtil::CreateSchedule(
-    const TableHandle& table, MonoDelta interval, MonoDelta retention) {
-  return CreateSchedule(table, WaitSnapshot::kFalse, interval, retention);
+    const TableHandle& table, const YQLDatabase db_type, const std::string& db_name,
+    const MonoDelta interval, const MonoDelta retention) {
+  return CreateSchedule(table, db_type, db_name, WaitSnapshot::kFalse, interval, retention);
 }
 
 Result<SnapshotScheduleId> SnapshotTestUtil::CreateSchedule(
-    const TableHandle& table, WaitSnapshot wait_snapshot,
-    MonoDelta interval, MonoDelta retention) {
+    const TableHandle& table, const YQLDatabase db_type, const std::string& db_name,
+    const WaitSnapshot wait_snapshot, const MonoDelta interval, const MonoDelta retention) {
+  return CreateSchedule(table.table(), db_type, db_name, wait_snapshot, interval, retention);
+}
+
+Result<SnapshotScheduleId> SnapshotTestUtil::CreateSchedule(
+    const YBTablePtr table, const YQLDatabase db_type, const std::string& db_name,
+    const WaitSnapshot wait_snapshot, const MonoDelta interval, const MonoDelta retention) {
   rpc::RpcController controller;
   controller.set_timeout(60s);
   master::CreateSnapshotScheduleRequestPB req;
@@ -262,13 +279,45 @@ Result<SnapshotScheduleId> SnapshotTestUtil::CreateSchedule(
   options.set_interval_sec(interval.ToSeconds());
   options.set_retention_duration_sec(retention.ToSeconds());
   auto& tables = *options.mutable_filter()->mutable_tables()->mutable_tables();
-  tables.Add()->set_table_id(table.table()->id());
+  master::TableIdentifierPB* table_identifier = tables.Add();
+  if (table != nullptr) {
+    table_identifier->set_table_id(table->id());
+  }
+  master::NamespaceIdentifierPB* namespace_identifier = table_identifier->mutable_namespace_();
+  namespace_identifier->set_database_type(db_type);
+  namespace_identifier->set_name(db_name);
+  master::CreateSnapshotScheduleResponsePB resp;
+  RETURN_NOT_OK(
+      VERIFY_RESULT(MakeBackupServiceProxy()).CreateSnapshotSchedule(req, &resp, &controller));
+  RETURN_NOT_OK(ResponseStatus(resp));
+  auto id = VERIFY_RESULT(FullyDecodeSnapshotScheduleId(resp.snapshot_schedule_id()));
+  if (wait_snapshot) {
+    RETURN_NOT_OK(WaitScheduleSnapshot(id));
+  }
+  return id;
+}
+
+Result<SnapshotScheduleId> SnapshotTestUtil::CreateSchedule(
+    const NamespaceName& namespace_name, WaitSnapshot wait_snapshot,
+    MonoDelta interval, MonoDelta retention) {
+
+  rpc::RpcController controller;
+  controller.set_timeout(60s);
+  master::CreateSnapshotScheduleRequestPB req;
+  auto& options = *req.mutable_options();
+  options.set_interval_sec(interval.ToSeconds());
+  options.set_retention_duration_sec(retention.ToSeconds());
+  auto& tables = *options.mutable_filter()->mutable_tables()->mutable_tables();
+  auto* ns = tables.Add()->mutable_namespace_();
+  ns->set_name(namespace_name);
+  ns->set_database_type(YQLDatabase::YQL_DATABASE_PGSQL);
   master::CreateSnapshotScheduleResponsePB resp;
   RETURN_NOT_OK(
       VERIFY_RESULT(MakeBackupServiceProxy()).CreateSnapshotSchedule(req, &resp, &controller));
   auto id = VERIFY_RESULT(FullyDecodeSnapshotScheduleId(resp.snapshot_schedule_id()));
   if (wait_snapshot) {
-    RETURN_NOT_OK(WaitScheduleSnapshot(id));
+    RETURN_NOT_OK(WaitScheduleSnapshot(id, std::numeric_limits<int>::max(),
+        HybridTime::kMin, 60s * kTimeMultiplier));
   }
   return id;
 }
@@ -285,9 +334,7 @@ Result<Schedules> SnapshotTestUtil::ListSchedules(const SnapshotScheduleId& id) 
   controller.set_timeout(60s);
   RETURN_NOT_OK(
       VERIFY_RESULT(MakeBackupServiceProxy()).ListSnapshotSchedules(req, &resp, &controller));
-  if (resp.has_error()) {
-    return StatusFromPB(resp.error().status());
-  }
+  RETURN_NOT_OK(ResponseStatus(resp));
   LOG(INFO) << "Schedules: " << resp.ShortDebugString();
   return std::move(resp.schedules());
 }
@@ -311,14 +358,20 @@ Result<TxnSnapshotId> SnapshotTestUtil::PickSuitableSnapshot(
   return STATUS_FORMAT(NotFound, "Not found suitable snapshot for $0", hybrid_time);
 }
 
-CHECKED_STATUS SnapshotTestUtil::WaitScheduleSnapshot(
+Status SnapshotTestUtil::WaitScheduleSnapshot(
     const SnapshotScheduleId& schedule_id, HybridTime min_hybrid_time) {
   return WaitScheduleSnapshot(schedule_id, std::numeric_limits<int>::max(), min_hybrid_time);
 }
 
-CHECKED_STATUS SnapshotTestUtil::WaitScheduleSnapshot(
+Status SnapshotTestUtil::WaitScheduleSnapshot(
+    const SnapshotScheduleId& schedule_id, int max_snapshots, HybridTime min_hybrid_time) {
+  return WaitScheduleSnapshot(schedule_id, max_snapshots, min_hybrid_time,
+      ((max_snapshots == 1) ? 0s : kSnapshotInterval) + kSnapshotInterval / 2);
+}
+
+Status SnapshotTestUtil::WaitScheduleSnapshot(
     const SnapshotScheduleId& schedule_id, int max_snapshots,
-    HybridTime min_hybrid_time) {
+    HybridTime min_hybrid_time, MonoDelta timeout) {
   return WaitFor([this, schedule_id, max_snapshots, min_hybrid_time]() -> Result<bool> {
     auto snapshots = VERIFY_RESULT(ListSnapshots());
     EXPECT_LE(snapshots.size(), max_snapshots);
@@ -332,7 +385,7 @@ CHECKED_STATUS SnapshotTestUtil::WaitScheduleSnapshot(
     }
       return false;
     },
-    ((max_snapshots == 1) ? 0s : kSnapshotInterval) + kSnapshotInterval / 2,
+    timeout,
     "Schedule snapshot");
 }
 

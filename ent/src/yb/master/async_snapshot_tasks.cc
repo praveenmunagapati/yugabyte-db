@@ -17,15 +17,16 @@
 #include "yb/common/transaction_error.h"
 #include "yb/common/wire_protocol.h"
 
+#include "yb/master/catalog_entity_info.h"
+#include "yb/master/catalog_manager_if.h"
 #include "yb/master/master.h"
 #include "yb/master/ts_descriptor.h"
-#include "yb/master/catalog_manager.h"
 
 #include "yb/rpc/messenger.h"
 
 #include "yb/tserver/backup.proxy.h"
 
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/format.h"
 #include "yb/util/logging.h"
 
@@ -53,10 +54,9 @@ AsyncTabletSnapshotOp::AsyncTabletSnapshotOp(Master *master,
                                              const scoped_refptr<TabletInfo>& tablet,
                                              const string& snapshot_id,
                                              tserver::TabletSnapshotOpRequestPB::Operation op)
-  : enterprise::RetryingTSRpcTask(master,
-                                  callback_pool,
-                                  new PickLeaderReplica(tablet),
-                                  tablet->table().get()),
+  : RetryingTSRpcTask(
+        master, callback_pool, std::make_unique<PickLeaderReplica>(tablet), tablet->table().get(),
+        /* async_task_throttler */ nullptr),
     tablet_(tablet),
     snapshot_id_(snapshot_id),
     operation_(op) {
@@ -105,7 +105,7 @@ void AsyncTabletSnapshotOp::HandleResponse(int attempt) {
     VLOG_WITH_PREFIX(1) << "Complete";
   }
 
-  if (state() != MonitoredTaskState::kComplete) {
+  if (state() != server::MonitoredTaskState::kComplete) {
     VLOG_WITH_PREFIX(1) << "TabletSnapshotOp task is not completed";
     return;
   }
@@ -173,6 +173,12 @@ bool AsyncTabletSnapshotOp::SendRequest(int attempt) {
     *req.mutable_indexes() = indexes_;
     req.set_hide(hide_);
   }
+
+  *req.mutable_colocated_tables_metadata() = colocated_tables_metadata_;
+
+  if (db_oid_) {
+    req.set_db_oid(*db_oid_);
+  }
   req.set_propagated_hybrid_time(master_->clock()->Now().ToUint64());
 
   ts_backup_proxy_->TabletSnapshotOpAsync(req, &resp_, &rpc_, BindRpcCallback());
@@ -205,6 +211,15 @@ void AsyncTabletSnapshotOp::SetMetadata(const SysTablesEntryPB& pb) {
   schema_version_ = pb.version();
   schema_ = pb.schema();
   indexes_ = pb.indexes();
+}
+
+void AsyncTabletSnapshotOp::SetColocatedTableMetadata(
+    const TableId& table_id, const SysTablesEntryPB& pb) {
+  auto* metadata = colocated_tables_metadata_.Add();
+  metadata->set_schema_version(pb.version());
+  *metadata->mutable_schema() = pb.schema();
+  *metadata->mutable_indexes() = pb.indexes();
+  metadata->set_table_id(table_id);
 }
 
 } // namespace master

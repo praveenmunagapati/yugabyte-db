@@ -22,11 +22,13 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "yb/rocksdb/db/db_test_util.h"
+#include "yb/rocksdb/db/job_context.h"
 #include "yb/rocksdb/port/stack_trace.h"
 #include "yb/rocksdb/sst_file_manager.h"
 #include "yb/rocksdb/util/sst_file_manager_impl.h"
-#include "yb/rocksdb/util/statistics.h"
 #include "yb/rocksdb/util/sync_point.h"
+
+#include "yb/util/test_macros.h"
 
 namespace rocksdb {
 
@@ -114,7 +116,6 @@ TEST_F(DBTest, DontDeletePendingOutputsDuringConcurrentFlushes) {
   purge_thread.join();
 }
 
-#ifndef ROCKSDB_LITE
 TEST_F(DBTest, DontDeleteMovedFile) {
   // This test triggers move compaction and verifies that the file is not
   // deleted when it's part of move compaction
@@ -219,7 +220,7 @@ TEST_F(DBTest, DeleteObsoleteFilesPendingOutputs) {
   std::vector<LiveFileMetaData> metadata;
   db_->GetLiveFilesMetaData(&metadata);
   ASSERT_EQ(metadata.size(), 1U);
-  auto file_on_L2 = metadata[0].name;
+  auto file_on_L2 = metadata[0].Name();
   listener->SetExpectedFileName(dbname_ + file_on_L2);
 
   ASSERT_OK(dbfull()->TEST_CompactRange(3, nullptr, nullptr, nullptr,
@@ -240,7 +241,6 @@ TEST_F(DBTest, DeleteObsoleteFilesPendingOutputs) {
   ASSERT_TRUE(env_->FileExists(dbname_ + file_on_L2).IsNotFound());
   listener->VerifyMatchedCount(1);
 }
-#endif  // ROCKSDB_LITE
 
 TEST_F(DBTest, DBWithSstFileManager) {
   std::shared_ptr<SstFileManager> sst_file_manager(ASSERT_RESULT(NewSstFileManager(env_)));
@@ -306,7 +306,6 @@ TEST_F(DBTest, DBWithSstFileManager) {
   rocksdb::SyncPoint::GetInstance()->DisableProcessing();
 }
 
-#ifndef ROCKSDB_LITE
 TEST_F(DBTest, RateLimitedDelete) {
   rocksdb::SyncPoint::GetInstance()->LoadDependency({
       {"DBTest::RateLimitedDelete:1", "DeleteScheduler::BackgroundEmptyTrash"},
@@ -471,7 +470,6 @@ TEST_F(DBTest, DestroyDBWithRateLimitedDelete) {
   // We have deleted the 4*2 sst files in the delete_scheduler
   ASSERT_EQ(bg_delete_file, 8);
 }
-#endif  // ROCKSDB_LITE
 
 TEST_F(DBTest, DBWithMaxSpaceAllowed) {
   std::shared_ptr<SstFileManager> sst_file_manager(ASSERT_RESULT(NewSstFileManager(env_)));
@@ -569,7 +567,6 @@ TEST_F(DBTest, DBWithMaxSpaceAllowedRandomized) {
   ASSERT_GT(reached_max_space_on_compaction, 0);
 }
 
-#ifndef ROCKSDB_LITE
 TEST_F(DBTest, OpenDBWithInfiniteMaxOpenFiles) {
   // Open DB with infinite max open files
   //  - First iteration use 1 thread to open files
@@ -877,7 +874,6 @@ TEST_F(DBTest, GetTotalSstFilesSizeVersionsFilesShared) {
   }
 }
 
-#endif  // ROCKSDB_LITE
 
 // 1 Create some SST files by inserting K-V pairs into DB
 // 2 Close DB and change suffix from ".sst" to ".ldb" for every other SST file

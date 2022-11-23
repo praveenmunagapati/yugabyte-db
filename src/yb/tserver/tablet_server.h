@@ -29,40 +29,51 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_TSERVER_TABLET_SERVER_H_
-#define YB_TSERVER_TABLET_SERVER_H_
+#pragma once
 
+#include <future>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "yb/consensus/metadata.pb.h"
+#include "yb/cdc/cdc_consumer.fwd.h"
 #include "yb/client/client_fwd.h"
+
+#include "yb/encryption/encryption_fwd.h"
+
 #include "yb/gutil/atomicops.h"
 #include "yb/gutil/macros.h"
-#include "yb/master/master.h"
+#include "yb/master/master_fwd.h"
 #include "yb/server/webserver_options.h"
 #include "yb/tserver/db_server_base.h"
 #include "yb/tserver/tserver_shared_mem.h"
 #include "yb/tserver/tablet_server_interface.h"
 #include "yb/tserver/tablet_server_options.h"
-#include "yb/tserver/tserver.pb.h"
-#include "yb/tserver/tserver_service.proxy.h"
+#include "yb/tserver/xcluster_safe_time_map.h"
+
+#include "yb/util/locks.h"
 #include "yb/util/net/net_util.h"
 #include "yb/util/net/sockaddr.h"
-#include "yb/util/status.h"
-#include "yb/tserver/tablet_service.h"
-#include "yb/master/master.pb.h"
+#include "yb/util/status_fwd.h"
 
 namespace rocksdb {
 class Env;
 }
 
 namespace yb {
+
 class Env;
 class MaintenanceManager;
+class AutoFlagsManager;
 
 namespace tserver {
+
+namespace enterprise {
+class CDCConsumer;
+}
+class PgClientServiceImpl;
 
 class TabletServer : public DbServerBase, public TabletServerIf {
  public:
@@ -82,18 +93,25 @@ class TabletServer : public DbServerBase, public TabletServerIf {
   // Some initialization tasks are asynchronous, such as the bootstrapping
   // of tablets. Caller can block, waiting for the initialization to fully
   // complete by calling WaitInited().
-  CHECKED_STATUS Init();
+  Status Init() override;
 
-  CHECKED_STATUS GetRegistration(ServerRegistrationPB* reg,
+  virtual Status InitAutoFlags() override;
+
+  Status GetRegistration(ServerRegistrationPB* reg,
     server::RpcOnly rpc_only = server::RpcOnly::kFalse) const override;
 
   // Waits for the tablet server to complete the initialization.
-  CHECKED_STATUS WaitInited();
+  Status WaitInited();
 
-  CHECKED_STATUS Start();
-  virtual void Shutdown();
+  Status Start() override;
+  void Shutdown() override;
 
   std::string ToString() const override;
+
+  uint32_t GetAutoFlagConfigVersion() const override;
+  Status SetAutoFlagConfig(const AutoFlagsConfigPB new_config);
+
+  AutoFlagsConfigPB TEST_GetAutoFlagConfig() const;
 
   TSTabletManager* tablet_manager() override { return tablet_manager_.get(); }
   TabletPeerLookupIf* tablet_peer_lookup() override;
@@ -114,15 +132,15 @@ class TabletServer : public DbServerBase, public TabletServerIf {
     return maintenance_manager_.get();
   }
 
-  int GetCurrentMasterIndex() { return master_config_index_; }
+  int64_t GetCurrentMasterIndex() { return master_config_index_; }
 
-  void SetCurrentMasterIndex(int index) { master_config_index_ = index; }
+  void SetCurrentMasterIndex(int64_t index) { master_config_index_ = index; }
 
   // Update in-memory list of master addresses that this tablet server pings to.
   // If the update is from master leader, we use that list directly. If not, we
   // merge the existing in-memory master list with the provided config list.
-  CHECKED_STATUS UpdateMasterAddresses(const consensus::RaftConfigPB& new_config,
-                                       bool is_master_leader);
+  Status UpdateMasterAddresses(const consensus::RaftConfigPB& new_config,
+                               bool is_master_leader);
 
   server::Clock* Clock() override { return clock(); }
 
@@ -134,21 +152,19 @@ class TabletServer : public DbServerBase, public TabletServerIf {
     return shared_object();
   }
 
-  CHECKED_STATUS PopulateLiveTServers(const master::TSHeartbeatResponsePB& heartbeat_resp);
+  Status PopulateLiveTServers(const master::TSHeartbeatResponsePB& heartbeat_resp);
 
-  CHECKED_STATUS GetLiveTServers(
-      std::vector<master::TSInformationPB> *live_tservers) const {
-    std::lock_guard<simple_spinlock> l(lock_);
-    *live_tservers = live_tservers_;
-    return Status::OK();
-  }
+  Status GetLiveTServers(
+      std::vector<master::TSInformationPB> *live_tservers) const override;
 
-  CHECKED_STATUS GetTabletStatus(const GetTabletStatusRequestPB* req,
-                                 GetTabletStatusResponsePB* resp) const override;
+  Status GetTabletStatus(const GetTabletStatusRequestPB* req,
+                         GetTabletStatusResponsePB* resp) const override;
 
   bool LeaderAndReady(const TabletId& tablet_id, bool allow_stale = false) const override;
 
-  const std::string& permanent_uuid() const { return fs_manager_->uuid(); }
+  const std::string& permanent_uuid() const override { return fs_manager_->uuid(); }
+
+  bool has_faulty_drive() const { return fs_manager_->has_faulty_drive(); }
 
   // Returns the proxy to call this tablet server locally.
   const std::shared_ptr<TabletServerServiceProxy>& proxy() const { return proxy_; }
@@ -159,19 +175,18 @@ class TabletServer : public DbServerBase, public TabletServerIf {
 
   std::string cluster_uuid() const;
 
-  TabletServiceImpl* tablet_server_service();
+  scoped_refptr<Histogram> GetMetricsHistogram(TabletServerServiceRpcMethodIndexes metric);
 
-  scoped_refptr<Histogram> GetMetricsHistogram(TabletServerServiceIf::RpcMetricIndexes metric);
+  const std::shared_ptr<MemTracker>& mem_tracker() const override;
 
-  void SetPublisher(rpc::Publisher service) {
-    publish_service_ptr_.reset(new rpc::Publisher(std::move(service)));
-  }
+  void SetPublisher(rpc::Publisher service) override;
 
   rpc::Publisher* GetPublisher() override {
     return publish_service_ptr_.get();
   }
 
-  void SetYSQLCatalogVersion(uint64_t new_version, uint64_t new_breaking_version);
+  void SetYsqlCatalogVersion(uint64_t new_version, uint64_t new_breaking_version);
+  void SetYsqlDBCatalogVersions(const master::DBCatalogVersionDataPB& db_catalog_version_data);
 
   void get_ysql_catalog_version(uint64_t* current_version,
                                 uint64_t* last_breaking_version) const override {
@@ -184,14 +199,38 @@ class TabletServer : public DbServerBase, public TabletServerIf {
     }
   }
 
+  void get_ysql_db_catalog_version(uint32_t db_oid,
+                                   uint64_t* current_version,
+                                   uint64_t* last_breaking_version) const override {
+    std::lock_guard<simple_spinlock> l(lock_);
+    auto it = ysql_db_catalog_version_map_.find(db_oid);
+    bool not_found = it == ysql_db_catalog_version_map_.end();
+    // If db_oid represents a newly created database, it may not yet exist in
+    // ysql_db_catalog_version_map_ because the latter is updated via tserver to master
+    // heartbeat response which has a delay. Return 0 as if it were a stale version.
+    // Note that even if db_oid is found in ysql_db_catalog_version_map_ the catalog version
+    // can also be stale due to the heartbeat delay.
+    if (current_version) {
+      *current_version = not_found ? 0UL : it->second.current_version;
+    }
+    if (last_breaking_version) {
+      *last_breaking_version = not_found ? 0UL : it->second.last_breaking_version;
+    }
+  }
+
+  Status get_ysql_db_oid_to_cat_version_info_map(
+      tserver::GetTserverCatalogVersionInfoResponsePB* resp) const override;
+
+  void UpdateTransactionTablesVersion(uint64_t new_version);
+
   virtual Env* GetEnv();
 
   virtual rocksdb::Env* GetRocksDBEnv();
 
-  void SetUniverseKeys(const UniverseKeysPB& universe_keys);
+  void SetUniverseKeys(const encryption::UniverseKeysPB& universe_keys);
 
-  virtual CHECKED_STATUS SetUniverseKeyRegistry(
-      const yb::UniverseKeyRegistryPB& universe_key_registry);
+  virtual Status SetUniverseKeyRegistry(
+      const encryption::UniverseKeyRegistryPB& universe_key_registry);
 
   void GetUniverseKeyRegistrySync();
 
@@ -202,7 +241,7 @@ class TabletServer : public DbServerBase, public TabletServerIf {
     return std::numeric_limits<int32_t>::max();
   }
 
-  client::TransactionPool* TransactionPool() override;
+  client::TransactionPool& TransactionPool() override;
 
   const std::shared_future<client::YBClient*>& client_future() const override;
 
@@ -210,18 +249,30 @@ class TabletServer : public DbServerBase, public TabletServerIf {
     return log_prefix_;
   }
 
-  const HostPort pgsql_proxy_bind_address() const { return pgsql_proxy_bind_address_; }
+  const HostPort& pgsql_proxy_bind_address() const { return pgsql_proxy_bind_address_; }
 
   client::LocalTabletFilter CreateLocalTabletFilter() override;
 
+  void RegisterCertificateReloader(CertificateReloader reloader) override {}
+
+  const XClusterSafeTimeMap& GetXClusterSafeTimeMap() const;
+
+  void UpdateXClusterSafeTime(const XClusterNamespaceToSafeTimePBMap& safe_time_map);
+
+  Result<bool> XClusterSafeTimeCaughtUpToCommitHt(
+      const NamespaceId& namespace_id, HybridTime commit_ht) const;
+
  protected:
-  virtual CHECKED_STATUS RegisterServices();
+  virtual Status RegisterServices();
 
   friend class TabletServerTestBase;
 
-  CHECKED_STATUS DisplayRpcIcons(std::stringstream* output) override;
+  Status DisplayRpcIcons(std::stringstream* output) override;
 
-  CHECKED_STATUS ValidateMasterAddressResolution() const;
+  Status ValidateMasterAddressResolution() const;
+
+  MonoDelta default_client_timeout() override;
+  void SetupAsyncClientInit(client::AsyncClientInitialiser* async_client_init) override;
 
   std::atomic<bool> initted_{false};
 
@@ -230,6 +281,8 @@ class TabletServer : public DbServerBase, public TabletServerIf {
 
   // The options passed at construction time, and will be updated if master config changes.
   TabletServerOptions opts_;
+
+  std::unique_ptr<AutoFlagsManager> auto_flags_manager_;
 
   // Manager for tablets which are available on this server.
   std::unique_ptr<TSTabletManager> tablet_manager_;
@@ -254,7 +307,7 @@ class TabletServer : public DbServerBase, public TabletServerIf {
   std::shared_ptr<MaintenanceManager> maintenance_manager_;
 
   // Index at which master sent us the last config
-  int master_config_index_;
+  int64_t master_config_index_;
 
   // List of tservers that are alive from the master's perspective.
   std::vector<master::TSInformationPB> live_tservers_;
@@ -271,10 +324,24 @@ class TabletServer : public DbServerBase, public TabletServerIf {
   // Latest known version from the YSQL catalog (as reported by last heartbeat response).
   uint64_t ysql_catalog_version_ = 0;
   uint64_t ysql_last_breaking_catalog_version_ = 0;
+  tserver::DbOidToCatalogVersionInfoMap ysql_db_catalog_version_map_;
+
+  // If shared memory array db_catalog_versions_ slot is used by a database OID, the
+  // corresponding slot in this boolean array is set to true.
+  std::unique_ptr<std::array<bool, TServerSharedData::kMaxNumDbCatalogVersions>>
+    ysql_db_catalog_version_index_used_;
+
+  // When searching for a free slot in the shared memory array db_catalog_versions_, we start
+  // from this index.
+  int search_starting_index_ = 0;
 
   // An instance to tablet server service. This pointer is no longer valid after RpcAndWebServerBase
   // is shut down.
-  TabletServiceImpl* tablet_server_service_;
+  std::weak_ptr<TabletServiceImpl> tablet_server_service_;
+
+  // An instance to pg client service. This pointer is no longer valid after RpcAndWebServerBase
+  // is shut down.
+  std::weak_ptr<PgClientServiceImpl> pg_client_service_;
 
  private:
   // Auto initialize some of the service flags that are defaulted to -1.
@@ -285,9 +352,12 @@ class TabletServer : public DbServerBase, public TabletServerIf {
   // Bind address of postgres proxy under this tserver.
   HostPort pgsql_proxy_bind_address_;
 
+  XClusterSafeTimeMap xcluster_safe_time_map_;
+
+  PgConfigReloader pg_config_reloader_;
+
   DISALLOW_COPY_AND_ASSIGN(TabletServer);
 };
 
 } // namespace tserver
 } // namespace yb
-#endif // YB_TSERVER_TABLET_SERVER_H_

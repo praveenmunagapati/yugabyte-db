@@ -17,13 +17,16 @@
 
 #include <fstream>
 #include <chrono>
+#include <thread>
 
 #include "yb/server/total_mem_watcher.h"
+#include "yb/util/format.h"
 #include "yb/util/logging.h"
 #include "yb/util/mem_tracker.h"
 #include "yb/util/memory/memory.h"
 #include "yb/util/scope_exit.h"
-#include "yb/util/status.h"
+#include "yb/util/status_format.h"
+#include "yb/util/flags.h"
 
 #ifdef TCMALLOC_ENABLED
 #include <gperftools/malloc_extension.h>
@@ -39,12 +42,12 @@ const int kDefaultMemoryLimitTerminationPercent = 300;
 const int kDefaultMemoryLimitTerminationPercent = 200;
 #endif
 
-DEFINE_int32(memory_limit_termination_threshold_pct, kDefaultMemoryLimitTerminationPercent,
+DEFINE_UNKNOWN_int32(memory_limit_termination_threshold_pct, kDefaultMemoryLimitTerminationPercent,
              "If the RSS (resident set size) of the program reaches this percentage of the "
              "root memory tracker limit, the program will exit. RSS is measured using operating "
              "system means, not the memory allocator. Set to 0 to disable this behavior.");
 
-DEFINE_int32(total_mem_watcher_interval_millis, 1000,
+DEFINE_UNKNOWN_int32(total_mem_watcher_interval_millis, 1000,
              "Interval in milliseconds between checking the total memory usage of the current "
              "process as seen by the operating system, and deciding whether to terminate in case "
              "of excessive memory consumption.");
@@ -152,7 +155,7 @@ class LinuxTotalMemWatcher : public TotalMemWatcher {
     if (rss_termination_limit_bytes_ == 0) {
       return std::string();
     }
-    int64_t non_shared_rss_bytes = (statm_.resident - statm_.shared) * page_size_;
+    size_t non_shared_rss_bytes = (statm_.resident - statm_.shared) * page_size_;
     if (non_shared_rss_bytes <= rss_termination_limit_bytes_) {
       return std::string();
     }

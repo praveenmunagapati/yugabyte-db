@@ -10,8 +10,8 @@ menu:
     identifier: explore-transactions
     parent: explore
     weight: 240
+type: indexpage
 ---
-
 YugabyteDB is a transactional database that supports distributed transactions. A transaction is a sequence of operations performed as a single logical unit of work. A transaction has four key properties - **Atomicity**, **Consistency**, **Isolation** and **Durability** - commonly abbreviated as ACID.
 
 
@@ -38,7 +38,7 @@ The various features are explained in the sections below.
    <div class="col-12 col-md-6 col-lg-12 col-xl-6">
     <a class="section-link icon-offset" href="distributed-transactions-ysql/">
       <div class="head">
-        <div class="icon"><i class="fas fa-sitemap"></i></div>
+        <div class="icon"><i class="fa-solid fa-sitemap"></i></div>
         <div class="title">Distributed Transactions</div>
       </div>
       <div class="body">
@@ -49,7 +49,7 @@ The various features are explained in the sections below.
   <div class="col-12 col-md-6 col-lg-12 col-xl-6">
     <a class="section-link icon-offset" href="isolation-levels/">
       <div class="head">
-        <div class="icon"><i class="fas fa-stream"></i></div>
+        <div class="icon"><i class="fa-solid fa-bars-staggered"></i></div>
         <div class="title">Isolation Levels</div>
       </div>
       <div class="body">
@@ -60,7 +60,7 @@ The various features are explained in the sections below.
   <div class="col-12 col-md-6 col-lg-12 col-xl-6">
     <a class="section-link icon-offset" href="explicit-locking/">
       <div class="head">
-        <div class="icon"><i class="fas fa-lock"></i></div>
+        <div class="icon"><i class="fa-solid fa-lock"></i></div>
         <div class="title">Explicit Locking</div>
       </div>
       <div class="body">
@@ -68,11 +68,11 @@ The various features are explained in the sections below.
       </div>
     </a>
   </div>
-<!-- ADD THIS ONCE READY: 
+<!-- ADD THIS ONCE READY:
   <div class="col-12 col-md-6 col-lg-12 col-xl-6">
     <a class="section-link icon-offset" href="ddl-operations/">
       <div class="head">
-        <div class="icon"><i class="fas fa-table"></i></div>
+        <div class="icon"><i class="fa-solid fa-table"></i></div>
         <div class="title">DDL Operations</div>
       </div>
       <div class="body">
@@ -83,7 +83,7 @@ The various features are explained in the sections below.
   <div class="col-12 col-md-6 col-lg-12 col-xl-6">
     <a class="section-link icon-offset" href="non-transactional-tables/">
       <div class="head">
-        <div class="icon"><i class="fas fa-strikethrough"></i></div>
+        <div class="icon"><i class="fa-solid fa-strikethrough"></i></div>
         <div class="title">Non-Transactional Tables</div>
       </div>
       <div class="body">
@@ -93,4 +93,3 @@ The various features are explained in the sections below.
   </div>
 -->
 </div>
-

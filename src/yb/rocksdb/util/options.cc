@@ -35,6 +35,7 @@
 #include "yb/rocksdb/compaction_filter.h"
 #include "yb/rocksdb/comparator.h"
 #include "yb/rocksdb/env.h"
+#include "yb/rocksdb/filter_policy.h"
 #include "yb/rocksdb/sst_file_manager.h"
 #include "yb/rocksdb/memtablerep.h"
 #include "yb/rocksdb/merge_operator.h"
@@ -94,7 +95,8 @@ ImmutableCFOptions::ImmutableCFOptions(const Options& options)
       mem_tracker(options.mem_tracker),
       block_based_table_mem_tracker(options.block_based_table_mem_tracker),
       iterator_replacer(options.iterator_replacer),
-      compaction_file_filter_factory(options.compaction_file_filter_factory.get()) {}
+      compaction_file_filter_factory(options.compaction_file_filter_factory.get()),
+      priority_thread_pool_metrics(options.priority_thread_pool_metrics) {}
 
 ColumnFamilyOptions::ColumnFamilyOptions()
     : comparator(BytewiseComparator()),
@@ -290,9 +292,7 @@ DBOptions::DBOptions()
       skip_stats_update_on_db_open(false),
       wal_recovery_mode(WALRecoveryMode::kTolerateCorruptedTailRecords),
       row_cache(nullptr),
-#ifndef ROCKSDB_LITE
       wal_filter(nullptr),
-#endif  // ROCKSDB_LITE
       fail_if_options_file_error(false) {
 }
 
@@ -415,10 +415,8 @@ void DBOptions::Dump(Logger* log) const {
       RHEADER(log, "                               Options.row_cache: None");
     }
   RHEADER(log, "                           Options.initial_seqno: %" PRIu64, initial_seqno);
-#ifndef ROCKSDB_LITE
   RHEADER(log, "       Options.wal_filter: %s",
       wal_filter ? wal_filter->Name() : "None");
-#endif  // ROCKDB_LITE
 }  // DBOptions::Dump
 
 void ColumnFamilyOptions::Dump(Logger* log) const {
@@ -618,7 +616,6 @@ Options::PrepareForBulkLoad() {
   return this;
 }
 
-#ifndef ROCKSDB_LITE
 // Optimization functions
 ColumnFamilyOptions* ColumnFamilyOptions::OptimizeForPointLookup(
     uint64_t block_cache_size_mb) {
@@ -687,7 +684,6 @@ DBOptions* DBOptions::IncreaseParallelism(int total_threads) {
   return this;
 }
 
-#endif  // !ROCKSDB_LITE
 
 const ReadOptions ReadOptions::kDefault;
 

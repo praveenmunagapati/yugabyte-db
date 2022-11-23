@@ -14,6 +14,7 @@
 #include "yb/tablet/remove_intents_task.h"
 
 #include "yb/tablet/running_transaction.h"
+#include "yb/tablet/transaction_participant_context.h"
 #include "yb/util/logging.h"
 
 namespace yb {
@@ -26,13 +27,14 @@ RemoveIntentsTask::RemoveIntentsTask(TransactionIntentApplier* applier,
     : applier_(*applier), participant_context_(*participant_context),
       running_transaction_context_(*running_transaction_context), id_(id) {}
 
-bool RemoveIntentsTask::Prepare(RunningTransactionPtr transaction) {
+bool RemoveIntentsTask::Prepare(RunningTransactionPtr transaction, RemoveReason reason) {
   bool expected = false;
   if (!used_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
     return false;
   }
 
   transaction_ = std::move(transaction);
+  reason_ = reason;
   LOG_IF_WITH_PREFIX(DFATAL, transaction_->ProcessingApply())
       << "Remove intents for transaction that is processing apply";
   return true;
@@ -42,10 +44,12 @@ void RemoveIntentsTask::Run() {
   VLOG_WITH_PREFIX(2) << "Remove intents";
 
   RemoveIntentsData data;
-  participant_context_.GetLastReplicatedData(&data);
-  auto status = applier_.RemoveIntents(data, id_);
+  auto status = participant_context_.GetLastReplicatedData(&data);
+  if (status.ok()) {
+    status = applier_.RemoveIntents(data, reason_, id_);
+  }
   LOG_IF_WITH_PREFIX(WARNING, !status.ok())
-      << "Failed to remove intents of aborted transaction : " << status;
+      << "Failed to remove intents of aborted transaction: " << status;
   VLOG_WITH_PREFIX(2) << "Removed intents";
 }
 

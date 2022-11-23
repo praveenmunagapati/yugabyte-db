@@ -30,28 +30,26 @@
 // under the License.
 //
 
-#include <sys/types.h>
-#include <unistd.h>
-
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
-#include <sstream>
 
-#include <boost/assign.hpp>
 #include <google/protobuf/descriptor.pb.h>
 #include <gtest/gtest.h>
 
 #include "yb/util/env_util.h"
 #include "yb/util/memenv/memenv.h"
-#include "yb/util/pb_util.h"
 #include "yb/util/pb_util-internal.h"
+#include "yb/util/pb_util.h"
 #include "yb/util/proto_container_test.pb.h"
 #include "yb/util/proto_container_test2.pb.h"
 #include "yb/util/proto_container_test3.pb.h"
-#include "yb/util/status.h"
-#include "yb/util/test_util.h"
 #include "yb/util/protobuf_util.h"
+#include "yb/util/result.h"
+#include "yb/util/status.h"
+#include "yb/util/test_macros.h"
+#include "yb/util/test_util.h"
 
 namespace yb {
 namespace pb_util {
@@ -483,5 +481,29 @@ TEST_F(TestPBUtil, TestPBRequiredToRepeated) {
   ASSERT_OK(env_->DeleteFile(path_));
 }
 
+TEST_F(TestPBUtil, TestPBRequiredToOptional) {
+  // Write the file with required fields.
+  {
+    TestObjectRequiredPB pb;
+    pb.set_string1(kTestString + "1");
+    pb.set_string2(kTestString + "2");
+    pb.mutable_record()->set_text(kTestString);
+    ASSERT_OK(WritePBContainerToPath(env_.get(), path_, pb, OVERWRITE, SYNC));
+  }
+
+  // Read it back as optional fields, should validate and contain the expected values.
+  TestObjectOptionalPB pb;
+  ASSERT_OK(ReadPBContainerFromPath(env_.get(), path_, &pb));
+  ASSERT_TRUE(pb.has_string1());
+  ASSERT_TRUE(pb.has_string2());
+  ASSERT_TRUE(pb.has_record());
+  ASSERT_TRUE(pb.record().has_text());
+  ASSERT_EQ(kTestString + "1", pb.string1());
+  ASSERT_EQ(kTestString + "2", pb.string2());
+  ASSERT_EQ(kTestString, pb.record().text());
+
+  // Delete the file.
+  ASSERT_OK(env_->DeleteFile(path_));
+}
 } // namespace pb_util
 } // namespace yb

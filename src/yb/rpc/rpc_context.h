@@ -29,15 +29,23 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_RPC_RPC_CONTEXT_H
-#define YB_RPC_RPC_CONTEXT_H
+#pragma once
 
 #include <string>
 
+#include <boost/type_traits/is_detected.hpp>
+
 #include "yb/rpc/rpc_header.pb.h"
+#include "yb/rpc/serialization.h"
 #include "yb/rpc/service_if.h"
+
+#include "yb/util/memory/arena.h"
 #include "yb/util/ref_cnt_buffer.h"
 #include "yb/util/status.h"
+
+#include "yb/util/status_fwd.h"
+#include "yb/util/monotime.h"
+#include "yb/util/net/sockaddr.h"
 
 namespace google {
 namespace protobuf {
@@ -48,16 +56,119 @@ class Message;
 namespace yb {
 
 class Trace;
-
-namespace util {
-
-class RefCntBuffer;
-
-}
+class WriteBuffer;
 
 namespace rpc {
 
 class YBInboundCall;
+
+class RpcCallParams {
+ public:
+  virtual ~RpcCallParams() = default;
+
+  virtual Result<size_t> ParseRequest(Slice param, const RefCntBuffer& buffer) = 0;
+  virtual AnyMessageConstPtr SerializableResponse() = 0;
+};
+
+class RpcCallPBParams : public RpcCallParams {
+ public:
+  Result<size_t> ParseRequest(Slice param, const RefCntBuffer& buffer) override;
+
+  AnyMessageConstPtr SerializableResponse() override;
+
+  virtual google::protobuf::Message& request() = 0;
+  virtual google::protobuf::Message& response() = 0;
+
+  static google::protobuf::Message* CastMessage(const AnyMessagePtr& msg);
+
+  static const google::protobuf::Message* CastMessage(const AnyMessageConstPtr& msg);
+};
+
+template <class Req, class Resp>
+class RpcCallPBParamsImpl : public RpcCallPBParams {
+ public:
+  using RequestType = Req;
+  using ResponseType = Resp;
+
+  RpcCallPBParamsImpl() = default;
+
+  Req& request() override {
+    return req_;
+  }
+
+  Resp& response() override {
+    return resp_;
+  }
+
+ private:
+  Req req_;
+  Resp resp_;
+};
+
+class RpcCallLWParams : public RpcCallParams {
+ public:
+  Result<size_t> ParseRequest(Slice param, const RefCntBuffer& buffer) override;
+  AnyMessageConstPtr SerializableResponse() override;
+
+  virtual LightweightMessage& request() = 0;
+  virtual LightweightMessage& response() = 0;
+
+  static LightweightMessage* CastMessage(const AnyMessagePtr& msg);
+
+  static const LightweightMessage* CastMessage(const AnyMessageConstPtr& msg);
+
+ private:
+  RefCntBuffer buffer_;
+};
+
+template <class Req, class Resp>
+class RpcCallLWParamsImpl : public RpcCallLWParams {
+ public:
+  using RequestType = Req;
+  using ResponseType = Resp;
+
+  Req& request() override {
+    return req_;
+  }
+
+  Resp& response() override {
+    return resp_;
+  }
+
+  RpcCallLWParamsImpl() : req_(&arena_), resp_(&arena_) {}
+
+ private:
+  Arena arena_;
+  Req req_;
+  Resp resp_;
+};
+
+template <class T>
+using MutableErrorDetector = decltype(boost::declval<T&>().mutable_error());
+
+template <bool>
+struct ResponseErrorHelper;
+
+template <>
+struct ResponseErrorHelper<true> {
+  template <class T>
+  static auto Apply(T* t) {
+    return t->mutable_error();
+  }
+};
+
+template <>
+struct ResponseErrorHelper<false> {
+  template <class T>
+  static auto Apply(T* t) {
+    return t->mutable_status();
+  }
+};
+
+template <class T>
+auto ResponseError(T* t) {
+  return ResponseErrorHelper<boost::is_detected_v<MutableErrorDetector, T>>::Apply(t);
+}
 
 // The context provided to a generated ServiceIf. This provides
 // methods to respond to the RPC. In the future, this will also
@@ -70,8 +181,7 @@ class RpcContext {
   // Create an RpcContext. This is called only from generated code
   // and is not a public API.
   RpcContext(std::shared_ptr<YBInboundCall> call,
-             std::shared_ptr<google::protobuf::Message> request_pb,
-             std::shared_ptr<google::protobuf::Message> response_pb);
+             std::shared_ptr<RpcCallParams> params);
   explicit RpcContext(std::shared_ptr<LocalYBInboundCall> call);
 
   RpcContext(RpcContext&& rhs) = default;
@@ -87,6 +197,9 @@ class RpcContext {
 
   // Return the trace buffer for this call.
   Trace* trace();
+
+  // Ensure that this call has a trace associated with it.
+  void EnsureTraceCreated();
 
   // Send a response to the call. The service may call this method
   // before or after returning from the original handler method,
@@ -156,21 +269,29 @@ class RpcContext {
   void RespondApplicationError(int error_ext_id, const std::string& message,
                                const google::protobuf::Message& app_error_pb);
 
-  // Adds an RpcSidecar to the response. This is the preferred method for
-  // transferring large amounts of binary data, because this avoids additional
-  // copies made by serializing the protobuf.
-  //
-  // Assumes no changes to the sidecar's data are made after insertion.
-  //
-  // Returns the index of the sidecar.
-  size_t AddRpcSidecar(const Slice& car);
+  // Start new sidecar, returning WriteBuffer to fill sidecar to.
+  WriteBuffer& StartRpcSidecar();
+
+  // Complete started sidecar, returning sidecar index.
+  size_t CompleteRpcSidecar();
+
+  // Take sidecars from specified buffer, with specified offsets in this buffer.
+  // Returns index of the first taken sidecar.
+  size_t TakeSidecars(
+      WriteBuffer* sidecar_buffer, google::protobuf::RepeatedField<uint32_t>* offsets);
+
+  // Take sidecars from specified buffer, with specified bounds in this buffer.
+  // Returns index of the first taken sidecar.
+  size_t TakeSidecars(
+      const RefCntBuffer& buffer,
+      const boost::container::small_vector_base<const uint8_t*>& sidecar_bounds);
+
+  Slice GetFirstSidecar() const;
+
+  RefCntSlice ExtractSidecar(size_t index) const;
 
   // Removes all RpcSidecars.
   void ResetRpcSidecars();
-
-  // Like in STL reserve preallocates buffer, so adding new sidecars would not allocate memory
-  // up to space bytes.
-  void ReserveSidecarSpace(size_t space);
 
   // Return the remote endpoint which sent the current RPC call.
   const Endpoint& remote_address() const;
@@ -181,15 +302,20 @@ class RpcContext {
   // Suitable for use in log messages.
   std::string requestor_string() const;
 
-  const google::protobuf::Message *request_pb() const { return request_pb_.get(); }
-  google::protobuf::Message *response_pb() const { return response_pb_.get(); }
-
   // Return an upper bound on the client timeout deadline. This does not
   // account for transmission delays between the client and the server.
   // If the client did not specify a deadline, returns MonoTime::Max().
   CoarseTimePoint GetClientDeadline() const;
 
   MonoTime ReceiveTime() const;
+
+  RpcCallParams& params() {
+    return *params_;
+  }
+
+  const std::shared_ptr<RpcCallParams>& shared_params() const {
+    return params_;
+  }
 
   // Panic the server. This logs a fatal error with the given message, and
   // also includes the current RPC request, requestor, trace information, etc,
@@ -209,8 +335,7 @@ class RpcContext {
 
  private:
   std::shared_ptr<YBInboundCall> call_;
-  std::shared_ptr<const google::protobuf::Message> request_pb_;
-  std::shared_ptr<google::protobuf::Message> response_pb_;
+  std::shared_ptr<RpcCallParams> params_;
   bool responded_ = false;
 };
 
@@ -223,4 +348,3 @@ void PanicRpc(RpcContext* context, const char* file, int line_number, const std:
 
 } // namespace rpc
 } // namespace yb
-#endif // YB_RPC_RPC_CONTEXT_H

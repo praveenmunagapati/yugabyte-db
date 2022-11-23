@@ -18,7 +18,6 @@
 // under the License.
 //
 
-#ifndef ROCKSDB_LITE
 
 #ifndef GFLAGS
 #include <cstdio>
@@ -32,7 +31,7 @@ int main() {
 #include <iostream>
 #include <vector>
 
-#include <gflags/gflags.h>
+#include "yb/util/flags.h"
 #include "yb/rocksdb/comparator.h"
 #include "yb/rocksdb/db.h"
 #include "yb/rocksdb/filter_policy.h"
@@ -42,26 +41,30 @@ int main() {
 #include "yb/rocksdb/table.h"
 #include "yb/rocksdb/util/histogram.h"
 #include "yb/rocksdb/util/stop_watch.h"
-#include "yb/util/string_util.h"
 #include "yb/rocksdb/util/testharness.h"
+#include "yb/rocksdb/util/testutil.h"
+
+#include "yb/util/random_util.h"
+#include "yb/util/string_util.h"
+#include "yb/util/test_util.h"
 
 using GFLAGS::ParseCommandLineFlags;
 
-DEFINE_bool(trigger_deadlock, false,
+DEFINE_UNKNOWN_bool(trigger_deadlock, false,
             "issue delete in range scan to trigger PrefixHashMap deadlock");
-DEFINE_int32(bucket_count, 100000, "number of buckets");
-DEFINE_uint64(num_locks, 10001, "number of locks");
-DEFINE_bool(random_prefix, false, "randomize prefix");
-DEFINE_uint64(total_prefixes, 100000, "total number of prefixes");
-DEFINE_uint64(items_per_prefix, 1, "total number of values per prefix");
-DEFINE_int64(write_buffer_size, 33554432, "");
-DEFINE_int32(max_write_buffer_number, 2, "");
-DEFINE_int32(min_write_buffer_number_to_merge, 1, "");
-DEFINE_int32(skiplist_height, 4, "");
-DEFINE_int32(memtable_prefix_bloom_bits, 10000000, "");
-DEFINE_int32(memtable_prefix_bloom_probes, 10, "");
-DEFINE_int32(memtable_prefix_bloom_huge_page_tlb_size, 2 * 1024 * 1024, "");
-DEFINE_int32(value_size, 40, "");
+DEFINE_UNKNOWN_int32(bucket_count, 100000, "number of buckets");
+DEFINE_UNKNOWN_uint64(num_locks, 10001, "number of locks");
+DEFINE_UNKNOWN_bool(random_prefix, false, "randomize prefix");
+DEFINE_UNKNOWN_uint64(total_prefixes, 100000, "total number of prefixes");
+DEFINE_UNKNOWN_uint64(items_per_prefix, 1, "total number of values per prefix");
+DEFINE_UNKNOWN_int64(write_buffer_size, 33554432, "");
+DEFINE_UNKNOWN_int32(max_write_buffer_number, 2, "");
+DEFINE_UNKNOWN_int32(min_write_buffer_number_to_merge, 1, "");
+DEFINE_UNKNOWN_int32(skiplist_height, 4, "");
+DEFINE_UNKNOWN_int32(memtable_prefix_bloom_bits, 10000000, "");
+DEFINE_UNKNOWN_int32(memtable_prefix_bloom_probes, 10, "");
+DEFINE_UNKNOWN_int32(memtable_prefix_bloom_huge_page_tlb_size, 2 * 1024 * 1024, "");
+DEFINE_UNKNOWN_int32(value_size, 40, "");
 
 // Path to the database on file system
 const std::string kDbName = rocksdb::test::TmpDir() + "/prefix_test";
@@ -164,7 +167,7 @@ std::string Get(DB* db, const ReadOptions& read_options, uint64_t prefix,
 }
 }  // namespace
 
-class PrefixTest : public testing::Test {
+class PrefixTest : public RocksDBTest {
  public:
   std::shared_ptr<DB> OpenDb() {
     DB* db;
@@ -250,7 +253,7 @@ TEST_F(PrefixTest, TestResult) {
       std::cout << "*** Mem table: " << options.memtable_factory->Name()
                 << " number of buckets: " << num_buckets
                 << std::endl;
-      DestroyDB(kDbName, Options());
+      ASSERT_OK(DestroyDB(kDbName, Options()));
       auto db = OpenDb();
       WriteOptions write_options;
       ReadOptions read_options;
@@ -423,7 +426,7 @@ TEST_F(PrefixTest, PrefixValid) {
     while (NextOptions(num_buckets)) {
       std::cout << "*** Mem table: " << options.memtable_factory->Name()
                 << " number of buckets: " << num_buckets << std::endl;
-      DestroyDB(kDbName, Options());
+      ASSERT_OK(DestroyDB(kDbName, Options()));
       auto db = OpenDb();
       WriteOptions write_options;
       ReadOptions read_options;
@@ -438,13 +441,14 @@ TEST_F(PrefixTest, PrefixValid) {
       PutKey(db.get(), write_options, 12345, 8, v18);
       PutKey(db.get(), write_options, 12345, 9, v19);
       PutKey(db.get(), write_options, 12346, 8, v16);
-      db->Flush(FlushOptions());
-      db->Delete(write_options, TestKeyToSlice(TestKey(12346, 8)));
-      db->Flush(FlushOptions());
+      ASSERT_OK(db->Flush(FlushOptions()));
+      ASSERT_OK(db->Delete(write_options, TestKeyToSlice(TestKey(12346, 8))));
+      ASSERT_OK(db->Flush(FlushOptions()));
       read_options.prefix_same_as_start = true;
       std::unique_ptr<Iterator> iter(db->NewIterator(read_options));
+      ASSERT_OK(iter->status());
       SeekIterator(iter.get(), 12345, 6);
-      ASSERT_TRUE(iter->Valid());
+      ASSERT_TRUE(iter->Valid()) << "iter->status(): " << iter->status();
       ASSERT_TRUE(v16 == iter->value());
 
       iter->Next();
@@ -469,7 +473,7 @@ TEST_F(PrefixTest, DynamicPrefixIterator) {
   while (NextOptions(FLAGS_bucket_count)) {
     std::cout << "*** Mem table: " << options.memtable_factory->Name()
         << std::endl;
-    DestroyDB(kDbName, Options());
+    ASSERT_OK(DestroyDB(kDbName, Options()));
     auto db = OpenDb();
     WriteOptions write_options;
     ReadOptions read_options;
@@ -480,7 +484,7 @@ TEST_F(PrefixTest, DynamicPrefixIterator) {
     }
 
     if (FLAGS_random_prefix) {
-      std::random_shuffle(prefixes.begin(), prefixes.end());
+      std::shuffle(prefixes.begin(), prefixes.end(), yb::ThreadLocalRandom());
     }
 
     HistogramImpl hist_put_time;
@@ -525,7 +529,7 @@ TEST_F(PrefixTest, DynamicPrefixIterator) {
            iter->Next()) {
         if (FLAGS_trigger_deadlock) {
           std::cout << "Behold the deadlock!\n";
-          db->Delete(write_options, iter->key());
+          ASSERT_OK(db->Delete(write_options, iter->key()));
         }
         total_keys++;
       }
@@ -575,15 +579,3 @@ int main(int argc, char** argv) {
 }
 
 #endif  // GFLAGS
-
-#else
-#include <stdio.h>
-
-int main(int argc, char** argv) {
-  fprintf(stderr,
-          "SKIPPED as HashSkipList and HashLinkList are not supported in "
-          "ROCKSDB_LITE\n");
-  return 0;
-}
-
-#endif  // !ROCKSDB_LITE

@@ -26,14 +26,18 @@
 //   add_dependencies(<ql_bfunc.h included library> yb_bfql)
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_COMMON_QL_BFUNC_H_
-#define YB_COMMON_QL_BFUNC_H_
+#pragma once
+
+#include <vector>
+#include <unordered_set>
+
+#include "yb/bfpg/gen_opcodes.h"
+
+#include "yb/bfql/gen_opcodes.h"
 
 #include "yb/common/common_fwd.h"
 
-#include "yb/util/bfql/gen_opcodes.h"
-#include "yb/util/bfpg/gen_opcodes.h"
-#include "yb/util/status.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 
@@ -45,39 +49,15 @@ namespace yb {
 // - Do not add non-static members to this class as QLBfunc is not meant for creating different
 //   objects with different behaviors. For compability reason, all builtin calls must be processed
 //   the same way across all processes and all releases in YugaByte.
-class QLBfunc {
- public:
-  static Status Exec(bfql::BFOpcode opcode,
-                     const std::vector<std::shared_ptr<QLValue>>& params,
-                     const std::shared_ptr<QLValue>& result);
-
-  static Status Exec(bfql::BFOpcode opcode,
-                     const std::vector<QLValue*>& params,
-                     QLValue *result);
-
-  static Status Exec(bfql::BFOpcode opcode,
-                     std::vector<QLValue> *params,
-                     QLValue *result);
-};
+Status ExecBfunc(
+    bfql::BFOpcode opcode, std::vector<QLValuePB>* params, QLValuePB* result);
 
 //--------------------------------------------------------------------------------------------------
 // PGSQL support
-class PgsqlBfunc {
- public:
-  static Status Exec(bfpg::BFOpcode opcode,
-                     const std::vector<std::shared_ptr<QLValue>>& params,
-                     const std::shared_ptr<QLValue>& result);
+Status ExecBfunc(
+    bfpg::BFOpcode opcode, std::vector<QLValuePB>* params, QLValuePB *result);
 
-  static Status Exec(bfpg::BFOpcode opcode,
-                     const std::vector<QLValue*>& params,
-                     QLValue *result);
-
-  static Status Exec(bfpg::BFOpcode opcode,
-                     std::vector<QLValue> *params,
-                     QLValue *result);
-};
-
+Status ExecBfunc(
+    bfpg::BFOpcode opcode, std::vector<LWQLValuePB*>* params, LWQLValuePB *result);
 
 } // namespace yb
-
-#endif // YB_COMMON_QL_BFUNC_H_

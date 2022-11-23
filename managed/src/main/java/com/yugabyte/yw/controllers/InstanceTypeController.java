@@ -16,9 +16,12 @@ import com.yugabyte.yw.cloud.PublicCloudConstants;
 import com.yugabyte.yw.cloud.PublicCloudConstants.StorageType;
 import com.yugabyte.yw.commissioner.Common;
 import com.yugabyte.yw.common.ConfigHelper;
+import com.yugabyte.yw.common.config.RuntimeConfigFactory;
+import com.yugabyte.yw.forms.InstanceTypeResp;
 import com.yugabyte.yw.forms.PlatformResults;
 import com.yugabyte.yw.forms.PlatformResults.YBPError;
 import com.yugabyte.yw.forms.PlatformResults.YBPSuccess;
+import com.yugabyte.yw.models.Audit;
 import com.yugabyte.yw.models.AvailabilityZone;
 import com.yugabyte.yw.models.InstanceType;
 import com.yugabyte.yw.models.Provider;
@@ -30,6 +33,7 @@ import io.swagger.annotations.ApiOperation;
 import io.swagger.annotations.ApiResponses;
 import io.swagger.annotations.Authorization;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -58,6 +62,8 @@ public class InstanceTypeController extends AuthenticatedController {
     this.cloudAPIFactory = cloudAPIFactory;
   }
 
+  @Inject RuntimeConfigFactory runtimeConfigFactory;
+
   @Inject ConfigHelper configHelper;
 
   /**
@@ -69,7 +75,7 @@ public class InstanceTypeController extends AuthenticatedController {
    */
   @ApiOperation(
       value = "List a provider's instance types",
-      response = InstanceType.class,
+      response = InstanceTypeResp.class,
       responseContainer = "List",
       nickname = "listOfInstanceType")
   @ApiResponses(
@@ -82,9 +88,15 @@ public class InstanceTypeController extends AuthenticatedController {
     Provider provider = Provider.getOrBadRequest(customerUUID, providerUUID);
     Map<String, InstanceType> instanceTypesMap;
     instanceTypesMap =
-        InstanceType.findByProvider(provider, config, configHelper)
+        InstanceType.findByProvider(
+                provider,
+                config,
+                configHelper,
+                runtimeConfigFactory
+                    .forProvider(provider)
+                    .getBoolean("yb.internal.allow_unsupported_instances"))
             .stream()
-            .collect(toMap(InstanceType::getInstanceTypeCode, identity()));
+            .collect(toMap(it -> it.getInstanceTypeCode(), identity()));
 
     return maybeFilterByZoneOfferings(filterByZoneCodes, provider, instanceTypesMap);
   }
@@ -129,12 +141,12 @@ public class InstanceTypeController extends AuthenticatedController {
               "Num instanceTypes excluded {} because they were not offered in selected AZs.",
               instanceTypesMap.size() - filteredInstanceTypes.size());
 
-          return PlatformResults.withData(filteredInstanceTypes);
+          return PlatformResults.withData(convert(filteredInstanceTypes, provider));
         } catch (Exception exception) {
           LOG.warn(
               "There was an error {} talking to {} cloud API or filtering instance types "
                   + "based on per zone offerings for user selected zones: {}. We won't filter.",
-              exception.toString(),
+              exception,
               provider.code,
               filterByZoneCodes);
         }
@@ -142,7 +154,19 @@ public class InstanceTypeController extends AuthenticatedController {
         LOG.info("No Cloud API defined for {}. Skipping filtering by zone.", provider.code);
       }
     }
-    return PlatformResults.withData(instanceTypesMap.values());
+    return PlatformResults.withData(convert(instanceTypesMap.values(), provider));
+  }
+
+  private InstanceTypeResp convert(InstanceType it, Provider provider) {
+    return new InstanceTypeResp()
+        .setInstanceType(it)
+        .setProviderCode(provider.code)
+        .setProviderUuid(provider.uuid);
+  }
+
+  private List<InstanceTypeResp> convert(
+      Collection<InstanceType> instanceTypes, Provider provider) {
+    return instanceTypes.stream().map(it -> convert(it, provider)).collect(Collectors.toList());
   }
 
   /**
@@ -154,7 +178,7 @@ public class InstanceTypeController extends AuthenticatedController {
    */
   @ApiOperation(
       value = "Create an instance type",
-      response = InstanceType.class,
+      response = InstanceTypeResp.class,
       nickname = "createInstanceType")
   @ApiImplicitParams(
       @ApiImplicitParam(
@@ -174,8 +198,14 @@ public class InstanceTypeController extends AuthenticatedController {
             formData.get().numCores,
             formData.get().memSizeGB,
             formData.get().instanceTypeDetails);
-    auditService().createAuditEntry(ctx(), request(), Json.toJson(formData.rawData()));
-    return PlatformResults.withData(it);
+    auditService()
+        .createAuditEntryWithReqBody(
+            ctx(),
+            Audit.TargetType.CloudProvider,
+            providerUUID.toString(),
+            Audit.ActionType.CreateInstanceType,
+            Json.toJson(formData.rawData()));
+    return PlatformResults.withData(convert(it, provider));
   }
 
   /**
@@ -195,7 +225,13 @@ public class InstanceTypeController extends AuthenticatedController {
     InstanceType instanceType = InstanceType.getOrBadRequest(provider.uuid, instanceTypeCode);
     instanceType.setActive(false);
     instanceType.save();
-    auditService().createAuditEntry(ctx(), request());
+    auditService()
+        .createAuditEntryWithReqBody(
+            ctx(),
+            Audit.TargetType.CloudProvider,
+            providerUUID.toString(),
+            Audit.ActionType.DeleteInstanceType,
+            request().body().asJson());
     return YBPSuccess.empty();
   }
 
@@ -209,7 +245,7 @@ public class InstanceTypeController extends AuthenticatedController {
    */
   @ApiOperation(
       value = "Get details of an instance type",
-      response = InstanceType.class,
+      response = InstanceTypeResp.class,
       nickname = "instanceTypeDetail")
   public Result index(UUID customerUUID, UUID providerUUID, String instanceTypeCode) {
     Provider provider = Provider.getOrBadRequest(customerUUID, providerUUID);
@@ -219,7 +255,7 @@ public class InstanceTypeController extends AuthenticatedController {
     if (!provider.code.equals(onprem.toString())) {
       instanceType.instanceTypeDetails.setDefaultMountPaths();
     }
-    return PlatformResults.withData(instanceType);
+    return PlatformResults.withData(convert(instanceType, provider));
   }
 
   /**

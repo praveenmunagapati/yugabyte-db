@@ -11,12 +11,14 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_PHYSICAL_TIME_H
-#define YB_UTIL_PHYSICAL_TIME_H
+#pragma once
+
+#include <functional> // For std::function
+#include <memory>
 
 #include <boost/atomic.hpp>
 
-#include "yb/util/result.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 
@@ -26,9 +28,7 @@ struct PhysicalTime {
   MicrosTime time_point;
   MicrosTime max_error;
 
-  std::string ToString() const {
-    return Format("{ time_point: $0 max_error: $1 }", time_point, max_error);
-  }
+  std::string ToString() const;
 };
 
 class PhysicalClock {
@@ -71,5 +71,3 @@ const PhysicalClockPtr& AdjTimeClock();
 #endif
 
 } // namespace yb
-
-#endif // YB_UTIL_PHYSICAL_TIME_H

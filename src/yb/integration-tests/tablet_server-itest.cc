@@ -11,11 +11,14 @@
 // under the License.
 //
 
-#include <gflags/gflags.h>
 #include <glog/logging.h>
 
 #include "yb/integration-tests/external_mini_cluster.h"
 #include "yb/integration-tests/ts_itest-base.h"
+
+#include "yb/util/status_log.h"
+
+using std::string;
 
 namespace yb {
 namespace tserver {

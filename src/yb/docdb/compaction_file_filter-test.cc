@@ -10,20 +10,34 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#include "yb/docdb/compaction_file_filter.h"
+
 #include <cstddef>
-#include <future>
 #include <memory>
+#include <random>
+#include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "yb/common/common_fwd.h"
-#include "yb/docdb/doc_ttl_util.h"
-#include "yb/docdb/docdb_compaction_filter.h"
-#include "yb/docdb/docdb_test_util.h"
-#include "yb/docdb/consensus_frontier.h"
-#include "yb/rocksdb/compaction_filter.h"
-#include "yb/util/monotime.h"
+#include "yb/common/schema.h"
 
+#include "yb/docdb/compaction_file_filter.h"
+#include "yb/docdb/consensus_frontier.h"
+#include "yb/docdb/doc_ttl_util.h"
+#include "yb/docdb/docdb_compaction_context.h"
+#include "yb/docdb/primitive_value.h"
+
+#include "yb/rocksdb/compaction_filter.h"
+#include "yb/rocksdb/db/version_edit.h"
+
+#include "yb/util/monotime.h"
+#include "yb/util/strongly_typed_bool.h"
+#include "yb/util/test_macros.h"
+#include "yb/util/test_util.h"
+
+DECLARE_bool(file_expiration_ignore_value_ttl);
+DECLARE_bool(file_expiration_value_ttl_overrides_table_ttl);
 
 namespace yb {
 namespace docdb {
@@ -48,6 +62,8 @@ class ExpirationFilterTest : public YBTest {
     YBTest::SetUp();
     clock_.reset(new server::HybridClock());
     ASSERT_OK(clock_->Init());
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_file_expiration_ignore_value_ttl) = false;
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_file_expiration_value_ttl_overrides_table_ttl) = false;
 
     retention_policy_ = std::make_shared<ManualHistoryRetentionPolicy>();
     retention_policy_->SetHistoryCutoff(HybridTime::kMax);  // no history retention by default
@@ -81,7 +97,7 @@ rocksdb::FileMetaData CreateFile(rocksdb::UserFrontierPtr largest_frontier = nul
 std::vector<rocksdb::FileMetaData*> CreateFilePtrs(
     const std::vector<ConsensusFrontier>& frontiers) {
   auto file_ptrs = std::vector<rocksdb::FileMetaData*>(frontiers.size());
-  for (int i = 0; i < frontiers.size(); i++) {
+  for (size_t i = 0; i < frontiers.size(); i++) {
     file_ptrs[i] = new rocksdb::FileMetaData();
     *file_ptrs[i] = CreateFile(frontiers[i].Clone());
   }
@@ -108,7 +124,7 @@ void ExpirationFilterTest::TestFilterFilesAgainstResults(
     const std::vector<FilterDecision>& expected_results) {
   auto file_ptrs = CreateFilePtrs(frontiers);
   auto filter = filter_factory->CreateCompactionFileFilter(file_ptrs);
-  for(int i = 0; i < file_ptrs.size(); i++) {
+  for(size_t i = 0; i < file_ptrs.size(); i++) {
     auto result = filter->Filter(file_ptrs[i]);
     EXPECT_EQ(result, expected_results[i]);
   }
@@ -143,7 +159,7 @@ TEST_F(ExpirationFilterTest, TestExpirationNoTableTTL) {
   const auto future_time = current_time.AddSeconds(1000);
   const auto past_time = 1000_usec_ht;
   // Use maximum table TTL
-  const MonoDelta table_ttl_sec = Value::kMaxTtl;
+  const MonoDelta table_ttl_sec = ValueControlFields::kMaxTtl;
   // Check 1: File with maximum hybrid time and value non-expiration. (keep)
   auto expiry = ExpirationTime{kNoExpiration, HybridTime::kMax};
   EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time), false);
@@ -171,6 +187,26 @@ TEST_F(ExpirationFilterTest, TestExpirationNoTableTTL) {
   // Check 7: File with invalid TTL expiration time. (keep)
   expiry = ExpirationTime{HybridTime::kInvalid, past_time};
   EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time), false);
+
+  // Check 8: File with invalid TTL expiration time, but use table TTL only. (keep)
+  expiry = ExpirationTime{HybridTime::kInvalid, past_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TABLE_ONLY), false);
+
+  // Check 9: File with expired TTL expiration time, but use table TTL only. (keep)
+  expiry = ExpirationTime{past_time, past_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TABLE_ONLY), false);
+
+  // Check 10: File with invalid TTL expiration time, and trusting value TTL. (keep)
+  expiry = ExpirationTime{HybridTime::kInvalid, past_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TRUST_VALUE), false);
+
+  // Check 11: File with "use table" expiration time, and trusting value TTL. (keep)
+  expiry = ExpirationTime{kUseDefaultTTL, past_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TRUST_VALUE), false);
+
+  // Check 12: File with expired TTL expiration time, and trusting value TTL. (discard)
+  expiry = ExpirationTime{past_time, past_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TRUST_VALUE), true);
 }
 
 TEST_F(ExpirationFilterTest, TestExpirationTableTTLThatWillNotExpire) {
@@ -204,6 +240,26 @@ TEST_F(ExpirationFilterTest, TestExpirationTableTTLThatWillNotExpire) {
   // Check 6: File with invalid TTL expiration time. (keep)
   expiry = ExpirationTime{HybridTime::kInvalid, key_time};
   EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time), false);
+
+  // Check 7: File with invalid TTL expiration time, but use table TTL only. (keep)
+  expiry = ExpirationTime{HybridTime::kInvalid, key_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TABLE_ONLY), false);
+
+  // Check 8: File with expired TTL expiration time, but use table TTL only. (keep)
+  expiry = ExpirationTime{key_time, key_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TABLE_ONLY), false);
+
+  // Check 9: File with invalid TTL expiration time, and trusting value TTL. (keep)
+  expiry = ExpirationTime{HybridTime::kInvalid, key_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TRUST_VALUE), false);
+
+  // Check 10: File with "use table" expiration time, and trusting value TTL. (keep)
+  expiry = ExpirationTime{kUseDefaultTTL, key_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TRUST_VALUE), false);
+
+  // Check 11: File with expired TTL expiration time, and trusting value TTL. (discard)
+  expiry = ExpirationTime{current_time.AddSeconds(-1000), key_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TRUST_VALUE), true);
 }
 
 TEST_F(ExpirationFilterTest, TestExpirationTableTTLThatWillExpire) {
@@ -237,6 +293,26 @@ TEST_F(ExpirationFilterTest, TestExpirationTableTTLThatWillExpire) {
   // Check 6: File with invalid TTL expiration time. (keep)
   expiry = ExpirationTime{HybridTime::kInvalid, key_time};
   EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time), false);
+
+  // Check 7: File with invalid TTL expiration time, but use table TTL only. (discard)
+  expiry = ExpirationTime{HybridTime::kInvalid, key_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TABLE_ONLY), true);
+
+  // Check 8: File with non-expired TTL expiration time, but use table TTL only. (discard)
+  expiry = ExpirationTime{current_time.AddSeconds(1000), key_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TABLE_ONLY), true);
+
+  // Check 9: File with invalid TTL expiration time, and trusting value TTL. (keep)
+  expiry = ExpirationTime{HybridTime::kInvalid, key_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TRUST_VALUE), false);
+
+  // Check 10: File with "use table" expiration time, and trusting value TTL. (discard)
+  expiry = ExpirationTime{kUseDefaultTTL, key_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TRUST_VALUE), true);
+
+  // Check 11: File with non-expired TTL expiration time, and trusting value TTL. (keep)
+  expiry = ExpirationTime{current_time.AddSeconds(1000), key_time};
+  EXPECT_EQ(TtlIsExpired(expiry, table_ttl_sec, current_time, EXP_TRUST_VALUE), false);
 }
 
 TEST_F(ExpirationFilterTest, TestFilterBasedOnTableTTLOnlyNoTableTTL) {
@@ -321,6 +397,82 @@ TEST_F(ExpirationFilterTest, TestFilterMixTableAndValueTTL) {
   };
   std::vector<FilterDecision> expected_results {
     FilterDecision::kDiscard, FilterDecision::kKeep, FilterDecision::kKeep, FilterDecision::kKeep
+  };
+  TestFilterFilesAgainstResults(&factory, frontiers, expected_results);
+}
+
+TEST_F(ExpirationFilterTest, TestFilterNoTableTTLWithIgnoreValueTTLFlag) {
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_file_expiration_ignore_value_ttl) = true;
+  DocDBCompactionFileFilterFactory factory =
+      DocDBCompactionFileFilterFactory(retention_policy_, clock_);
+  auto now = clock_->Now();
+  // Test with no default time to live (keep all)
+  std::vector<ConsensusFrontier> frontiers = {
+    CreateConsensusFrontier(now.AddSeconds(-100), kUseDefaultTTL), // keep
+    CreateConsensusFrontier(now.AddSeconds(100), kNoExpiration), // keep
+    CreateConsensusFrontier(now.AddSeconds(-10000), now.AddSeconds(-100)), // keep
+    CreateConsensusFrontier(now.AddSeconds(10000), HybridTime::kInvalid) // keep
+  };
+  std::vector<FilterDecision> expected_results {
+    FilterDecision::kKeep, FilterDecision::kKeep, FilterDecision::kKeep, FilterDecision::kKeep
+  };
+  TestFilterFilesAgainstResults(&factory, frontiers, expected_results);
+}
+
+TEST_F(ExpirationFilterTest, TestFilterMixTableAndValueTTLWithIgnoreValueTTLFlag) {
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_file_expiration_ignore_value_ttl) = true;
+  DocDBCompactionFileFilterFactory factory =
+      DocDBCompactionFileFilterFactory(retention_policy_, clock_);
+  auto now = clock_->Now();
+  SetRetentionPolicy(retention_policy_, MonoDelta::FromSeconds(1)); // set TTL to 1 second
+  std::vector<ConsensusFrontier> frontiers = {
+    // keep (key HT later than kept file)
+    CreateConsensusFrontier(now.AddSeconds(-100), kUseDefaultTTL), // discard
+    CreateConsensusFrontier(now.AddSeconds(-50), kNoExpiration), // discard
+    CreateConsensusFrontier(now.AddSeconds(-20), HybridTime::kInvalid), // discard
+    CreateConsensusFrontier(now.AddSeconds(-10), now.AddSeconds(-10)) // discard
+  };
+  std::vector<FilterDecision> expected_results {
+    FilterDecision::kDiscard, FilterDecision::kDiscard,
+    FilterDecision::kDiscard, FilterDecision::kDiscard
+  };
+  TestFilterFilesAgainstResults(&factory, frontiers, expected_results);
+}
+
+TEST_F(ExpirationFilterTest, TestFilterNoTableTTLWithTrustValueTTLFlag) {
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_file_expiration_value_ttl_overrides_table_ttl) = true;
+  DocDBCompactionFileFilterFactory factory =
+      DocDBCompactionFileFilterFactory(retention_policy_, clock_);
+  auto now = clock_->Now();
+  // Test with no default time to live (keep all)
+  std::vector<ConsensusFrontier> frontiers = {
+    CreateConsensusFrontier(now.AddSeconds(-10), kUseDefaultTTL), // keep
+    CreateConsensusFrontier(now.AddSeconds(100), now.AddSeconds(-100)), // keep (after a kept file)
+    CreateConsensusFrontier(now.AddSeconds(-10000), now.AddSeconds(-100)), // discard
+    CreateConsensusFrontier(now.AddSeconds(-100), HybridTime::kInvalid) // keep
+  };
+  std::vector<FilterDecision> expected_results {
+    FilterDecision::kKeep, FilterDecision::kKeep, FilterDecision::kDiscard, FilterDecision::kKeep
+  };
+  TestFilterFilesAgainstResults(&factory, frontiers, expected_results);
+}
+
+TEST_F(ExpirationFilterTest, TestFilterMixTableAndValueTTLWithTrustValueTTLFlag) {
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_file_expiration_value_ttl_overrides_table_ttl) = true;
+  DocDBCompactionFileFilterFactory factory =
+      DocDBCompactionFileFilterFactory(retention_policy_, clock_);
+  auto now = clock_->Now();
+  SetRetentionPolicy(retention_policy_, MonoDelta::FromSeconds(1)); // set TTL to 1 second
+  std::vector<ConsensusFrontier> frontiers = {
+    // keep (key HT later than kept file)
+    CreateConsensusFrontier(now.AddSeconds(-100), kUseDefaultTTL), // discard
+    CreateConsensusFrontier(now.AddSeconds(50), kNoExpiration), // keep
+    CreateConsensusFrontier(now.AddSeconds(10), now.AddSeconds(-10)), // discard
+    CreateConsensusFrontier(now.AddSeconds(30), now.AddSeconds(10)) // keep
+  };
+  std::vector<FilterDecision> expected_results {
+    FilterDecision::kDiscard, FilterDecision::kKeep,
+    FilterDecision::kDiscard, FilterDecision::kKeep
   };
   TestFilterFilesAgainstResults(&factory, frontiers, expected_results);
 }

@@ -15,13 +15,13 @@
 
 #include "yb/tablet/operations/update_txn_operation.h"
 
-#include "yb/consensus/consensus_round.h"
+#include "yb/consensus/consensus.messages.h"
 
 #include "yb/tablet/tablet.h"
-#include "yb/tablet/tablet_peer.h"
 #include "yb/tablet/transaction_coordinator.h"
+#include "yb/tablet/transaction_participant.h"
 
-#include "yb/util/scope_exit.h"
+#include "yb/util/logging.h"
 
 using namespace std::literals;
 
@@ -29,14 +29,14 @@ namespace yb {
 namespace tablet {
 
 template <>
-void RequestTraits<tserver::TransactionStatePB>::SetAllocatedRequest(
-    consensus::ReplicateMsg* replicate, tserver::TransactionStatePB* request) {
-  replicate->set_allocated_transaction_state(request);
+void RequestTraits<LWTransactionStatePB>::SetAllocatedRequest(
+    consensus::LWReplicateMsg* replicate, LWTransactionStatePB* request) {
+  replicate->ref_transaction_state(request);
 }
 
 template <>
-tserver::TransactionStatePB* RequestTraits<tserver::TransactionStatePB>::MutableRequest(
-    consensus::ReplicateMsg* replicate) {
+LWTransactionStatePB* RequestTraits<LWTransactionStatePB>::MutableRequest(
+    consensus::LWReplicateMsg* replicate) {
   return replicate->mutable_transaction_state();
 }
 
@@ -58,17 +58,19 @@ Status UpdateTxnOperation::DoReplicated(int64_t leader_term, Status* complete_st
         .leader_term = leader_term,
         .state = *request(),
         .op_id = op_id(),
-        .hybrid_time = hybrid_time(),
+        .hybrid_time = request()->has_external_hybrid_time() ?
+            HybridTime(request()->external_hybrid_time()) : hybrid_time(),
         .sealed = request()->sealed(),
         .already_applied_to_regular_db = AlreadyAppliedToRegularDB::kFalse
     };
     return transaction_participant->ProcessReplicated(data);
   } else {
     TransactionCoordinator::ReplicatedData data = {
-        leader_term,
-        *request(),
-        op_id(),
-        hybrid_time()
+        .leader_term = leader_term,
+        .state = *request(),
+        .op_id = op_id(),
+        .hybrid_time = request()->has_external_hybrid_time() ?
+            HybridTime(request()->external_hybrid_time()) : hybrid_time()
     };
     return transaction_coordinator().ProcessReplicated(data);
   }

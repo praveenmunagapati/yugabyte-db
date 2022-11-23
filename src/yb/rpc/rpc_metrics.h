@@ -11,10 +11,9 @@
 // under the License.
 //
 
-#ifndef YB_RPC_RPC_METRICS_H
-#define YB_RPC_RPC_METRICS_H
+#pragma once
 
-#include "yb/util/metrics.h"
+#include "yb/util/metrics_fwd.h"
 
 namespace yb {
 namespace rpc {
@@ -32,5 +31,3 @@ struct RpcMetrics {
 
 } // namespace rpc
 } // namespace yb
-
-#endif // YB_RPC_RPC_METRICS_H

@@ -13,13 +13,15 @@
 
 #include "yb/util/stol_utils.h"
 
+#include <cstring>
+
 using namespace std::placeholders;
 
 namespace yb {
 
 namespace {
 
-CHECKED_STATUS CreateInvalid(Slice input, int err = 0) {
+Status CreateInvalid(Slice input, int err = 0) {
   auto message = Format("$0 is not a valid number", input.ToDebugString());
   if (err != 0) {
     message += ": ";
@@ -28,8 +30,8 @@ CHECKED_STATUS CreateInvalid(Slice input, int err = 0) {
   return STATUS(InvalidArgument, message);
 }
 
-CHECKED_STATUS CheckNotSpace(Slice slice) {
-  if (slice.empty() || isspace(*util::to_char_ptr(slice.data()))) {
+Status CheckNotSpace(Slice slice) {
+  if (slice.empty() || isspace(*slice.cdata())) {
     // disable skip of spaces.
     return CreateInvalid(slice);
   }
@@ -60,6 +62,13 @@ Result<T> CheckedSton(Slice slice, StrToT str_to_t) {
 Result<int64_t> CheckedStoll(Slice slice) {
   return CheckedSton<int64_t>(slice, std::bind(&std::strtoll, _1, _2, 10));
 }
+
+Result<uint64_t> CheckedStoull(Slice slice) {
+  return CheckedSton<uint64_t>(slice, std::bind(&std::strtoull, _1, _2, 10));
+}
+
+Result<int64_t> DoCheckedStol(Slice value, int64_t*) { return CheckedStoll(value); }
+Result<uint64_t> DoCheckedStol(Slice value, uint64_t*) { return CheckedStoull(value); }
 
 Result<long double> CheckedStold(Slice slice) {
   return CheckedSton<long double>(slice, std::strtold);

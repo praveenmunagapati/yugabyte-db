@@ -13,6 +13,7 @@
 
 #include "yb/integration-tests/yb_table_test_base.h"
 
+#include "yb/client/client.h"
 #include "yb/client/session.h"
 #include "yb/client/table.h"
 #include "yb/client/table_creator.h"
@@ -20,15 +21,26 @@
 
 #include "yb/common/ql_value.h"
 
-#include "yb/util/monotime.h"
-#include "yb/yql/redis/redisserver/redis_parser.h"
-#include "yb/yql/redis/redisserver/redis_constants.h"
+#include "yb/master/master_client.proxy.h"
+
+#include "yb/tools/yb-admin_client.h"
+
+#include "yb/tserver/mini_tablet_server.h"
+#include "yb/tserver/tablet_server.h"
+
+#include "yb/util/backoff_waiter.h"
 #include "yb/util/curl_util.h"
+#include "yb/util/monotime.h"
+#include "yb/util/result.h"
+#include "yb/util/status_log.h"
+#include "yb/util/string_util.h"
 
 DECLARE_bool(enable_ysql);
 
 using std::unique_ptr;
 using std::shared_ptr;
+using std::vector;
+using std::string;
 
 namespace yb {
 
@@ -44,14 +56,17 @@ using strings::Substitute;
 
 namespace integration_tests {
 
+YBTableTestBase::~YBTableTestBase() {
+}
+
 const YBTableName YBTableTestBase::kDefaultTableName(
     YQL_DATABASE_CQL, "my_keyspace", "kv-table-test");
 
-int YBTableTestBase::num_masters() {
+size_t YBTableTestBase::num_masters() {
   return kDefaultNumMasters;
 }
 
-int YBTableTestBase::num_tablet_servers() {
+size_t YBTableTestBase::num_tablet_servers() {
   return kDefaultNumTabletServers;
 }
 
@@ -108,11 +123,16 @@ void YBTableTestBase::SetUp() {
 
   Status mini_cluster_status;
   if (use_external_mini_cluster()) {
-    auto opts = ExternalMiniClusterOptions();
-    opts.num_masters = num_masters();
-    opts.master_rpc_ports = master_rpc_ports();
-    opts.num_tablet_servers = num_tablet_servers();
-    opts.enable_ysql = enable_ysql();
+    auto opts = ExternalMiniClusterOptions {
+        .num_masters = num_masters(),
+        .num_tablet_servers = num_tablet_servers(),
+        .num_drives = num_drives(),
+        .master_rpc_ports = master_rpc_ports(),
+        .enable_ysql = enable_ysql(),
+        .extra_tserver_flags = {},
+        .extra_master_flags = {},
+        .cluster_id = {},
+    };
     CustomizeExternalMiniCluster(&opts);
 
     external_mini_cluster_.reset(new ExternalMiniCluster(opts));
@@ -168,7 +188,7 @@ void YBTableTestBase::TearDown() {
 
 vector<uint16_t> YBTableTestBase::master_rpc_ports() {
   vector<uint16_t> master_rpc_ports;
-  for (int i = 0; i < num_masters(); ++i) {
+  for (size_t i = 0; i < num_masters(); ++i) {
     master_rpc_ports.push_back(0);
   }
   return master_rpc_ports;
@@ -251,7 +271,7 @@ void YBTableTestBase::PutKeyValue(YBSession* session, string key, string value) 
   auto insert = table_.NewInsertOp();
   QLAddStringHashValue(insert->mutable_request(), key);
   table_.AddStringColumnValue(insert->mutable_request(), "v", value);
-  ASSERT_OK(session->ApplyAndFlush(insert));
+  ASSERT_OK(session->TEST_ApplyAndFlush(insert));
 }
 
 void YBTableTestBase::PutKeyValue(string key, string value) {
@@ -265,13 +285,6 @@ void YBTableTestBase::RestartCluster() {
   ASSERT_NO_FATALS(OpenTable());
 }
 
-Result<std::shared_ptr<master::MasterServiceProxy>> YBTableTestBase::GetMasterLeaderProxy() {
-  DCHECK(use_external_mini_cluster());
-  int idx;
-  RETURN_NOT_OK(external_mini_cluster_->GetLeaderMasterIndex(&idx));
-  return external_mini_cluster_->master_proxy(idx);
-}
-
 Result<std::vector<uint32_t>> YBTableTestBase::GetTserverLoads(const std::vector<int>& ts_idxs) {
   std::vector<uint32_t> tserver_loads;
   for (const auto& ts_idx : ts_idxs) {
@@ -282,7 +295,7 @@ Result<std::vector<uint32_t>> YBTableTestBase::GetTserverLoads(const std::vector
 }
 
 Result<uint32_t> YBTableTestBase::GetLoadOnTserver(ExternalTabletServer* server) {
-  auto proxy = VERIFY_RESULT(GetMasterLeaderProxy());
+  auto proxy = GetMasterLeaderProxy<master::MasterClientProxy>();
   uint32_t count = 0;
   std::vector<string> replicas;
   // Need to get load from each table.
@@ -300,7 +313,7 @@ Result<uint32_t> YBTableTestBase::GetLoadOnTserver(ExternalTabletServer* server)
 
     rpc::RpcController rpc;
     rpc.set_timeout(MonoDelta::FromMilliseconds(client_rpc_timeout_ms()));
-    RETURN_NOT_OK(proxy->GetTableLocations(req, &resp, &rpc));
+    RETURN_NOT_OK(proxy.GetTableLocations(req, &resp, &rpc));
 
     for (const auto& loc : resp.tablet_locations()) {
       for (const auto& replica : loc.replicas()) {

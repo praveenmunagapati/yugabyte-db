@@ -34,31 +34,41 @@
 #include <string>
 #include <vector>
 
+#include <boost/range/iterator_range.hpp>
+
 #include "yb/client/callbacks.h"
 #include "yb/client/client.h"
+#include "yb/client/error.h"
+#include "yb/client/schema.h"
 #include "yb/client/session.h"
 #include "yb/client/table_handle.h"
 #include "yb/client/yb_op.h"
+#include "yb/client/yb_table_name.h"
+
 #include "yb/gutil/strings/strcat.h"
+
 #include "yb/integration-tests/mini_cluster.h"
 #include "yb/integration-tests/yb_mini_cluster_test_base.h"
-#include "yb/master/mini_master.h"
+
 #include "yb/tserver/mini_tablet_server.h"
+
 #include "yb/util/countdown_latch.h"
 #include "yb/util/curl_util.h"
 #include "yb/util/monotime.h"
+#include "yb/util/status_log.h"
 #include "yb/util/stopwatch.h"
 #include "yb/util/test_macros.h"
 #include "yb/util/test_util.h"
 #include "yb/util/thread.h"
+#include "yb/util/flags.h"
 
 using namespace std::literals;
 
 DECLARE_int32(log_segment_size_mb);
 DECLARE_int32(maintenance_manager_polling_interval_ms);
-DEFINE_int32(mbs_for_flushes_and_rolls, 1, "How many MBs are needed to flush and roll");
-DEFINE_int32(row_count, 2000, "How many rows will be used in this test for the base data");
-DEFINE_int32(seconds_to_run, 4,
+DEFINE_UNKNOWN_int32(mbs_for_flushes_and_rolls, 1, "How many MBs are needed to flush and roll");
+DEFINE_UNKNOWN_int32(row_count, 2000, "How many rows will be used in this test for the base data");
+DEFINE_UNKNOWN_int32(seconds_to_run, 4,
              "How long this test runs for, after inserting the base data, in seconds");
 
 namespace yb {
@@ -76,6 +86,8 @@ using client::YBTable;
 using client::YBTableCreator;
 using client::YBTableName;
 using std::shared_ptr;
+using std::vector;
+using std::string;
 
 // This integration test tries to trigger all the update-related bits while also serving as a
 // foundation for benchmarking. It first inserts 'row_count' rows and then starts two threads,
@@ -189,7 +201,7 @@ void UpdateScanDeltaCompactionTest::InsertBaseData() {
     for (int64_t key = 0; key < FLAGS_row_count; key++) {
       auto insert = table_.NewInsertOp();
       MakeRow(key, 0, insert->mutable_request());
-      ASSERT_OK(session->Apply(insert));
+      session->Apply(insert);
       ASSERT_OK(WaitForLastBatchAndFlush(key, &flush_future, session));
     }
     ASSERT_OK(WaitForLastBatchAndFlush(kSessionBatchSize, &flush_future, session));
@@ -250,7 +262,7 @@ void UpdateScanDeltaCompactionTest::UpdateRows(CountDownLatch* stop_latch) {
       for (int64_t key = 0; key < FLAGS_row_count && stop_latch->count() > 0; key++) {
         auto update = table_.NewUpdateOp();
         MakeRow(key, iteration, update->mutable_request());
-        CHECK_OK(session->Apply(update));
+        session->Apply(update);
         CHECK_OK(WaitForLastBatchAndFlush(key, &flush_future, session));
       }
       CHECK_OK(WaitForLastBatchAndFlush(kSessionBatchSize, &flush_future, session));

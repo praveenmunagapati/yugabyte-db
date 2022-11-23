@@ -14,10 +14,11 @@ import static com.yugabyte.yw.common.ApiUtils.getDefaultUserIntent;
 import static com.yugabyte.yw.common.AssertHelper.assertAuditEntry;
 import static com.yugabyte.yw.common.AssertHelper.assertBadRequest;
 import static com.yugabyte.yw.common.AssertHelper.assertOk;
-import static com.yugabyte.yw.common.AssertHelper.assertValue;
 import static com.yugabyte.yw.common.AssertHelper.assertPlatformException;
+import static com.yugabyte.yw.common.AssertHelper.assertValue;
 import static com.yugabyte.yw.common.FakeApiHelper.doRequestWithAuthToken;
 import static com.yugabyte.yw.common.ModelFactory.createUniverse;
+import static com.yugabyte.yw.common.TestHelper.createTempFile;
 import static org.hamcrest.CoreMatchers.allOf;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.notNullValue;
@@ -38,10 +39,9 @@ import com.yugabyte.yw.controllers.handlers.UniverseCRUDHandler;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.models.Backup;
 import com.yugabyte.yw.models.CertificateInfo;
+import com.yugabyte.yw.common.certmgmt.CertConfigType;
 import com.yugabyte.yw.models.CustomerTask;
 import com.yugabyte.yw.models.Universe;
-
-import java.io.File;
 import java.net.URLEncoder;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -50,22 +50,12 @@ import java.util.UUID;
 import junitparams.JUnitParamsRunner;
 import junitparams.Parameters;
 import org.junit.Test;
-import org.junit.After;
 import org.junit.runner.RunWith;
 import play.libs.Json;
 import play.mvc.Result;
 
 @RunWith(JUnitParamsRunner.class)
 public class UniverseControllerTest extends UniverseControllerTestBase {
-
-  private File certFolder = null;
-
-  @After
-  public void teardown() {
-    if (certFolder != null && certFolder.exists()) {
-      certFolder.delete();
-    }
-  }
 
   @Test
   public void testUniverseTrimFlags() {
@@ -131,9 +121,6 @@ public class UniverseControllerTest extends UniverseControllerTestBase {
   @Test
   public void testUniverseListWithValidUUID() {
     Universe u = createUniverse(customer.getCustomerId());
-    customer.addUniverseUUID(u.universeUUID);
-    customer.save();
-
     Result result = listUniverses();
     assertOk(result);
     JsonNode json = Json.parse(contentAsString(result));
@@ -230,7 +217,12 @@ public class UniverseControllerTest extends UniverseControllerTestBase {
     assertThat(th.getTargetName(), allOf(notNullValue(), equalTo("Test Universe")));
     assertThat(th.getType(), allOf(notNullValue(), equalTo(CustomerTask.TaskType.Delete)));
 
-    assertTrue(customer.getUniverseUUIDs().isEmpty());
+    // TODO FIXME this assert is INVALID because it is on mockCommissioner
+    // which never removes the universe. It was working before because
+    // the customer in memory was never refreshed from the DB. Now that the
+    // universe UUID is not stored in the customer and the getUniverseUUIDs()
+    // makes a call to the DB, this starts failing.
+    // assertTrue(customer.getUniverseUUIDs().isEmpty());
     assertAuditEntry(1, customer.uuid);
   }
 
@@ -276,7 +268,12 @@ public class UniverseControllerTest extends UniverseControllerTestBase {
     assertThat(th.getType(), allOf(notNullValue(), equalTo(CustomerTask.TaskType.Delete)));
     assertNotNull(CustomerTask.findByTaskUUID(randUUID).getCompletionTime());
 
-    assertTrue(customer.getUniverseUUIDs().isEmpty());
+    // TODO FIXME this assert is INVALID because it is on mockCommissioner
+    // which never removes the universe. It was working before because
+    // the customer in memory was never refreshed from the DB. Now that the
+    // universe UUID is not stored in the customer and the getUniverseUUIDs()
+    // makes a call to the DB, this starts failing.
+    // assertTrue(customer.getUniverseUUIDs().isEmpty());
     assertAuditEntry(1, customer.uuid);
   }
 
@@ -296,15 +293,12 @@ public class UniverseControllerTest extends UniverseControllerTestBase {
     String url;
     when(mockCommissioner.submit(any(), any())).thenReturn(fakeTaskUUID);
 
-    String certificate = "certificates/ca.crt";
-    File certFile = new File(certificate);
-    certFile.getParentFile().mkdirs();
+    String certificate = createTempFile("universe_controller_test_ca.crt", "test data");
     CertificateInfo certInfo = null;
     try {
-      certFile.createNewFile();
       certInfo =
           ModelFactory.createCertificateInfo(
-              customer.getUuid(), certificate, CertificateInfo.Type.SelfSigned);
+              customer.getUuid(), certificate, CertConfigType.SelfSigned);
     } catch (Exception e) {
 
     }

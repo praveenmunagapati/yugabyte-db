@@ -18,13 +18,17 @@
 #include <boost/preprocessor/cat.hpp>
 
 #include "yb/client/client.h"
-#include "yb/client/meta_cache.h"
 #include "yb/client/tablet_rpc.h"
 
+#include "yb/common/transaction.h"
+
 #include "yb/rpc/rpc.h"
+#include "yb/rpc/rpc_controller.h"
 
 #include "yb/tserver/tserver_service.pb.h"
 #include "yb/tserver/tserver_service.proxy.h"
+
+#include "yb/util/trace.h"
 
 using namespace std::literals;
 
@@ -39,7 +43,6 @@ class TransactionRpcBase : public rpc::Rpc, public internal::TabletRpc {
                      internal::RemoteTablet* tablet,
                      YBClient* client)
       : rpc::Rpc(deadline, client->messenger(), &client->proxy_cache()),
-        trace_(new Trace),
         invoker_(false /* local_tserver_only */,
                  false /* consistent_prefix */,
                  client,
@@ -85,7 +88,6 @@ class TransactionRpcBase : public rpc::Rpc, public internal::TabletRpc {
                            rpc::RpcController* controller,
                            rpc::ResponseCallback callback) = 0;
 
-  TracePtr trace_;
   internal::TabletInvoker invoker_;
 };
 
@@ -101,6 +103,7 @@ class TransactionRpc : public TransactionRpcBase {
       : TransactionRpcBase(deadline, tablet, client),
         callback_(std::move(callback)) {
     req_.Swap(req);
+    TRACE_TO(trace_, Traits::kName);
   }
 
   virtual ~TransactionRpc() {}
@@ -136,9 +139,15 @@ class TransactionRpc : public TransactionRpcBase {
 void PrepareRequest(...) {}
 
 void PrepareRequest(tserver::UpdateTransactionRequestPB* req) {
-  if (req->state().status() == TransactionStatus::CREATED) {
+  // If this is an external transaction, the transaction id should already be set so don't create
+  // a new one.
+  const auto& state = req->state();
+  if (!state.has_external_hybrid_time() &&
+      state.status() == TransactionStatus::CREATED) {
     auto id = TransactionId::GenerateRandom();
     req->mutable_state()->set_transaction_id(id.data(), id.size());
+  } else {
+    DCHECK(state.has_transaction_id());
   }
 }
 

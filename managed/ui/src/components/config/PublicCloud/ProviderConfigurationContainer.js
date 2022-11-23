@@ -53,17 +53,27 @@ const mapDispatchToProps = (dispatch) => {
           dispatch(fetchCloudMetadata());
           const providerUUID = response.payload.data.uuid;
           dispatch(bootstrapProvider(providerUUID, regionFormVals)).then((boostrapResponse) => {
-            toast.success('Successfully created AWS Provider!');
+
+            if (boostrapResponse.payload.status === 200) {
+              toast.success('AWS Provider creation is in progress!');
+            }
+            else {
+              const errorMessage =
+                response?.payload?.response?.data?.error || response?.payload?.message;
+              toast.error(errorMessage);
+            }
+            
             dispatch(bootstrapProviderResponse(boostrapResponse.payload));
           });
         } else {
-          const errorMessage = response.payload?.response?.data?.error || response.payload.message;
+          const errorMessage =
+            response?.payload?.response?.data?.error || response?.payload?.message;
           toast.error(errorMessage);
         }
       });
     },
 
-    createGCPProvider: (providerName, providerConfig, perRegionMetadata) => {
+    createGCPProvider: (providerName, providerConfig, perRegionMetadata, ntpConfig = {}) => {
       Object.keys(providerConfig).forEach((key) => {
         if (typeof providerConfig[key] === 'string' || providerConfig[key] instanceof String)
           providerConfig[key] = providerConfig[key].trim();
@@ -79,11 +89,16 @@ const mapDispatchToProps = (dispatch) => {
             destVpcId: hostNetwork,
             airGapInstall: providerConfig['airGapInstall'],
             sshPort: providerConfig['sshPort'],
-            perRegionMetadata: perRegionMetadata
+            perRegionMetadata: perRegionMetadata,
+            ...ntpConfig
           };
           dispatch(bootstrapProvider(providerUUID, params)).then((boostrapResponse) => {
             dispatch(bootstrapProviderResponse(boostrapResponse.payload));
           });
+        } else {
+          const errorMessage =
+            response?.payload?.response?.data?.error || response?.payload?.message;
+          toast.error(errorMessage);
         }
       });
     },
@@ -105,6 +120,10 @@ const mapDispatchToProps = (dispatch) => {
           dispatch(bootstrapProvider(providerUUID, regionFormVals)).then((boostrapResponse) => {
             dispatch(bootstrapProviderResponse(boostrapResponse.payload));
           });
+        } else {
+          const errorMessage =
+            response?.payload?.response?.data?.error || response?.payload?.message;
+          toast.error(errorMessage);
         }
       });
     },

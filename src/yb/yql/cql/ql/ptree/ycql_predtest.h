@@ -15,11 +15,11 @@
 // Logic to identify if a YCQL expr => another YCQL expr (i.e., logical implication).
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_CQL_QL_PTREE_YCQL_PREDTEST_H
-#define YB_YQL_CQL_QL_PTREE_YCQL_PREDTEST_H
+#pragma once
 
 #include "yb/yql/cql/ql/ptree/column_arg.h"
-#include "yb/yql/cql/ql/ptree/pt_expr.h"
+
+#include "yb/common/common_fwd.h"
 
 namespace yb {
 namespace ql {
@@ -32,5 +32,3 @@ Result<bool> OpInExpr(const QLExpressionPB& predicate, const ColumnOp& col_op);
 
 }  // namespace ql
 }  // namespace yb
-
-#endif  // YB_YQL_CQL_QL_PTREE_YCQL_PREDTEST_H

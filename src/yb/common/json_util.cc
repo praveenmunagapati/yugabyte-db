@@ -11,16 +11,19 @@
 // under the License.
 //
 
-#include <rapidjson/prettywriter.h>
-#include <rapidjson/stringbuffer.h>
-#include <rapidjson/writer.h>
-
 #include "yb/common/json_util.h"
+
+#include <rapidjson/prettywriter.h>
+
+#include "yb/bfql/bfunc_convert.h"
+
 #include "yb/common/jsonb.h"
 #include "yb/common/ql_value.h"
 
-#include "yb/util/bfql/bfunc_convert.h"
+#include "yb/util/status_format.h"
 #include "yb/util/string_case.h"
+
+using std::string;
 
 namespace yb {
 namespace common {
@@ -164,7 +167,8 @@ Status ConvertQLValuePBToRapidJson(const QLValuePB& ql_value_pb,
       }
     }
     break;
-
+    case QLValuePB::ValueCase::kTupleValue:
+      FALLTHROUGH_INTENDED;
     default:
         return STATUS_SUBSTITUTE(
             QLError, "Unexpected value type: $0", ql_value_pb.ShortDebugString());

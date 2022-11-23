@@ -13,27 +13,54 @@
 
 #include "yb/tablet/tablet_retention_policy.h"
 
+#include <iosfwd>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include "yb/common/common_fwd.h"
 #include "yb/common/schema.h"
+#include "yb/common/snapshot.h"
 #include "yb/common/transaction_error.h"
 
 #include "yb/docdb/doc_ttl_util.h"
 
+#include "yb/gutil/ref_counted.h"
+
+#include "yb/rocksdb/options.h"
+#include "yb/rocksdb/types.h"
+
 #include "yb/server/hybrid_clock.h"
 
-#include "yb/tablet/tablet.h"
+#include "yb/tablet/tablet_fwd.h"
+#include "yb/tablet/tablet_metadata.h"
+
+#include "yb/util/enums.h"
+#include "yb/util/logging.h"
+#include "yb/util/strongly_typed_bool.h"
+#include "yb/util/flags.h"
 
 using namespace std::literals;
+using std::min;
 
-DEFINE_int32(timestamp_history_retention_interval_sec, 900,
+DEFINE_UNKNOWN_int32(timestamp_history_retention_interval_sec, 900,
              "The time interval in seconds to retain DocDB history for. Point-in-time reads at a "
              "hybrid time further than this in the past might not be allowed after a compaction. "
              "Set this to be higher than the expected maximum duration of any single transaction "
              "in your application.");
 
-DEFINE_bool(enable_history_cutoff_propagation, false,
+DEFINE_UNKNOWN_int32(timestamp_syscatalog_history_retention_interval_sec, 4 * 3600,
+    "The time interval in seconds to retain syscatalog history for CDC to read specific schema "
+    "version. Point-in-time reads at a hybrid time further than this in the past might not be "
+    "allowed after a compaction. Set this to be higher than the expected maximum duration of any "
+    "single transaction in your application.");
+
+DEFINE_UNKNOWN_bool(enable_history_cutoff_propagation, false,
             "Should we use history cutoff propagation (true) or calculate it locally (false).");
 
-DEFINE_int32(history_cutoff_propagation_interval_ms, 180000,
+DEFINE_UNKNOWN_int32(history_cutoff_propagation_interval_ms, 180000,
              "History cutoff propagation interval in milliseconds.");
 
 namespace yb {
@@ -73,15 +100,7 @@ HistoryRetentionDirective TabletRetentionPolicy::GetRetentionDirective() {
     }
   }
 
-  std::shared_ptr<ColumnIds> deleted_before_history_cutoff = std::make_shared<ColumnIds>();
-  for (const auto& deleted_col : *metadata_.deleted_cols()) {
-    if (deleted_col.ht < history_cutoff) {
-      deleted_before_history_cutoff->insert(deleted_col.id);
-    }
-  }
-
-  return {history_cutoff, std::move(deleted_before_history_cutoff),
-          TableTTL(*metadata_.schema()),
+  return {history_cutoff, TableTTL(*metadata_.schema()),
           docdb::ShouldRetainDeleteMarkersInMajorCompaction(
               ShouldRetainDeleteMarkersInMajorCompaction())};
 }
@@ -135,10 +154,19 @@ HybridTime TabletRetentionPolicy::HistoryCutoffToPropagate(HybridTime last_write
 HybridTime TabletRetentionPolicy::EffectiveHistoryCutoff() {
   auto retention_delta =
       -ANNOTATE_UNPROTECTED_READ(FLAGS_timestamp_history_retention_interval_sec) * 1s;
+  auto retention_delta_syscatalog =
+      -ANNOTATE_UNPROTECTED_READ(FLAGS_timestamp_syscatalog_history_retention_interval_sec) * 1s;
+  HybridTime allowed_cutoff;
   // We try to garbage-collect history older than current time minus the configured retention
   // interval, but we might not be able to do so if there are still read operations reading at an
   // older snapshot.
-  return SanitizeHistoryCutoff(clock_->Now().AddDelta(retention_delta));
+  allowed_cutoff = SanitizeHistoryCutoff(clock_->Now().AddDelta(retention_delta));
+  if (metadata_.table_id() == kObsoleteShortPrimaryTableId &&
+      retention_delta_syscatalog.count() != 0) {
+    allowed_cutoff = min(
+        allowed_cutoff, SanitizeHistoryCutoff(clock_->Now().AddDelta(retention_delta_syscatalog)));
+  }
+  return allowed_cutoff;
 }
 
 HybridTime TabletRetentionPolicy::SanitizeHistoryCutoff(HybridTime proposed_cutoff) {

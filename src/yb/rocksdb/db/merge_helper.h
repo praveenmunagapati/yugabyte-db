@@ -17,17 +17,18 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_ROCKSDB_DB_MERGE_HELPER_H
-#define YB_ROCKSDB_DB_MERGE_HELPER_H
+#pragma once
 
-#include <deque>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "yb/rocksdb/db/dbformat.h"
-#include "yb/rocksdb/compaction_filter.h"
+#include "yb/rocksdb/db/version_edit.h"
 #include "yb/rocksdb/env.h"
-#include "yb/util/slice.h"
 #include "yb/rocksdb/util/stop_watch.h"
+
+#include "yb/util/slice.h"
 
 namespace rocksdb {
 
@@ -175,5 +176,3 @@ class MergeOutputIterator {
 };
 
 } // namespace rocksdb
-
-#endif  // YB_ROCKSDB_DB_MERGE_HELPER_H

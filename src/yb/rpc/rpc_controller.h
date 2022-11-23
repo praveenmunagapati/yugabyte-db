@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_RPC_RPC_CONTROLLER_H
-#define YB_RPC_RPC_CONTROLLER_H
+#pragma once
 
 #include <memory>
 
@@ -40,21 +39,13 @@
 #include "yb/rpc/rpc_fwd.h"
 #include "yb/util/locks.h"
 #include "yb/util/monotime.h"
-#include "yb/util/status.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 
 namespace rpc {
 
 class ErrorStatusPB;
-
-// Specifies how to run callback for async outbound call.
-YB_DEFINE_ENUM(InvokeCallbackMode,
-    // On reactor thread.
-    (kReactorThread)
-    // On thread pool.
-    (kThreadPoolNormal)
-    (kThreadPoolHigh));
 
 // Controller for managing properties of a single RPC call, on the client side.
 //
@@ -101,9 +92,9 @@ class RpcController {
   // * a network error occurred which caused the connection to be torn
   //   down
   // * the call timed out
-  CHECKED_STATUS status() const;
+  Status status() const;
 
-  CHECKED_STATUS thread_pool_failure() const;
+  Status thread_pool_failure() const;
 
   // If status() returns a RemoteError object, then this function returns
   // the error response provided by the server. Service implementors may
@@ -149,15 +140,15 @@ class RpcController {
   // Return the configured timeout.
   MonoDelta timeout() const;
 
-  // Returns the slice pointing to the i-th sidecar upon success.
-  //
-  // Should only be called if the call's finished, but the controller has not
-  // been Reset().
-  //
-  // May fail if index is invalid.
-  Result<Slice> GetSidecar(int idx) const;
+  // Assign sidecar with specified index to out.
+  Status AssignSidecarTo(int idx, std::string* out) const;
+
+  // Transfer all sidecars to specified context.
+  size_t TransferSidecars(RpcContext* dest);
 
   int32_t call_id() const;
+
+  CallResponsePtr response() const;
 
  private:
   friend class OutboundCall;
@@ -177,5 +168,3 @@ class RpcController {
 
 } // namespace rpc
 } // namespace yb
-
-#endif // YB_RPC_RPC_CONTROLLER_H

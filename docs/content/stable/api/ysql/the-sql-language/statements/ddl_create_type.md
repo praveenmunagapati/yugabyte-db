@@ -7,8 +7,7 @@ menu:
   stable:
     identifier: ddl_create_type
     parent: statements
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 ## Synopsis
@@ -20,13 +19,13 @@ Use the `CREATE TYPE` statement to create a user-defined type in a database.  Th
 <ul class="nav nav-tabs nav-tabs-yb">
   <li >
     <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
+      <i class="fa-solid fa-file-lines" aria-hidden="true"></i>
       Grammar
     </a>
   </li>
   <li>
     <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
+      <i class="fa-solid fa-diagram-project" aria-hidden="true"></i>
       Diagram
     </a>
   </li>
@@ -34,10 +33,10 @@ Use the `CREATE TYPE` statement to create a user-defined type in a database.  Th
 
 <div class="tab-content">
   <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_composite_type,create_enum_type,create_range_type,create_base_type,create_shell_type,composite_type_elem,range_type_option,base_type_option.grammar.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_composite_type,create_enum_type,create_range_type,create_base_type,create_shell_type,composite_type_elem,range_type_option,base_type_option.grammar.md" %}}
   </div>
   <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_composite_type,create_enum_type,create_range_type,create_base_type,create_shell_type,composite_type_elem,range_type_option,base_type_option.diagram.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_composite_type,create_enum_type,create_range_type,create_base_type,create_shell_type,composite_type_elem,range_type_option,base_type_option.diagram.md" %}}
   </div>
 </div>
 

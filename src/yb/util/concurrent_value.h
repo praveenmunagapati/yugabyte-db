@@ -2,22 +2,11 @@
 // Copyright (c) YugaByte, Inc.
 //
 
-#ifndef YB_UTIL_CONCURRENT_VALUE_H
-#define YB_UTIL_CONCURRENT_VALUE_H
+#pragma once
 
 #include <atomic>
 #include <mutex>
 #include <thread>
-
-#if defined(__APPLE__) && __clang_major__ < 8 || YB_ZAPCC
-#define YB_CONCURRENT_VALUE_USE_BOOST_THREAD_SPECIFIC_PTR 1
-#else
-#define YB_CONCURRENT_VALUE_USE_BOOST_THREAD_SPECIFIC_PTR 0
-#endif
-
-#if YB_CONCURRENT_VALUE_USE_BOOST_THREAD_SPECIFIC_PTR
-#include <boost/thread/tss.hpp>
-#endif
 
 #include "yb/util/logging.h"
 
@@ -222,13 +211,6 @@ class URCU {
 
   std::atomic <uint32_t> global_control_word_{1};
   std::mutex mutex_;
-#if YB_CONCURRENT_VALUE_USE_BOOST_THREAD_SPECIFIC_PTR
-  static void CleanupThreadData(URCUThreadData* data) {
-    ThreadList<URCUThreadData>::Instance().Retire(data);
-  }
-
-  static boost::thread_specific_ptr<URCUThreadData> data_;
-#else
   struct CleanupThreadData {
     void operator()(URCUThreadData* data) {
       ThreadList<URCUThreadData>::Instance().Retire(data);
@@ -236,7 +218,6 @@ class URCU {
   };
 
   static thread_local std::unique_ptr<URCUThreadData, CleanupThreadData> data_;
-#endif
 };
 
 // Reference to concurrent value. Provides read access to concurrent value.
@@ -326,5 +307,3 @@ class ConcurrentValue {
 using internal::ConcurrentValue;
 
 } // namespace yb
-
-#endif // YB_UTIL_CONCURRENT_VALUE_H

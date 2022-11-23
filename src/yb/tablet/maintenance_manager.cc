@@ -38,42 +38,42 @@
 #include <string>
 #include <utility>
 
-#include <gflags/gflags.h>
-
 #include "yb/gutil/stringprintf.h"
-#include "yb/gutil/strings/substitute.h"
+
 #include "yb/util/debug/trace_event.h"
 #include "yb/util/debug/trace_logging.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/logging.h"
 #include "yb/util/mem_tracker.h"
 #include "yb/util/metrics.h"
+#include "yb/util/status_log.h"
 #include "yb/util/stopwatch.h"
 #include "yb/util/thread.h"
 #include "yb/util/unique_lock.h"
 
 using std::pair;
 using std::shared_ptr;
+using std::string;
 using strings::Substitute;
 
 using namespace std::literals;
 
-DEFINE_int32(maintenance_manager_num_threads, 1,
+DEFINE_UNKNOWN_int32(maintenance_manager_num_threads, 1,
        "Size of the maintenance manager thread pool. Beyond a value of '1', one thread is "
        "reserved for emergency flushes. For spinning disks, the number of threads should "
        "not be above the number of devices.");
 TAG_FLAG(maintenance_manager_num_threads, stable);
 
-DEFINE_int32(maintenance_manager_polling_interval_ms, 250,
+DEFINE_UNKNOWN_int32(maintenance_manager_polling_interval_ms, 250,
        "Polling interval for the maintenance manager scheduler, "
        "in milliseconds.");
 TAG_FLAG(maintenance_manager_polling_interval_ms, hidden);
 
-DEFINE_int32(maintenance_manager_history_size, 8,
+DEFINE_UNKNOWN_int32(maintenance_manager_history_size, 8,
        "Number of completed operations the manager is keeping track of.");
 TAG_FLAG(maintenance_manager_history_size, hidden);
 
-DEFINE_bool(enable_maintenance_manager, true,
+DEFINE_UNKNOWN_bool(enable_maintenance_manager, true,
        "Enable the maintenance manager, runs compaction and tablet cleaning tasks.");
 TAG_FLAG(enable_maintenance_manager, unsafe);
 
@@ -277,7 +277,7 @@ MaintenanceOp* MaintenanceManager::FindBestOp() {
   MaintenanceOp* most_mem_anchored_op = nullptr;
 
   int64_t most_logs_retained_bytes = 0;
-  int64_t most_logs_retained_bytes_ram_anchored = 0;
+  uint64_t most_logs_retained_bytes_ram_anchored = 0;
   MaintenanceOp* most_logs_retained_bytes_op = nullptr;
 
   double best_perf_improvement = 0;
@@ -335,15 +335,17 @@ MaintenanceOp* MaintenanceManager::FindBestOp() {
   auto soft_limit_exceeded_result = parent_mem_tracker_->AnySoftLimitExceeded(0.0 /* score */);
   if (soft_limit_exceeded_result.exceeded) {
     if (!most_mem_anchored_op) {
-      string msg = StringPrintf("we have exceeded our soft memory limit "
+      string msg = StringPrintf("we have exceeded our soft memory limit for %s "
           "(current capacity is %.2f%%).  However, there are no ops currently "
-          "runnable which would free memory.", soft_limit_exceeded_result.current_capacity_pct);
+          "runnable which would free memory.", soft_limit_exceeded_result.tracker_path.c_str(),
+          soft_limit_exceeded_result.current_capacity_pct);
       YB_LOG_EVERY_N_SECS(INFO, 5) << msg;
       return nullptr;
     }
-    VLOG_AND_TRACE("maintenance", 1) << "we have exceeded our soft memory limit "
-            << "(current capacity is " << soft_limit_exceeded_result.current_capacity_pct << "%). "
-            << "Running the op which anchors the most memory: " << most_mem_anchored_op->name();
+    VLOG_AND_TRACE("maintenance", 1)
+        << "we have exceeded our soft memory limit for " << soft_limit_exceeded_result.tracker_path
+        << " (current capacity is " << soft_limit_exceeded_result.current_capacity_pct << "%). "
+        << "Running the op which anchors the most memory: " << most_mem_anchored_op->name();
     return most_mem_anchored_op;
   }
 
@@ -420,7 +422,8 @@ void MaintenanceManager::GetMaintenanceManagerStatusDump(MaintenanceManagerStatu
     if (!completed_op.name.empty()) {
       MaintenanceManagerStatusPB_CompletedOpPB* completed_pb = out_pb->add_completed_operations();
       completed_pb->set_name(completed_op.name);
-      completed_pb->set_duration_millis(completed_op.duration.ToMilliseconds());
+      completed_pb->set_duration_millis(
+          narrow_cast<int32_t>(completed_op.duration.ToMilliseconds()));
 
       MonoDelta delta(MonoTime::Now().GetDeltaSince(completed_op.start_mono_time));
       completed_pb->set_secs_since_start(delta.ToSeconds());

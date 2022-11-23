@@ -10,16 +10,21 @@
 
 package com.yugabyte.yw.commissioner.tasks;
 
+import com.google.common.collect.Sets;
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
-import com.yugabyte.yw.commissioner.SubTaskGroupQueue;
 import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskGroupType;
+import com.yugabyte.yw.commissioner.tasks.params.NodeTaskParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.forms.UniverseTaskParams;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.helpers.NodeDetails;
+
+import java.util.Collection;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 
@@ -42,9 +47,6 @@ public class PauseUniverse extends UniverseTaskBase {
   @Override
   public void run() {
     try {
-      // Create the task list sequence.
-      subTaskGroupQueue = new SubTaskGroupQueue(userTaskUUID);
-
       // Update the universe DB with the update to be performed and set the
       // 'updateInProgress' flag to prevent other updates from happening.
       Universe universe = lockUniverseForUpdate(-1 /* expectedUniverseVersion */);
@@ -56,34 +58,72 @@ public class PauseUniverse extends UniverseTaskBase {
 
       preTaskActions();
 
-      Set<NodeDetails> tserverNodes = new HashSet<>(universe.getTServers());
+      Map<UUID, UniverseDefinitionTaskParams.Cluster> clusterMap =
+          universe
+              .getUniverseDetails()
+              .clusters
+              .stream()
+              .collect(Collectors.toMap(c -> c.uuid, c -> c));
+
+      Set<NodeDetails> tserverNodes =
+          universe
+              .getTServers()
+              .stream()
+              .filter(tserverNode -> tserverNode.state == NodeDetails.NodeState.Live)
+              .collect(Collectors.toSet());
+      Set<NodeDetails> masterNodes =
+          universe
+              .getMasters()
+              .stream()
+              .filter(masterNode -> masterNode.state == NodeDetails.NodeState.Live)
+              .collect(Collectors.toSet());
+
+      for (NodeDetails node : Sets.union(masterNodes, tserverNodes)) {
+        if (!node.disksAreMountedByUUID) {
+          UniverseDefinitionTaskParams.Cluster cluster = clusterMap.get(node.placementUuid);
+          createUpdateMountedDisksTask(
+              node,
+              cluster.userIntent.getInstanceTypeForNode(node),
+              cluster.userIntent.getDeviceInfoForNode(node));
+        }
+      }
+
       for (NodeDetails node : tserverNodes) {
         createTServerTaskForNode(node, "stop")
             .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
       }
 
-      Set<NodeDetails> masterNodes = new HashSet<>(universe.getMasters());
       createStopMasterTasks(masterNodes)
           .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
 
       if (!universe.getUniverseDetails().isImportedUniverse()) {
         // Create tasks to pause the existing nodes.
-        createPauseServerTasks(universe.getNodes())
+        Collection<NodeDetails> activeUniverseNodes = getActiveUniverseNodes(universe.getNodes());
+        createPauseServerTasks(universe, activeUniverseNodes) // Pass in filtered nodes
             .setSubTaskGroupType(SubTaskGroupType.PauseUniverse);
       }
       createSwamperTargetUpdateTask(false);
+      // Remove alert definition files.
+      createUnivManageAlertDefinitionsTask(false)
+          .setSubTaskGroupType(SubTaskGroupType.PauseUniverse);
       // Mark universe task state to success.
       createMarkUniverseUpdateSuccessTasks().setSubTaskGroupType(SubTaskGroupType.PauseUniverse);
       // Run all the tasks.
-      subTaskGroupQueue.run();
+      getRunnableTask().runSubTasks();
 
       saveUniverseDetails(
           u -> {
             UniverseDefinitionTaskParams universeDetails = u.getUniverseDetails();
             universeDetails.universePaused = true;
+            for (NodeDetails node : universeDetails.nodeDetailsSet) {
+              if (node.isMaster || node.isTserver) {
+                node.disksAreMountedByUUID = true;
+              }
+            }
             u.setUniverseDetails(universeDetails);
           });
 
+      metricService.markSourceInactive(params().customerUUID, params().universeUUID);
     } catch (Throwable t) {
       log.error("Error executing task {} with error='{}'.", getName(), t.getMessage(), t);
       throw t;
@@ -91,5 +131,22 @@ public class PauseUniverse extends UniverseTaskBase {
       unlockUniverseForUpdate();
     }
     log.info("Finished {} task.", getName());
+  }
+
+  private Collection<NodeDetails> getActiveUniverseNodes(Collection<NodeDetails> universeNodes) {
+    Collection<NodeDetails> activeNodes = new HashSet<>();
+    for (NodeDetails node : universeNodes) {
+      NodeTaskParams nodeParams = new NodeTaskParams();
+      nodeParams.universeUUID = taskParams().universeUUID;
+      nodeParams.nodeName = node.nodeName;
+      nodeParams.nodeUuid = node.nodeUuid;
+      nodeParams.azUuid = node.azUuid;
+      nodeParams.placementUuid = node.placementUuid;
+
+      if (instanceExists(nodeParams)) {
+        activeNodes.add(node);
+      }
+    }
+    return activeNodes;
   }
 }

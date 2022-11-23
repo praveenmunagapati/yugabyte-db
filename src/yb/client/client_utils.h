@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_CLIENT_CLIENT_UTILS_H
-#define YB_CLIENT_CLIENT_UTILS_H
+#pragma once
 
 #include <future>
 
@@ -32,7 +31,7 @@ std::future<Result<internal::RemoteTabletPtr>> LookupFirstTabletFuture(
     YBClient* client, const YBTablePtr& table);
 
 Result<std::unique_ptr<rpc::Messenger>> CreateClientMessenger(
-    const string &client_name,
+    const std::string &client_name,
     int32_t num_reactors,
     const scoped_refptr<MetricEntity> &metric_entity,
     const std::shared_ptr<MemTracker> &parent_mem_tracker,
@@ -45,5 +44,3 @@ Result<std::vector<internal::RemoteTabletPtr>> FilterTabletsByHashPartitionKeyRa
 
 } // namespace client
 } // namespace yb
-
-#endif // YB_CLIENT_CLIENT_UTILS_H

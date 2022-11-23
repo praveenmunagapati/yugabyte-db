@@ -13,25 +13,28 @@
 //
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_PGGATE_TEST_PGGATE_TEST_H_
-#define YB_YQL_PGGATE_TEST_PGGATE_TEST_H_
+#pragma once
 
 #include <dirent.h>
+#include <stdint.h>
 
-#include "yb/client/client.h"
+#include "pg_type_d.h" // NOLINT
+
+#include "yb/common/value.pb.h"
+#include "yb/common/ybc_util.h"
+
 #include "yb/integration-tests/external_mini_cluster.h"
-#include "yb/master/mini_master.h"
+
 #include "yb/tserver/tserver_util_fwd.h"
 
+#include "yb/util/shared_mem.h"
 #include "yb/util/test_util.h"
-#include "yb/util/memory/mc_types.h"
 
-#include "yb/yql/pggate/ybc_pggate.h"
+#include "yb/yql/pggate/ybc_pg_typedefs.h"
 
 // This file comes from this directory:
 // postgres_build/src/include/catalog
 // We add a special include path to CMakeLists.txt.
-#include "pg_type_d.h" // NOLINT
 
 namespace yb {
 namespace pggate {
@@ -61,16 +64,16 @@ class PggateTest : public YBTest {
   void TearDown() override;
 
   // Init cluster for each test case.
-  CHECKED_STATUS Init(const char *test_name, int num_tablet_servers = kNumOfTablets);
+  Status Init(const char *test_name, int num_tablet_servers = kNumOfTablets);
 
   // Create simulated cluster.
-  CHECKED_STATUS CreateCluster(int num_tablet_servers);
+  Status CreateCluster(int num_tablet_servers);
 
   //------------------------------------------------------------------------------------------------
   // Setup the database for testing.
-  void SetupDB(const string& db_name = kDefaultDatabase, YBCPgOid db_oid = kDefaultDatabaseOid);
-  void CreateDB(const string& db_name = kDefaultDatabase, YBCPgOid db_oid = kDefaultDatabaseOid);
-  void ConnectDB(const string& db_name = kDefaultDatabase);
+  void SetupDB(const std::string& db_name = kDefaultDatabase, YBCPgOid db_oid = kDefaultDatabaseOid);
+  void CreateDB(const std::string& db_name = kDefaultDatabase, YBCPgOid db_oid = kDefaultDatabaseOid);
+  void ConnectDB(const std::string& db_name = kDefaultDatabase);
 
  protected:
   void BeginDDLTransaction();
@@ -127,5 +130,3 @@ YBCStatus YBCTestNewConstantText(YBCPgStatement stmt, const char *value, bool is
 
 }  // namespace pggate
 }  // namespace yb
-
-#endif // YB_YQL_PGGATE_TEST_PGGATE_TEST_H_

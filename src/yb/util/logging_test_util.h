@@ -30,9 +30,9 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_LOGGING_TEST_UTIL_H
-#define YB_UTIL_LOGGING_TEST_UTIL_H
+#pragma once
 
+#include <atomic>
 #include <chrono>
 #include <string>
 #include <vector>
@@ -40,7 +40,7 @@
 #include <glog/logging.h>
 
 #include "yb/util/monotime.h"
-#include "yb/util/status.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 
@@ -74,7 +74,7 @@ class StringWaiterLogSink : public google::LogSink {
   }
 
   // Wait for string_to_wait to occur in log.
-  CHECKED_STATUS WaitFor(MonoDelta timeout);
+  Status WaitFor(MonoDelta timeout);
 
   void send(
       google::LogSeverity severity, const char* full_filename, const char* base_filename, int line,
@@ -103,5 +103,3 @@ struct ScopedRegisterSink {
 };
 
 } // namespace yb
-
-#endif  // YB_UTIL_LOGGING_TEST_UTIL_H

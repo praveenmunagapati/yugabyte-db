@@ -9,15 +9,13 @@ menu:
     name: Google Kubernetes Engine
     identifier: k8s-mz-gke-1
     weight: 628
-type: page
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 <ul class="nav nav-tabs-alt nav-tabs-yb">
   <li >
-    <a href="/latest/deploy/kubernetes/multi-zone/gke/helm-chart" class="nav-link active">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+    <a href="../helm-chart/" class="nav-link active">
+      <i class="fa-solid fa-cubes" aria-hidden="true"></i>
       Helm chart
     </a>
   </li>
@@ -48,7 +46,7 @@ $ gcloud config set project yugabyte
 
 - Install `kubectl`
 
-After installing the Google Cloud SDK, install the `kubectl` command line tool by running the following command. 
+After installing the Google Cloud SDK, install the `kubectl` command line tool by running the following command.
 
 ```sh
 $ gcloud components install kubectl
@@ -66,7 +64,7 @@ $ helm version
 
 You should see something similar to the following output. Note that the `tiller` server side component has been removed in Helm 3.
 
-```
+```output
 version.BuildInfo{Version:"v3.0.3", GitCommit:"ac925eb7279f4a6955df663a0128044a8a6b7593", GitTreeState:"clean", GoVersion:"go1.13.6"}
 ```
 
@@ -84,7 +82,7 @@ $ gcloud container clusters create my-regional-cluster \
      --node-locations us-central1-a,us-central1-b,us-central1-c
 ```
 
-```
+```output
 ...
 NAME                 LOCATION     MASTER_VERSION  MASTER_IP      MACHINE_TYPE   NODE_VERSION    NUM_NODES  STATUS
 my-regional-cluster  us-central1  1.14.10-gke.17  35.226.36.261  n1-standard-8  1.14.10-gke.17  3          RUNNING
@@ -92,49 +90,29 @@ my-regional-cluster  us-central1  1.14.10-gke.17  35.226.36.261  n1-standard-8  
 
 As stated in the Prerequisites section, the default configuration in the YugabyteDB Helm Chart requires Kubernetes nodes to have a total of 12 CPU cores and 45 GB RAM allocated to YugabyteDB. This can be three nodes with 4 CPU cores and 15 GB RAM allocated to YugabyteDB. The smallest Google Cloud machine type that meets this requirement is `n1-standard-8` which has 8 CPU cores and 30 GB RAM.
 
-### Create a storage class per zone
+### Create a storage class
 
-We need to ensure that the storage classes used by the pods in a given zone are always pinned to that zone only.
+We need to specify `WaitForFirstConsumer` mode for the volumeBindingMode so that volumes will be provisioned according to pods' zone affinities.
 
 Copy the contents below to a file named `storage.yaml`.
 
-```sh
+```yaml
 kind: StorageClass
 apiVersion: storage.k8s.io/v1
 metadata:
-  name: standard-us-central1-a
+  name: yb-storage
 provisioner: kubernetes.io/gce-pd
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
 parameters:
-  type: pd-standard
-  replication-type: none
-  zone: us-central1-a
----
-kind: StorageClass
-apiVersion: storage.k8s.io/v1
-metadata:
-  name: standard-us-central1-b
-provisioner: kubernetes.io/gce-pd
-parameters:
-  type: pd-standard
-  replication-type: none
-  zone: us-central1-b
----
-kind: StorageClass
-apiVersion: storage.k8s.io/v1
-metadata:
-  name: standard-us-central1-c
-provisioner: kubernetes.io/gce-pd
-parameters:
-  type: pd-standard
-  replication-type: none
-  zone: us-central1-c
-
+  type: pd-ssd
+  fsType: xfs
 ```
 
 Apply the above configuration to your cluster.
 
 ```sh
-kubectl apply -f storage.yaml
+$ kubectl apply -f storage.yaml
 ```
 
 ## 2. Create a YugabyteDB cluster
@@ -156,19 +134,19 @@ $ helm repo update
 Validate that you have the updated Chart version.
 
 ```sh
-$ helm search repo yugabytedb/yugabyte
+$ helm search repo yugabytedb/yugabyte --version {{<yb-version version="stable" format="short">}}
 ```
 
-```sh
-NAME                CHART VERSION APP VERSION   DESCRIPTION                                       
-yugabytedb/yugabyte 2.1.0        2.1.0.0-b18    YugabyteDB is the high-performance distr...
+```output
+NAME                 CHART VERSION  APP VERSION   DESCRIPTION
+yugabytedb/yugabyte  {{<yb-version version="stable" format="short">}}          {{<yb-version version="stable" format="build">}}  YugabyteDB is the high-performance distributed ...
 ```
 
 ### Create override files
 
 Copy the contents below to a file named `overrides-us-central1-a.yaml`.
 
-```sh
+```yaml
 isMultiAz: True
 
 AZ: us-central1-a
@@ -177,9 +155,9 @@ masterAddresses: "yb-master-0.yb-masters.yb-demo-us-central1-a.svc.cluster.local
 
 storage:
   master:
-    storageClass: "standard-us-central1-a"
+    storageClass: "yb-storage"
   tserver:
-    storageClass: "standard-us-central1-a"
+    storageClass: "yb-storage"
 
 replicas:
   master: 1
@@ -199,7 +177,7 @@ gflags:
 
 Copy the contents below to a file named `overrides-us-central1-b.yaml`.
 
-```sh
+```yaml
 isMultiAz: True
 
 AZ: us-central1-b
@@ -208,9 +186,9 @@ masterAddresses: "yb-master-0.yb-masters.yb-demo-us-central1-a.svc.cluster.local
 
 storage:
   master:
-    storageClass: "standard-us-central1-b"
+    storageClass: "yb-storage"
   tserver:
-    storageClass: "standard-us-central1-b"
+    storageClass: "yb-storage"
 
 replicas:
   master: 1
@@ -228,9 +206,9 @@ gflags:
     placement_zone: "us-central1-b"
 ```
 
-Copy the contents below to a file named `overrides-us-central1-b.yaml`.
+Copy the contents below to a file named `overrides-us-central1-c.yaml`.
 
-```sh
+```yaml
 isMultiAz: True
 
 AZ: us-central1-c
@@ -239,9 +217,9 @@ masterAddresses: "yb-master-0.yb-masters.yb-demo-us-central1-a.svc.cluster.local
 
 storage:
   master:
-    storageClass: "standard-us-central1-c"
+    storageClass: "yb-storage"
   tserver:
-    storageClass: "standard-us-central1-c"
+    storageClass: "yb-storage"
 
 replicas:
   master: 1
@@ -275,18 +253,21 @@ Now create the overall YugabyteDB cluster in such a way that one third of the no
 
 ```sh
 $ helm install yb-demo-us-central1-a yugabytedb/yugabyte \
+ --version {{<yb-version version="stable" format="short">}} \
  --namespace yb-demo-us-central1-a \
  -f overrides-us-central1-a.yaml --wait
 ```
 
 ```sh
 $ helm install yb-demo-us-central1-b yugabytedb/yugabyte \
+ --version {{<yb-version version="stable" format="short">}} \
  --namespace yb-demo-us-central1-b \
  -f overrides-us-central1-b.yaml --wait
 ```
 
 ```sh
 $ helm install yb-demo-us-central1-c yugabytedb/yugabyte \
+ --version {{<yb-version version="stable" format="short">}} \
  --namespace yb-demo-us-central1-c \
  -f overrides-us-central1-c.yaml --wait
 ```
@@ -301,7 +282,7 @@ Check the pods.
 $ kubectl get pods --all-namespaces
 ```
 
-```
+```output
 NAMESPACE               NAME          READY   STATUS    RESTARTS   AGE
 ...
 yb-demo-us-central1-a   yb-master-0   2/2     Running   0          6m54s
@@ -318,7 +299,7 @@ Check the services.
 $ kubectl get services --all-namespaces
 ```
 
-```
+```output
 NAMESPACE               NAME                   TYPE           CLUSTER-IP      EXTERNAL-IP      PORT(S)                                        AGE
 ...
 yb-demo-us-central1-a   yb-master-ui           LoadBalancer   10.27.249.152   34.71.83.45      7000:31927/TCP                                 9m33s
@@ -337,7 +318,7 @@ yb-demo-us-central1-c   yb-tservers            ClusterIP      None            <n
 
 Access the yb-master Admin UI for the cluster at `http://<external-ip>:7000` where `external-ip` refers to one of the `yb-master-ui` services. Note that you can use any of the above three services for this purpose since all of them will show the same cluster metadata.
 
-![mz-ybmaster](/images/deploy/kubernetes/gke-multizone-ybmaster.png)  
+![mz-ybmaster](/images/deploy/kubernetes/gke-multizone-ybmaster.png)
 
 ## 4. Configure zone-aware replica placement
 
@@ -348,7 +329,7 @@ Default replica placement policy treats every yb-tserver as equal irrespective o
 To make the replica placement zone-aware, so that one replica is placed in each zone, run the following command:
 
 ```sh
-kubectl exec -it -n yb-demo-us-central1-a yb-master-0 -- bash \
+$ kubectl exec -it -n yb-demo-us-central1-a yb-master-0 -- bash \
 -c "/home/yugabyte/master/bin/yb-admin --master_addresses yb-master-0.yb-masters.yb-demo-us-central1-a.svc.cluster.local:7100,yb-master-0.yb-masters.yb-demo-us-central1-b.svc.cluster.local:7100,yb-master-0.yb-masters.yb-demo-us-central1-c.svc.cluster.local:7100 modify_placement_info gke.us-central1.us-central1-a,gke.us-central1.us-central1-b,gke.us-central1.us-central1-c 3"
 ```
 
@@ -372,21 +353,21 @@ $ kubectl exec -n yb-demo-us-central1-a -it yb-tserver-0 -- ycqlsh \
 yb-tserver-0.yb-tservers.yb-demo-us-central1-a
 ```
 
-You can follow the [Explore YSQL](../../../../../quick-start/explore/ysql) tutorial and then go to the `http://<external-ip>:7000/tablet-servers` page of the yb-master Admin UI to confirm that tablet peers and their leaders are placed evenly across all three zones for both user data and system data.
+You can follow the [Explore YSQL](../../../../../quick-start/explore/ysql/) tutorial and then go to the `http://<external-ip>:7000/tablet-servers` page of the yb-master Admin UI to confirm that tablet peers and their leaders are placed evenly across all three zones for both user data and system data.
 
 ![mz-ybtserver](/images/deploy/kubernetes/gke-multizone-ybtserver.png)
 
 ## 6. Connect using external clients
 
-To connect an external program, get the load balancer `EXTERNAL-IP` address of one of the `yb-tserver-service` service and connect to the 5433 / 9042 ports for YSQL / YCQL services respectively.
+To connect an external program, get the load balancer `EXTERNAL-IP` address of the `yb-tserver-service` service and connect using port 5433 for YSQL or port 9042 for YCQL, as follows:
 
 ```sh
 $ kubectl get services --namespace yb-demo
 ```
 
-```
-NAME                 TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)                                        AGE
+```output
+NAME                 TYPE           CLUSTER-IP      EXTERNAL-IP      PORT(S)                                        AGE
 ...
-yb-tserver-service   LoadBalancer   10.98.36.163    35.225.153.214     6379:30929/TCP,9042:30975/TCP,5433:30048/TCP   10s
+yb-tserver-service   LoadBalancer   10.98.36.163    35.225.153.214   6379:30929/TCP,9042:30975/TCP,5433:30048/TCP   10s
 ...
 ```

@@ -2,6 +2,7 @@
 
 package com.yugabyte.yw.models;
 
+import static com.yugabyte.yw.models.MetricConfig.METRICS_CONFIG_PATH;
 import static org.hamcrest.CoreMatchers.allOf;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.notNullValue;
@@ -12,8 +13,18 @@ import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.yugabyte.yw.common.FakeDBApplication;
+import com.yugabyte.yw.metrics.MetricLabelFilter;
+import com.yugabyte.yw.metrics.MetricLabelFilters;
+import com.yugabyte.yw.metrics.MetricQueryContext;
+import com.yugabyte.yw.metrics.MetricQueryHelper;
+import com.yugabyte.yw.metrics.MetricSettings;
+import com.yugabyte.yw.metrics.SplitMode;
+import com.yugabyte.yw.metrics.SplitType;
+import com.yugabyte.yw.models.MetricConfigDefinition.Layout;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -31,13 +42,14 @@ public class MetricConfigTest extends FakeDBApplication {
     Map<String, Object> map = new HashMap();
     when(mockYamlWrapper.load(any())).thenReturn(map);
     // Make sure all the configs inside of metrics yaml are valid.
-    Map<String, Object> configs = (HashMap<String, Object>) mockYamlWrapper.load("metrics.yml");
+    Map<String, Object> configs = mockYamlWrapper.load(METRICS_CONFIG_PATH);
     MetricConfig.loadConfig(configs);
     for (MetricConfig config : MetricConfig.find.all()) {
       assertThat(
-          config.getLayout(),
-          allOf(notNullValue(), IsInstanceOf.instanceOf(MetricConfig.Layout.class)));
-      assertThat(config.getQuery(new HashMap<>(), DEFAULT_RANGE_SECS), allOf(notNullValue()));
+          config.getConfig().getLayout(),
+          allOf(notNullValue(), IsInstanceOf.instanceOf(Layout.class)));
+      assertThat(
+          config.getConfig().getQuery(new HashMap<>(), DEFAULT_RANGE_SECS), allOf(notNullValue()));
     }
   }
 
@@ -53,7 +65,7 @@ public class MetricConfigTest extends FakeDBApplication {
       configJson.set("filters", filterJson);
       MetricConfig metricConfig = MetricConfig.create("metric-" + pattern, configJson);
       metricConfig.save();
-      String query = metricConfig.getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
+      String query = metricConfig.getConfig().getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
       assertThat(query, allOf(notNullValue(), equalTo("sample{filter=~\"" + filterString + "\"}")));
     }
   }
@@ -67,7 +79,7 @@ public class MetricConfigTest extends FakeDBApplication {
                 + "\"filters\": {\"export_type\":\"tserver_export\"}}");
     MetricConfig metricConfig = MetricConfig.create("metric", configJson);
     metricConfig.save();
-    String query = metricConfig.getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
+    String query = metricConfig.getConfig().getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
     assertThat(
         query,
         allOf(
@@ -97,7 +109,7 @@ public class MetricConfigTest extends FakeDBApplication {
     MetricConfig request = MetricConfig.create("test_request", containerRequest);
     usage.save();
     request.save();
-    String query = metricConfig.getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
+    String query = metricConfig.getConfig().getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
     assertThat(
         query,
         allOf(
@@ -114,12 +126,21 @@ public class MetricConfigTest extends FakeDBApplication {
                 + "\"function\": \"avg\", \"range\": true}");
     MetricConfig metricConfig = MetricConfig.create("metric", configJson);
     metricConfig.save();
-    Map<String, String> queries = metricConfig.getQueries(new HashMap<>(), DEFAULT_RANGE_SECS);
+    Map<String, String> queries =
+        metricConfig.getConfig().getQueries(new HashMap<>(), DEFAULT_RANGE_SECS);
     assertEquals(queries.size(), 3);
     for (Map.Entry<String, String> e : queries.entrySet()) {
       assertThat(
           e.getValue(),
-          allOf(equalTo(metricConfig.getQuery(e.getKey(), new HashMap<>(), DEFAULT_RANGE_SECS))));
+          allOf(
+              equalTo(
+                  metricConfig
+                      .getConfig()
+                      .getQuery(
+                          MetricSettings.defaultSettings(e.getKey()),
+                          MetricQueryContext.builder()
+                              .queryRangeSecs(DEFAULT_RANGE_SECS)
+                              .build()))));
     }
   }
 
@@ -130,19 +151,119 @@ public class MetricConfigTest extends FakeDBApplication {
             "{\"metric\": \"rpc_latency_count\", \"function\": \"irate|sum\","
                 + "\"range\": true,"
                 + "\"filters\": {\"export_type\": \"tserver_export\","
-                + "\"service_type\": \"TabletServerService\"},"
+                + "\"service_type\": \"TabletServerService\","
                 + "\"service_method\": \"Read|Write\"},"
-                + " \"group_by\": \"service_method\"}");
+                + "\"group_by\": \"service_method\"}");
     MetricConfig metricConfig = MetricConfig.create("metric", configJson);
     metricConfig.save();
-    String query = metricConfig.getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
+    String query = metricConfig.getConfig().getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
     assertThat(
         query,
         allOf(
             notNullValue(),
             equalTo(
                 "sum(irate(rpc_latency_count{export_type=\"tserver_export\", "
-                    + "service_type=\"TabletServerService\"}[60s]))")));
+                    + "service_type=\"TabletServerService\", service_method=~\"Read|Write\"}[60s]))"
+                    + " by (service_method)")));
+  }
+
+  @Test
+  public void testTopKQuery() {
+    JsonNode configJson =
+        Json.parse(
+            "{\"metric\": \"rpc_latency.avg\", \"function\": \"irate|sum\","
+                + "\"range\": true,"
+                + "\"filters\": {\"export_type\": \"tserver_export\","
+                + "\"service_type\": \"TabletServerService\","
+                + "\"service_method\": \"Read|Write\"},"
+                + "\"group_by\": \"service_method\"}");
+    MetricConfig metricConfig = MetricConfig.create("metric", configJson);
+    metricConfig.save();
+    String query =
+        metricConfig
+            .getConfig()
+            .getSingleMetricQuery(
+                MetricSettings.defaultSettings("rpc_latency.avg")
+                    .setSplitType(SplitType.NODE)
+                    .setSplitMode(SplitMode.TOP)
+                    .setSplitCount(2),
+                MetricQueryContext.builder()
+                    .topKQuery(true)
+                    .additionalGroupBy(ImmutableSet.of(MetricQueryHelper.EXPORTED_INSTANCE))
+                    .queryRangeSecs(DEFAULT_RANGE_SECS)
+                    .build());
+    assertThat(
+        query,
+        allOf(
+            notNullValue(),
+            equalTo(
+                "topk(2, (sum(irate(rpc_latency_sum{export_type=\"tserver_export\", "
+                    + "service_type=\"TabletServerService\", service_method=~\"Read|Write\"}[60s]))"
+                    + " by (service_method, exported_instance)) / (sum(irate(rpc_latency_count"
+                    + "{export_type=\"tserver_export\", service_type=\"TabletServerService\", "
+                    + "service_method=~\"Read|Write\"}[60s])) by"
+                    + " (service_method, exported_instance))) by (service_method)")));
+  }
+
+  @Test
+  public void testOrFilterQuery() {
+    JsonNode configJson =
+        Json.parse(
+            "{\"metric\": \"rpc_latency.avg\", \"function\": \"irate|sum\","
+                + "\"range\": true,"
+                + "\"filters\": {\"export_type\": \"tserver_export\","
+                + "\"service_type\": \"TabletServerService\","
+                + "\"service_method\": \"Read|Write\"},"
+                + "\"group_by\": \"service_method\"}");
+    MetricConfig metricConfig = MetricConfig.create("metric", configJson);
+    metricConfig.save();
+    MetricLabelFilters readFilters =
+        MetricLabelFilters.builder()
+            .filters(
+                ImmutableList.of(
+                    new MetricLabelFilter("service_method", "Read"),
+                    new MetricLabelFilter(
+                        MetricQueryHelper.EXPORTED_INSTANCE, "instance1|instance2")))
+            .build();
+    MetricLabelFilters writeFilters =
+        MetricLabelFilters.builder()
+            .filters(
+                ImmutableList.of(
+                    new MetricLabelFilter("service_method", "Write"),
+                    new MetricLabelFilter(
+                        MetricQueryHelper.EXPORTED_INSTANCE, "instance3|instance4")))
+            .build();
+    String query =
+        metricConfig
+            .getConfig()
+            .getSingleMetricQuery(
+                MetricSettings.defaultSettings("rpc_latency.avg").setSplitCount(2),
+                MetricQueryContext.builder()
+                    .metricOrFilters(
+                        ImmutableMap.of(
+                            "rpc_latency.avg", ImmutableList.of(readFilters, writeFilters)))
+                    .additionalGroupBy(ImmutableSet.of(MetricQueryHelper.EXPORTED_INSTANCE))
+                    .queryRangeSecs(DEFAULT_RANGE_SECS)
+                    .build());
+    assertThat(
+        query,
+        allOf(
+            notNullValue(),
+            equalTo(
+                "((sum(irate(rpc_latency_sum{export_type=\"tserver_export\", "
+                    + "service_type=\"TabletServerService\", "
+                    + "exported_instance=~\"instance1|instance2\", service_method=\"Read\"}[60s]))"
+                    + " by (service_method, exported_instance)) / (sum(irate(rpc_latency_count"
+                    + "{export_type=\"tserver_export\", service_type=\"TabletServerService\", "
+                    + "exported_instance=~\"instance1|instance2\", service_method=\"Read\"}[60s]))"
+                    + " by (service_method, exported_instance))) or "
+                    + "((sum(irate(rpc_latency_sum{export_type=\"tserver_export\", "
+                    + "service_type=\"TabletServerService\", "
+                    + "exported_instance=~\"instance3|instance4\", service_method=\"Write\"}[60s]))"
+                    + " by (service_method, exported_instance)) / (sum(irate(rpc_latency_count"
+                    + "{export_type=\"tserver_export\", service_type=\"TabletServerService\", "
+                    + "exported_instance=~\"instance3|instance4\", service_method=\"Write\"}[60s]))"
+                    + " by (service_method, exported_instance)))")));
   }
 
   @Test
@@ -153,12 +274,21 @@ public class MetricConfigTest extends FakeDBApplication {
                 + "\"function\": \"avg\", \"filters\": {\"node_prefix\": \"foo|bar\"}}");
     MetricConfig metricConfig = MetricConfig.create("metric", configJson);
     metricConfig.save();
-    Map<String, String> queries = metricConfig.getQueries(new HashMap<>(), DEFAULT_RANGE_SECS);
+    Map<String, String> queries =
+        metricConfig.getConfig().getQueries(new HashMap<>(), DEFAULT_RANGE_SECS);
     assertEquals(queries.size(), 3);
     for (Map.Entry<String, String> e : queries.entrySet()) {
       assertThat(
           e.getValue(),
-          allOf(equalTo(metricConfig.getQuery(e.getKey(), new HashMap<>(), DEFAULT_RANGE_SECS))));
+          allOf(
+              equalTo(
+                  metricConfig
+                      .getConfig()
+                      .getQuery(
+                          MetricSettings.defaultSettings(e.getKey()),
+                          MetricQueryContext.builder()
+                              .queryRangeSecs(DEFAULT_RANGE_SECS)
+                              .build()))));
     }
   }
 
@@ -167,7 +297,7 @@ public class MetricConfigTest extends FakeDBApplication {
     MetricConfig metricConfig = MetricConfig.create("metric", Json.newObject());
     metricConfig.save();
     try {
-      metricConfig.getQueries(new HashMap<>(), DEFAULT_RANGE_SECS);
+      metricConfig.getConfig().getQueries(new HashMap<>(), DEFAULT_RANGE_SECS);
     } catch (RuntimeException re) {
       assertThat(
           re.getMessage(),
@@ -180,7 +310,7 @@ public class MetricConfigTest extends FakeDBApplication {
     MetricConfig metricConfig =
         MetricConfig.create("metric", Json.parse("{\"metric\": \"metric\"}"));
     metricConfig.save();
-    String query = metricConfig.getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
+    String query = metricConfig.getConfig().getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
     assertThat(query, allOf(notNullValue(), equalTo("metric")));
   }
 
@@ -190,7 +320,7 @@ public class MetricConfigTest extends FakeDBApplication {
         Json.parse("{\"metric\": \"metric\", \"range\": true, " + "\"function\": \"rate\"}");
     MetricConfig metricConfig = MetricConfig.create("metric", configJson);
     metricConfig.save();
-    String query = metricConfig.getQuery(new HashMap<>(), 30);
+    String query = metricConfig.getConfig().getQuery(new HashMap<>(), 30);
     assertThat(query, allOf(notNullValue(), equalTo("rate(metric[30s])")));
   }
 
@@ -199,7 +329,7 @@ public class MetricConfigTest extends FakeDBApplication {
     JsonNode configJson = Json.parse("{\"metric\": \"metric\", \"range\": true}");
     MetricConfig metricConfig = MetricConfig.create("metric", configJson);
     metricConfig.save();
-    String query = metricConfig.getQuery(new HashMap<>(), 30);
+    String query = metricConfig.getConfig().getQuery(new HashMap<>(), 30);
     assertThat(query, allOf(notNullValue(), equalTo("metric")));
   }
 
@@ -212,7 +342,7 @@ public class MetricConfigTest extends FakeDBApplication {
     MetricConfig metricConfig = MetricConfig.create("metric", configJson);
     metricConfig.save();
 
-    String query = metricConfig.getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
+    String query = metricConfig.getConfig().getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
     assertThat(query, allOf(notNullValue(), equalTo("rate(metric{memory=\"used\"}[60s])")));
   }
 
@@ -223,7 +353,8 @@ public class MetricConfigTest extends FakeDBApplication {
     MetricConfig metricConfig = MetricConfig.create("metric", configJson);
     metricConfig.save();
 
-    String query = metricConfig.getQuery(ImmutableMap.of("extra", "1"), DEFAULT_RANGE_SECS);
+    String query =
+        metricConfig.getConfig().getQuery(ImmutableMap.of("extra", "1"), DEFAULT_RANGE_SECS);
     assertThat(query, allOf(notNullValue(), equalTo("rate(metric{extra=\"1\"}[60s])")));
   }
 
@@ -236,7 +367,8 @@ public class MetricConfigTest extends FakeDBApplication {
     MetricConfig metricConfig = MetricConfig.create("metric", configJson);
     metricConfig.save();
 
-    String query = metricConfig.getQuery(ImmutableMap.of("extra", "1"), DEFAULT_RANGE_SECS);
+    String query =
+        metricConfig.getConfig().getQuery(ImmutableMap.of("extra", "1"), DEFAULT_RANGE_SECS);
     assertThat(
         query, allOf(notNullValue(), equalTo("rate(metric{memory=\"used\", extra=\"1\"}[60s])")));
   }
@@ -249,7 +381,7 @@ public class MetricConfigTest extends FakeDBApplication {
                 + "\"function\": \"rate\", \"filters\": {\"memory\": \"used|buffered|free\"}}");
     MetricConfig metricConfig = MetricConfig.create("metric", configJson);
     metricConfig.save();
-    String query = metricConfig.getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
+    String query = metricConfig.getConfig().getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
     assertThat(
         query, allOf(notNullValue(), equalTo("rate(metric{memory=~\"used|buffered|free\"}[60s])")));
   }
@@ -263,7 +395,7 @@ public class MetricConfigTest extends FakeDBApplication {
     MetricConfig metricConfig = MetricConfig.create("metric", configJson);
     metricConfig.save();
 
-    String query = metricConfig.getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
+    String query = metricConfig.getConfig().getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
     assertThat(query, allOf(notNullValue(), equalTo("avg(rate(metric{memory=\"used\"}[60s]))")));
   }
 
@@ -276,7 +408,7 @@ public class MetricConfigTest extends FakeDBApplication {
     MetricConfig metricConfig = MetricConfig.create("metric", configJson);
     metricConfig.save();
 
-    String query = metricConfig.getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
+    String query = metricConfig.getConfig().getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
     assertThat(
         query, allOf(notNullValue(), equalTo("avg(rate(metric{memory=\"used\"}[60s])) /10")));
   }
@@ -292,7 +424,7 @@ public class MetricConfigTest extends FakeDBApplication {
     MetricConfig metricConfig = MetricConfig.create("metric", configJson);
     metricConfig.save();
 
-    String query = metricConfig.getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
+    String query = metricConfig.getConfig().getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
     assertThat(
         query,
         allOf(
@@ -311,7 +443,7 @@ public class MetricConfigTest extends FakeDBApplication {
                 + "\"range\": true}");
     MetricConfig metricConfig = MetricConfig.create("metric", configJson);
     metricConfig.save();
-    String query = metricConfig.getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
+    String query = metricConfig.getConfig().getQuery(new HashMap<>(), DEFAULT_RANGE_SECS);
     assertThat(
         query,
         allOf(

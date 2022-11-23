@@ -30,8 +30,7 @@
 // under the License.
 //
 // Utility functions for dealing with a byte array as if it were a bitmap.
-#ifndef YB_UTIL_BITMAP_H
-#define YB_UTIL_BITMAP_H
+#pragma once
 
 #include <string>
 
@@ -39,9 +38,11 @@
 
 #include "yb/gutil/bits.h"
 
-#include "yb/util/result.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
+
+class Slice;
 
 // Return the number of bytes necessary to store the given number of bits.
 inline size_t BitmapSize(size_t num_bits) {
@@ -254,7 +255,7 @@ class OneWayBitmap {
   static Result<OneWayBitmap> Decode(Slice* slice);
 
   // Removes encoded bitmap from slice prefix, w/o decoding slice.
-  static CHECKED_STATUS Skip(Slice* slice);
+  static Status Skip(Slice* slice);
 
  private:
   typedef uint8_t ElementType;
@@ -269,5 +270,3 @@ class OneWayBitmap {
 };
 
 } // namespace yb
-
-#endif // YB_UTIL_BITMAP_H

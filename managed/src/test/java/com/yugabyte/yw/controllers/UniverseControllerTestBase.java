@@ -10,6 +10,7 @@
 
 package com.yugabyte.yw.controllers;
 
+import static com.yugabyte.yw.common.TestHelper.testDatabase;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static play.inject.Bindings.bind;
@@ -25,7 +26,10 @@ import com.yugabyte.yw.commissioner.Commissioner;
 import com.yugabyte.yw.commissioner.Common.CloudType;
 import com.yugabyte.yw.commissioner.HealthChecker;
 import com.yugabyte.yw.common.ApiHelper;
+import com.yugabyte.yw.common.CustomWsClientFactory;
+import com.yugabyte.yw.common.CustomWsClientFactoryProvider;
 import com.yugabyte.yw.common.ModelFactory;
+import com.yugabyte.yw.common.PlatformGuiceApplicationBaseTest;
 import com.yugabyte.yw.common.ReleaseManager;
 import com.yugabyte.yw.common.ShellProcessHandler;
 import com.yugabyte.yw.common.YcqlQueryExecutor;
@@ -39,12 +43,12 @@ import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.metrics.MetricQueryHelper;
 import com.yugabyte.yw.models.AvailabilityZone;
 import com.yugabyte.yw.models.Customer;
-import com.yugabyte.yw.models.CustomerConfig;
 import com.yugabyte.yw.models.KmsConfig;
 import com.yugabyte.yw.models.Provider;
 import com.yugabyte.yw.models.Region;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.Users;
+import com.yugabyte.yw.models.configs.CustomerConfig;
 import com.yugabyte.yw.models.helpers.NodeDetails;
 import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
 import com.yugabyte.yw.models.helpers.PlacementInfo;
@@ -70,11 +74,8 @@ import org.yb.client.YBClient;
 import play.Application;
 import play.inject.guice.GuiceApplicationBuilder;
 import play.libs.Json;
-import play.modules.swagger.SwaggerModule;
-import play.test.Helpers;
-import play.test.WithApplication;
 
-public class UniverseControllerTestBase extends WithApplication {
+public class UniverseControllerTestBase extends PlatformGuiceApplicationBaseTest {
   protected static Commissioner mockCommissioner;
   protected static MetricQueryHelper mockMetricQueryHelper;
 
@@ -127,9 +128,8 @@ public class UniverseControllerTestBase extends WithApplication {
     when(mockRuntimeConfig.getBoolean("yb.security.use_oauth")).thenReturn(false);
 
     return new GuiceApplicationBuilder()
-        .disable(SwaggerModule.class)
         .disable(GuiceModule.class)
-        .configure((Map) Helpers.inMemoryDatabase())
+        .configure(testDatabase())
         .overrides(bind(YBClientService.class).toInstance(mockService))
         .overrides(bind(Commissioner.class).toInstance(mockCommissioner))
         .overrides(bind(MetricQueryHelper.class).toInstance(mockMetricQueryHelper))
@@ -149,6 +149,8 @@ public class UniverseControllerTestBase extends WithApplication {
         .overrides(bind(ReleaseManager.class).toInstance(mockReleaseManager))
         .overrides(bind(HealthChecker.class).toInstance(healthChecker))
         .overrides(bind(QueryHelper.class).toInstance(mockQueryHelper))
+        .overrides(
+            bind(CustomWsClientFactory.class).toProvider(CustomWsClientFactoryProvider.class))
         .build();
   }
 
@@ -220,13 +222,16 @@ public class UniverseControllerTestBase extends WithApplication {
     kmsConfig = ModelFactory.createKMSConfig(customer.uuid, "SMARTKEY", kmsConfigReq);
     authToken = user.createAuthToken();
 
-    when(mockAppConfig.getString("yb.storage.path")).thenReturn("/tmp");
-    when(mockRuntimeConfig.getString("yb.storage.path")).thenReturn("/tmp");
+    when(mockAppConfig.getString("yb.storage.path"))
+        .thenReturn("/tmp/" + this.getClass().getSimpleName());
+
+    when(mockRuntimeConfig.getString("yb.storage.path"))
+        .thenReturn("/tmp/" + this.getClass().getSimpleName());
   }
 
   @After
   public void tearDown() throws IOException {
-    FileUtils.deleteDirectory(new File("/tmp/certs"));
+    FileUtils.deleteDirectory(new File("/tmp/" + this.getClass().getSimpleName() + "/certs"));
   }
 
   // Change the node state to removed, for one of the nodes in the given universe uuid.

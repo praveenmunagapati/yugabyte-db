@@ -1,15 +1,14 @@
 ---
 title: Ad hoc examples of defining interval values [YSQL]
 headerTitle: Ad hoc examples of defining interval values
-linkTitle: ad hoc examples
+linkTitle: Ad hoc examples
 description: Provides six ad-hoc-examples of defining interval values. [YSQL]
 menu:
   stable:
     identifier: ad-hoc-examples
     parent: interval-representation
     weight: 10
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 The general way to specify an _interval_ value is by giving values for each of _years_, _months_, _days_, _hours_, _minutes_, and _seconds_ as real numbers. The algorithm for computing the internal _months_, _days_, and _seconds_ is complex—so much so that a precise statement in prose would be tortuous and hard to comprehend. Rather, the rules are given in the section [Modeling the internal representation and comparing the model with the actual implementation](../internal-representation-model/) as PL/pgSQL code.
@@ -153,7 +152,7 @@ select
 This is the result:
 
 ```output
-       i1       |       i2        
+       i1       |       i2
 ----------------+-----------------
  1 day 04:48:00 | 1 day -02:24:00
 ```
@@ -169,7 +168,7 @@ select
 This is the result:
 
 ```output
- 17.4 - 0.54*30 | 17.4 - 0.55*30 
+ 17.4 - 0.54*30 | 17.4 - 0.55*30
 ----------------+----------------
            1.20 |           0.90
 ```
@@ -185,7 +184,7 @@ select
 This is the result:
 
 ```output
-       i1       |    i2    
+       i1       |    i2
 ----------------+----------
  1 day 04:48:00 | 21:36:00
 ```
@@ -203,14 +202,14 @@ select (
 This is the result:
 
 ```output
- are they equal? 
+ are they equal?
 -----------------
  true
 ```
 
-You might think that, because the two interval values test as equal, the very strange asymmetry that this fifth example shows has no ultimate consequence. However, the section [Interval arithmetic](../../interval-arithmetic/) shows you that the two differently-spelled _interval_ values that test as equal actually have different semantics—so arguably the outcome of the equality test shows a bug in the PostgreSQL code that YSQL inherits.
+You might think that, because the two _interval_ values test as equal, the very strange asymmetry that this fifth example shows has no ultimate consequence. However, the section [Interval arithmetic](../../interval-arithmetic/) shows you that the two differently-spelled _interval_ values that test as equal actually have different semantics—so arguably the outcome of the equality test shows a bug in the PostgreSQL code that YSQL inherits.
 
-The section [Defining and using custom domain types to specialize the native interval functionality](../../custom-interval-domains/) shows you that, by following that approach that it describes, you will side-step the quirks that these _ad hoc_ examples have revealed without, in fact, sacrificing any useful functionality.
+The section [Custom domain types for specializing the native _interval_ functionality](../../custom-interval-domains/) shows you that, by following the approach that it describes, you will side-step the quirks that these _ad hoc_ examples have revealed without, in fact, sacrificing any useful functionality.
 
 ## Sixth example
 

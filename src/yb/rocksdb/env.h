@@ -28,22 +28,19 @@
 // All Env implementations are safe for concurrent access from
 // multiple threads without any external synchronization.
 
-#ifndef YB_ROCKSDB_ENV_H
-#define YB_ROCKSDB_ENV_H
+#pragma once
 
 #include <stdint.h>
-#include <cstdarg>
+
 #include <limits>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "yb/rocksdb/file.h"
-#include "yb/rocksdb/status.h"
-
 #include "yb/util/file_system.h"
-#include "yb/util/result.h"
+#include "yb/util/io.h"
 #include "yb/util/slice.h"
+#include "yb/util/status_fwd.h"
 
 #ifdef _WIN32
 // Windows API macro interference
@@ -75,7 +72,6 @@ namespace rocksdb {
 
 class FileLock;
 class Logger;
-class WritableFile;
 class Directory;
 struct DBOptions;
 class RateLimiter;
@@ -83,9 +79,8 @@ class RateLimiter;
 typedef yb::SequentialFile SequentialFile;
 typedef yb::RandomAccessFile RandomAccessFile;
 
-using std::unique_ptr;
-using std::shared_ptr;
 
+using Status = yb::Status;
 
 // Options while opening a file to read/write
 struct EnvOptions : public yb::FileSystemOptions {
@@ -96,12 +91,6 @@ struct EnvOptions : public yb::FileSystemOptions {
   // construct from Options
   explicit EnvOptions(const DBOptions& options);
 
-  // If true, then use mmap to write data
-  bool use_mmap_writes = true;
-
-  // If false, fallocate() calls are bypassed
-  bool allow_fallocate = true;
-
   // If true, set the FD_CLOEXEC on open fd.
   bool set_fd_cloexec = true;
 
@@ -110,14 +99,6 @@ struct EnvOptions : public yb::FileSystemOptions {
   // written. 0 turns it off.
   // Default: 0
   uint64_t bytes_per_sync = 0;
-
-  // If true, we will preallocate the file with FALLOC_FL_KEEP_SIZE flag, which
-  // means that file size won't change as part of preallocation.
-  // If false, preallocation will also change the file size. This option will
-  // improve the performance in workloads where you sync the data on every
-  // write. By default, we set it to true for MANIFEST writes and false for
-  // WAL writes
-  bool fallocate_with_keep_size = true;
 
   // See DBOPtions doc
   size_t compaction_readahead_size;
@@ -138,18 +119,18 @@ struct EnvOptions : public yb::FileSystemOptions {
 class RocksDBFileFactory {
  public:
   virtual ~RocksDBFileFactory() {}
-  virtual CHECKED_STATUS NewSequentialFile(const std::string& f, unique_ptr<SequentialFile>* r,
+  virtual Status NewSequentialFile(const std::string& f, std::unique_ptr<SequentialFile>* r,
                                            const EnvOptions& options) = 0;
-  virtual CHECKED_STATUS NewRandomAccessFile(const std::string& f,
-                                             unique_ptr<RandomAccessFile>* r,
+  virtual Status NewRandomAccessFile(const std::string& f,
+                                             std::unique_ptr<RandomAccessFile>* r,
                                              const EnvOptions& options) = 0;
-  virtual CHECKED_STATUS NewWritableFile(const std::string& f, unique_ptr<WritableFile>* r,
+  virtual Status NewWritableFile(const std::string& f, std::unique_ptr<WritableFile>* r,
                                          const EnvOptions& options) = 0;
-  virtual CHECKED_STATUS ReuseWritableFile(const std::string& fname,
+  virtual Status ReuseWritableFile(const std::string& fname,
                                    const std::string& old_fname,
-                                   unique_ptr<WritableFile>* result,
+                                   std::unique_ptr<WritableFile>* result,
                                    const EnvOptions& options) = 0;
-  virtual CHECKED_STATUS GetFileSize(const std::string& fname, uint64_t* size) = 0;
+  virtual Status GetFileSize(const std::string& fname, uint64_t* size) = 0;
 
   // Does the file factory produce plaintext files.
   virtual bool IsPlainText() const = 0;
@@ -162,30 +143,20 @@ class RocksDBFileFactoryWrapper : public rocksdb::RocksDBFileFactory {
   virtual ~RocksDBFileFactoryWrapper() {}
 
   // The following text is boilerplate that forwards all methods to target()
-  Status NewSequentialFile(const std::string& f, unique_ptr<SequentialFile>* r,
-                           const rocksdb::EnvOptions& options) override {
-    return target_->NewSequentialFile(f, r, options);
-  }
+  Status NewSequentialFile(const std::string& f, std::unique_ptr<SequentialFile>* r,
+                           const rocksdb::EnvOptions& options) override;
   Status NewRandomAccessFile(const std::string& f,
-                             unique_ptr <rocksdb::RandomAccessFile>* r,
-                             const EnvOptions& options) override {
-    return target_->NewRandomAccessFile(f, r, options);
-  }
-  Status NewWritableFile(const std::string& f, unique_ptr <rocksdb::WritableFile>* r,
-                         const EnvOptions& options) override {
-    return target_->NewWritableFile(f, r, options);
-  }
+                             std::unique_ptr <rocksdb::RandomAccessFile>* r,
+                             const EnvOptions& options) override;
+  Status NewWritableFile(const std::string& f, std::unique_ptr <rocksdb::WritableFile>* r,
+                         const EnvOptions& options) override;
 
   Status ReuseWritableFile(const std::string& fname,
                            const std::string& old_fname,
-                           unique_ptr<WritableFile>* result,
-                           const EnvOptions& options) override {
-    return target_->ReuseWritableFile(fname, old_fname, result, options);
-  }
+                           std::unique_ptr<WritableFile>* result,
+                           const EnvOptions& options) override;
 
-  Status GetFileSize(const std::string& fname, uint64_t* size) override {
-    return target_->GetFileSize(fname, size);
-  }
+  Status GetFileSize(const std::string& fname, uint64_t* size) override;
 
   bool IsPlainText() const override {
     return target_->IsPlainText();
@@ -252,13 +223,13 @@ class Env {
   //
   // The returned file will only be accessed by one thread at a time.
   virtual Status NewWritableFile(const std::string& fname,
-                                 unique_ptr<WritableFile>* result,
+                                 std::unique_ptr<WritableFile>* result,
                                  const EnvOptions& options) = 0;
 
   // Reuse an existing file by renaming it and opening it as writable.
   virtual Status ReuseWritableFile(const std::string& fname,
                                    const std::string& old_fname,
-                                   unique_ptr<WritableFile>* result,
+                                   std::unique_ptr<WritableFile>* result,
                                    const EnvOptions& options);
 
   // Create an object that represents a directory. Will fail if directory
@@ -269,7 +240,7 @@ class Env {
   // *result and returns OK. On failure stores nullptr in *result and
   // returns non-OK.
   virtual Status NewDirectory(const std::string& name,
-                              unique_ptr<Directory>* result) = 0;
+                              std::unique_ptr<Directory>* result) = 0;
 
   // Returns OK if the named file exists.
   //         NotFound if the named file does not exist,
@@ -327,9 +298,7 @@ class Env {
                             const std::string& target) = 0;
 
   // Hard Link file src to target.
-  virtual Status LinkFile(const std::string& src, const std::string& target) {
-    return STATUS(NotSupported, "LinkFile is not supported for this Env");
-  }
+  virtual Status LinkFile(const std::string& src, const std::string& target);
 
   // Lock the specified file.  Used to prevent concurrent access to
   // the same db by multiple processes.  On failure, stores nullptr in
@@ -354,13 +323,6 @@ class Env {
 
   // Priority for scheduling job in thread pool
   enum Priority { LOW, HIGH, TOTAL };
-
-  // Priority for requesting bytes in rate limiter scheduler
-  enum IOPriority {
-    IO_LOW = 0,
-    IO_HIGH = 1,
-    IO_TOTAL = 2
-  };
 
   // Arrange to run "(*function)(arg)" once in a background thread, in
   // the thread pool specified by pri. By default, jobs go to the 'LOW'
@@ -400,7 +362,7 @@ class Env {
 
   // Create and return a log file for storing informational messages.
   virtual Status NewLogger(const std::string& fname,
-                           shared_ptr<Logger>* result) = 0;
+                           std::shared_ptr<Logger>* result) = 0;
 
   // Returns the number of micro-seconds since some fixed point in time. Only
   // useful for computing deltas of time.
@@ -469,174 +431,6 @@ class Env {
   // No copying allowed
   Env(const Env&);
   void operator=(const Env&);
-};
-
-// A file abstraction for sequential writing.  The implementation
-// must provide buffering since callers may append small fragments
-// at a time to the file.
-class WritableFile : public yb::FileWithUniqueId {
- public:
-  WritableFile()
-    : last_preallocated_block_(0),
-      preallocation_block_size_(0),
-      io_priority_(Env::IO_TOTAL) {
-  }
-  virtual ~WritableFile();
-
-  // Indicates if the class makes use of unbuffered I/O
-  virtual bool UseOSBuffer() const {
-    return true;
-  }
-
-  const size_t c_DefaultPageSize = 4 * 1024;
-
-  // This is needed when you want to allocate
-  // AlignedBuffer for use with file I/O classes
-  // Used for unbuffered file I/O when UseOSBuffer() returns false
-  virtual size_t GetRequiredBufferAlignment() const {
-    return c_DefaultPageSize;
-  }
-
-  virtual Status Append(const Slice& data) = 0;
-
-  // Positioned write for unbuffered access default forward
-  // to simple append as most of the tests are buffered by default
-  virtual Status PositionedAppend(const Slice& /* data */, uint64_t /* offset */) {
-    return STATUS(NotSupported, "PositionedAppend not supported");
-  }
-
-  // Truncate is necessary to trim the file to the correct size
-  // before closing. It is not always possible to keep track of the file
-  // size due to whole pages writes. The behavior is undefined if called
-  // with other writes to follow.
-  virtual Status Truncate(uint64_t size) {
-    return Status::OK();
-  }
-  virtual Status Close() = 0;
-  virtual Status Flush() = 0;
-  virtual Status Sync() = 0; // sync data
-
-  /*
-   * Sync data and/or metadata as well.
-   * By default, sync only data.
-   * Override this method for environments where we need to sync
-   * metadata as well.
-   */
-  virtual Status Fsync() {
-    return Sync();
-  }
-
-  // true if Sync() and Fsync() are safe to call concurrently with Append()
-  // and Flush().
-  virtual bool IsSyncThreadSafe() const {
-    return false;
-  }
-
-  // Indicates the upper layers if the current WritableFile implementation
-  // uses direct IO.
-  virtual bool UseDirectIO() const { return false; }
-
-  /*
-   * Change the priority in rate limiter if rate limiting is enabled.
-   * If rate limiting is not enabled, this call has no effect.
-   */
-  virtual void SetIOPriority(Env::IOPriority pri) {
-    io_priority_ = pri;
-  }
-
-  virtual Env::IOPriority GetIOPriority() { return io_priority_; }
-
-  /*
-   * Get the size of valid data in the file.
-   */
-  virtual uint64_t GetFileSize() {
-    return 0;
-  }
-
-  /*
-   * Get and set the default pre-allocation block size for writes to
-   * this file.  If non-zero, then Allocate will be used to extend the
-   * underlying storage of a file (generally via fallocate) if the Env
-   * instance supports it.
-   */
-  void SetPreallocationBlockSize(size_t size) {
-    preallocation_block_size_ = size;
-  }
-
-  virtual void GetPreallocationStatus(size_t* block_size,
-                                      size_t* last_allocated_block) {
-    *last_allocated_block = last_preallocated_block_;
-    *block_size = preallocation_block_size_;
-  }
-
-  // For documentation, refer to File::GetUniqueId()
-  virtual size_t GetUniqueId(char* id) const override {
-    return 0; // Default implementation to prevent issues with backwards
-  }
-
-  // Remove any kind of caching of data from the offset to offset+length
-  // of this file. If the length is 0, then it refers to the end of file.
-  // If the system is not caching the file contents, then this is a noop.
-  // This call has no effect on dirty pages in the cache.
-  virtual Status InvalidateCache(size_t offset, size_t length) {
-    return STATUS(NotSupported, "InvalidateCache not supported.");
-  }
-
-  // Sync a file range with disk.
-  // offset is the starting byte of the file range to be synchronized.
-  // nbytes specifies the length of the range to be synchronized.
-  // This asks the OS to initiate flushing the cached data to disk,
-  // without waiting for completion.
-  // Default implementation does nothing.
-  virtual Status RangeSync(uint64_t offset, uint64_t nbytes) { return Status::OK(); }
-
-  // PrepareWrite performs any necessary preparation for a write
-  // before the write actually occurs.  This allows for pre-allocation
-  // of space on devices where it can result in less file
-  // fragmentation and/or less waste from over-zealous filesystem
-  // pre-allocation.
-  void PrepareWrite(size_t offset, size_t len) {
-    if (preallocation_block_size_ == 0) {
-      return;
-    }
-    // If this write would cross one or more preallocation blocks,
-    // determine what the last preallocation block necesessary to
-    // cover this write would be and Allocate to that point.
-    const auto block_size = preallocation_block_size_;
-    size_t new_last_preallocated_block =
-      (offset + len + block_size - 1) / block_size;
-    if (new_last_preallocated_block > last_preallocated_block_) {
-      size_t num_spanned_blocks =
-        new_last_preallocated_block - last_preallocated_block_;
-      WARN_NOT_OK(
-          Allocate(block_size * last_preallocated_block_, block_size * num_spanned_blocks),
-          "Failed to pre-allocate space for a file");
-      last_preallocated_block_ = new_last_preallocated_block;
-    }
-  }
-
- protected:
-  /*
-   * Pre-allocate space for a file.
-   */
-  virtual Status Allocate(uint64_t offset, uint64_t len) {
-    return Status::OK();
-  }
-
-  size_t preallocation_block_size() { return preallocation_block_size_; }
-
- private:
-  size_t last_preallocated_block_;
-  size_t preallocation_block_size_;
-  // No copying allowed
-  WritableFile(const WritableFile&);
-  void operator=(const WritableFile&);
-
- protected:
-  friend class WritableFileWrapper;
-  friend class WritableFileMirror;
-
-  Env::IOPriority io_priority_;
 };
 
 // Directory object represents collection of files and implements
@@ -728,12 +522,12 @@ class FileLock {
   void operator=(const FileLock&);
 };
 
-extern void LogFlush(const shared_ptr<Logger>& info_log);
+extern void LogFlush(const std::shared_ptr<Logger>& info_log);
 
 extern void LogWithContext(const char* file,
                            const int line,
                            const InfoLogLevel log_level,
-                           const shared_ptr<Logger>& info_log,
+                           const std::shared_ptr<Logger>& info_log,
                            const char* format,
                            ...);
 
@@ -741,39 +535,39 @@ extern void LogWithContext(const char* file,
 extern void HeaderWithContext(
     const char* file,
     const int line,
-    const shared_ptr<Logger> &info_log,
+    const std::shared_ptr<Logger> &info_log,
     const char *format, ...);
 extern void DebugWithContext(
     const char* file,
     const int line,
-    const shared_ptr<Logger> &info_log,
+    const std::shared_ptr<Logger> &info_log,
     const char *format, ...);
 extern void InfoWithContext(
     const char* file,
     const int line,
-    const shared_ptr<Logger> &info_log,
+    const std::shared_ptr<Logger> &info_log,
     const char *format, ...);
 extern void WarnWithContext(
     const char* file,
     const int line,
-    const shared_ptr<Logger> &info_log,
+    const std::shared_ptr<Logger> &info_log,
     const char *format, ...);
 extern void ErrorWithContext(
     const char* file,
     const int line,
-    const shared_ptr<Logger> &info_log,
+    const std::shared_ptr<Logger> &info_log,
     const char *format, ...);
 extern void FatalWithContext(
     const char* file,
     const int line,
-    const shared_ptr<Logger> &info_log,
+    const std::shared_ptr<Logger> &info_log,
     const char *format, ...);
 
 // Log the specified data to *info_log if info_log is non-nullptr.
 // The default info log level is InfoLogLevel::ERROR.
 extern void LogWithContext(const char* file,
                            const int line,
-                           const shared_ptr<Logger>& info_log,
+                           const std::shared_ptr<Logger>& info_log,
                            const char* format,
                            ...)
 #   if defined(__GNUC__) || defined(__clang__)
@@ -838,76 +632,44 @@ class EnvWrapper : public Env {
 
   // The following text is boilerplate that forwards all methods to target()
   Status NewSequentialFile(const std::string& f, std::unique_ptr<SequentialFile>* r,
-                           const EnvOptions& options) override {
-    return target_->NewSequentialFile(f, r, options);
-  }
+                           const EnvOptions& options) override;
   Status NewRandomAccessFile(const std::string& f,
-                             unique_ptr<RandomAccessFile>* r,
-                             const EnvOptions& options) override {
-    return target_->NewRandomAccessFile(f, r, options);
-  }
-  Status NewWritableFile(const std::string& f, unique_ptr<WritableFile>* r,
-                         const EnvOptions& options) override {
-    return target_->NewWritableFile(f, r, options);
-  }
+                             std::unique_ptr<RandomAccessFile>* r,
+                             const EnvOptions& options) override;
+  Status NewWritableFile(const std::string& f, std::unique_ptr<WritableFile>* r,
+                         const EnvOptions& options) override;
   Status ReuseWritableFile(const std::string& fname,
                            const std::string& old_fname,
-                           unique_ptr<WritableFile>* r,
-                           const EnvOptions& options) override {
-    return target_->ReuseWritableFile(fname, old_fname, r, options);
-  }
+                           std::unique_ptr<WritableFile>* r,
+                           const EnvOptions& options) override;
   virtual Status NewDirectory(const std::string& name,
-                              unique_ptr<Directory>* result) override {
-    return target_->NewDirectory(name, result);
-  }
-  Status FileExists(const std::string& f) override {
-    return target_->FileExists(f);
-  }
+                              std::unique_ptr<Directory>* result) override;
+  Status FileExists(const std::string& f) override;
+
   bool DirExists(const std::string& f) override {
     return target_->DirExists(f);
   }
+
   Status GetChildren(const std::string& dir,
-                     std::vector<std::string>* r) override {
-    return target_->GetChildren(dir, r);
-  }
+                     std::vector<std::string>* r) override;
   Status GetChildrenFileAttributes(
-      const std::string& dir, std::vector<FileAttributes>* result) override {
-    return target_->GetChildrenFileAttributes(dir, result);
-  }
-  Status DeleteFile(const std::string& f) override {
-    return target_->DeleteFile(f);
-  }
-  Status CreateDir(const std::string& d) override {
-    return target_->CreateDir(d);
-  }
-  Status CreateDirIfMissing(const std::string& d) override {
-    return target_->CreateDirIfMissing(d);
-  }
-  Status DeleteDir(const std::string& d) override {
-    return target_->DeleteDir(d);
-  }
-  Status GetFileSize(const std::string& f, uint64_t* s) override {
-    return target_->GetFileSize(f, s);
-  }
+      const std::string& dir, std::vector<FileAttributes>* result) override;
+  Status DeleteFile(const std::string& f) override;
+  Status CreateDir(const std::string& d) override;
+  Status CreateDirIfMissing(const std::string& d) override;
+  Status DeleteDir(const std::string& d) override;
+  Status GetFileSize(const std::string& f, uint64_t* s) override;
 
   Status GetFileModificationTime(const std::string& fname,
-                                 uint64_t* file_mtime) override {
-    return target_->GetFileModificationTime(fname, file_mtime);
-  }
+                                 uint64_t* file_mtime) override;
 
-  Status RenameFile(const std::string& s, const std::string& t) override {
-    return target_->RenameFile(s, t);
-  }
+  Status RenameFile(const std::string& s, const std::string& t) override;
 
-  Status LinkFile(const std::string& s, const std::string& t) override {
-    return target_->LinkFile(s, t);
-  }
+  Status LinkFile(const std::string& s, const std::string& t) override;
 
-  Status LockFile(const std::string& f, FileLock** l) override {
-    return target_->LockFile(f, l);
-  }
+  Status LockFile(const std::string& f, FileLock** l) override;
 
-  Status UnlockFile(FileLock* l) override { return target_->UnlockFile(l); }
+  Status UnlockFile(FileLock* l) override;
 
   void Schedule(void (*f)(void* arg), void* a, Priority pri,
                 void* tag = nullptr, void (*u)(void* arg) = 0) override {
@@ -926,27 +688,17 @@ class EnvWrapper : public Env {
       Priority pri = LOW) const override {
     return target_->GetThreadPoolQueueLen(pri);
   }
-  virtual Status GetTestDirectory(std::string* path) override {
-    return target_->GetTestDirectory(path);
-  }
+  virtual Status GetTestDirectory(std::string* path) override;
   virtual Status NewLogger(const std::string& fname,
-                           shared_ptr<Logger>* result) override {
-    return target_->NewLogger(fname, result);
-  }
+                           std::shared_ptr<Logger>* result) override;
   uint64_t NowMicros() override { return target_->NowMicros(); }
   void SleepForMicroseconds(int micros) override {
     target_->SleepForMicroseconds(micros);
   }
-  Status GetHostName(char* name, uint64_t len) override {
-    return target_->GetHostName(name, len);
-  }
-  Status GetCurrentTime(int64_t* unix_time) override {
-    return target_->GetCurrentTime(unix_time);
-  }
+  Status GetHostName(char* name, uint64_t len) override;
+  Status GetCurrentTime(int64_t* unix_time) override;
   Status GetAbsolutePath(const std::string& db_path,
-                         std::string* output_path) override {
-    return target_->GetAbsolutePath(db_path, output_path);
-  }
+                         std::string* output_path) override;
   void SetBackgroundThreads(int num, Priority pri) override {
     return target_->SetBackgroundThreads(num, pri);
   }
@@ -975,53 +727,6 @@ class EnvWrapper : public Env {
   Env* target_;
 };
 
-// An implementation of WritableFile that forwards all calls to another
-// WritableFile. May be useful to clients who wish to override just part of the
-// functionality of another WritableFile.
-// It's declared as friend of WritableFile to allow forwarding calls to
-// protected virtual methods.
-class WritableFileWrapper : public WritableFile {
- public:
-  explicit WritableFileWrapper(std::unique_ptr<WritableFile> t) : target_(std::move(t)) { }
-
-  Status Append(const Slice& data) override { return target_->Append(data); }
-  Status PositionedAppend(const Slice& data, uint64_t offset) override {
-    return target_->PositionedAppend(data, offset);
-  }
-  Status Truncate(uint64_t size) override { return target_->Truncate(size); }
-  Status Close() override { return target_->Close(); }
-  Status Flush() override { return target_->Flush(); }
-  Status Sync() override { return target_->Sync(); }
-  Status Fsync() override { return target_->Fsync(); }
-  bool IsSyncThreadSafe() const override { return target_->IsSyncThreadSafe(); }
-  void SetIOPriority(Env::IOPriority pri) override {
-    target_->SetIOPriority(pri);
-  }
-  Env::IOPriority GetIOPriority() override { return target_->GetIOPriority(); }
-  uint64_t GetFileSize() override { return target_->GetFileSize(); }
-  void GetPreallocationStatus(size_t* block_size,
-                              size_t* last_allocated_block) override {
-    target_->GetPreallocationStatus(block_size, last_allocated_block);
-  }
-  size_t GetUniqueId(char* id) const override {
-    return target_->GetUniqueId(id);
-  }
-  Status InvalidateCache(size_t offset, size_t length) override {
-    return target_->InvalidateCache(offset, length);
-  }
-
- protected:
-  Status Allocate(uint64_t offset, uint64_t len) override {
-    return target_->Allocate(offset, len);
-  }
-  Status RangeSync(uint64_t offset, uint64_t nbytes) override {
-    return target_->RangeSync(offset, nbytes);
-  }
-
- private:
-  std::unique_ptr<WritableFile> target_;
-};
-
 // Returns a new environment that stores its data in memory and delegates
 // all non-file-storage tasks to base_env. The caller must delete the result
 // when it is no longer needed.
@@ -1033,5 +738,3 @@ Env* NewMemEnv(Env* base_env);
 Status NewHdfsEnv(Env** hdfs_env, const std::string& fsname);
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_ENV_H

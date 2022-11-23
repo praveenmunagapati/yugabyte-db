@@ -34,16 +34,16 @@
 #include "yb/tools/fs_tool.h"
 
 #include <iostream>
-#include <sstream>
 #include <vector>
 
-#include <gflags/gflags.h>
 #include <glog/logging.h>
 
 #include "yb/util/flags.h"
 #include "yb/util/logging.h"
+#include "yb/util/status.h"
+#include "yb/util/status_log.h"
 
-DEFINE_bool(verbose, false,
+DEFINE_UNKNOWN_bool(verbose, false,
             "Print additional information (e.g., log segment headers)");
 
 namespace yb {

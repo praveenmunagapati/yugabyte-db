@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_TABLET_TABLET_BOOTSTRAP_H
-#define YB_TABLET_TABLET_BOOTSTRAP_H
+#pragma once
 
 #include "yb/tablet/tablet_bootstrap_if.h"
 
@@ -40,7 +39,7 @@ namespace tablet {
 // Plays the log segments, rebuilding the portion of the Tablet's soft state that is present in
 // the log (additional soft state may be present in other replicas).  A successful call will yield
 // the rebuilt tablet and the rebuilt log.
-CHECKED_STATUS BootstrapTabletImpl(
+Status BootstrapTabletImpl(
     const BootstrapTabletData& data,
     TabletPtr* rebuilt_tablet,
     log::LogPtr* rebuilt_log,
@@ -48,5 +47,3 @@ CHECKED_STATUS BootstrapTabletImpl(
 
 }  // namespace tablet
 }  // namespace yb
-
-#endif // YB_TABLET_TABLET_BOOTSTRAP_H

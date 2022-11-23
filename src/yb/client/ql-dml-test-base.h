@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_CLIENT_QL_DML_TEST_BASE_H
-#define YB_CLIENT_QL_DML_TEST_BASE_H
+#pragma once
 
 #include <algorithm>
 #include <functional>
@@ -20,18 +19,19 @@
 
 #include <gtest/gtest.h>
 
-#include "yb/client/client.h"
-#include "yb/client/yb_op.h"
 #include "yb/client/callbacks.h"
 #include "yb/client/table_handle.h"
 #include "yb/common/ql_protocol.pb.h"
 #include "yb/common/ql_rowblock.h"
+
+#include "yb/server/server_fwd.h"
+
 #include "yb/integration-tests/external_mini_cluster.h"
 #include "yb/integration-tests/mini_cluster.h"
 #include "yb/integration-tests/yb_mini_cluster_test_base.h"
 #include "yb/master/mini_master.h"
 #include "yb/tablet/tablet_fwd.h"
-#include "yb/util/async_util.h"
+#include "yb/util/result.h"
 #include "yb/util/test_util.h"
 
 namespace yb {
@@ -49,7 +49,7 @@ class QLDmlTestBase : public MiniClusterTestWithClient<MiniClusterType> {
   virtual ~QLDmlTestBase() {}
 
  protected:
-  void SetFlags();
+  virtual void SetFlags();
   void StartCluster();
 
   using MiniClusterTestWithClient<MiniClusterType>::client_;
@@ -64,6 +64,14 @@ namespace kv_table_test {
 
 constexpr const auto kKeyColumn = "key";
 constexpr const auto kValueColumn = "value";
+
+YB_DEFINE_ENUM(Partitioning, (kHash)(kRange))
+
+void BuildSchema(Partitioning partitioning, Schema* schema);
+
+Status CreateTable(
+    const Schema& schema, int num_tablets, YBClient* client,
+    TableHandle* table, const YBTableName& table_name = kTableName);
 
 void CreateTable(
     Transactional transactional, int num_tablets, YBClient* client, TableHandle* table,
@@ -107,6 +115,8 @@ template <class MiniClusterType>
 class KeyValueTableTest : public QLDmlTestBase<MiniClusterType> {
  protected:
   void CreateTable(Transactional transactional);
+
+  Status CreateTable(const Schema& schema);
 
   void CreateIndex(Transactional transactional,
                    int indexed_column_index = 1,
@@ -167,9 +177,7 @@ class KeyValueTableTest : public QLDmlTestBase<MiniClusterType> {
 extern template class KeyValueTableTest<MiniCluster>;
 extern template class KeyValueTableTest<ExternalMiniCluster>;
 
-CHECKED_STATUS CheckOp(YBqlOp* op);
+Status CheckOp(YBqlOp* op);
 
 }  // namespace client
 }  // namespace yb
-
-#endif // YB_CLIENT_QL_DML_TEST_BASE_H

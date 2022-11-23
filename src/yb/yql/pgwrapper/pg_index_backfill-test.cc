@@ -10,21 +10,36 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 
-#include <array>
 #include <cmath>
 #include <map>
 #include <string>
 #include <vector>
 
-#include "yb/client/table.h"
-#include "yb/gutil/strings/join.h"
+#include "yb/client/client-test-util.h"
+#include "yb/client/table_info.h"
+
+#include "yb/common/schema.h"
+
 #include "yb/integration-tests/backfill-test-util.h"
+
+#include "yb/master/master_admin.proxy.h"
+#include "yb/master/master_admin.pb.h"
+#include "yb/master/master_error.h"
+
+#include "yb/tserver/tserver_service.pb.h"
+
+#include "yb/util/async_util.h"
 #include "yb/util/backoff_waiter.h"
+#include "yb/util/format.h"
 #include "yb/util/monotime.h"
-#include "yb/util/stol_utils.h"
-#include "yb/util/test_util.h"
+#include "yb/util/status_format.h"
+#include "yb/util/test_thread_holder.h"
+#include "yb/util/tsan_util.h"
+
 #include "yb/yql/pgwrapper/libpq_test_base.h"
 #include "yb/yql/pgwrapper/libpq_utils.h"
+
+using std::string;
 
 using namespace std::chrono_literals;
 
@@ -62,34 +77,81 @@ class PgIndexBackfillTest : public LibPqTestBase {
   }
 
  protected:
+  Result<bool> IsAtTargetIndexStateFlags(
+      const std::string& index_name,
+      const IndexStateFlags& target_index_state_flags) {
+    Result<IndexStateFlags> res = GetIndexStateFlags(index_name);
+    IndexStateFlags actual_index_state_flags;
+    if (res.ok()) {
+      actual_index_state_flags = res.get();
+    } else if (res.status().IsNotFound()) {
+      LOG(WARNING) << res.status();
+      return false;
+    } else {
+      return res.status();
+    }
+
+    if (actual_index_state_flags < target_index_state_flags) {
+      LOG(INFO) << index_name
+                << " not yet at target index state flags "
+                << ToString(target_index_state_flags);
+      return false;
+    } else if (actual_index_state_flags > target_index_state_flags) {
+      return STATUS(RuntimeError,
+                    Format("$0 exceeded target index state flags $1",
+                           index_name,
+                           target_index_state_flags));
+    }
+    return true;
+  }
+
+  bool HasClientTimedOut(const Status& s);
   void TestSimpleBackfill(const std::string& table_create_suffix = "");
   void TestLargeBackfill(const int num_rows);
   void TestRetainDeleteMarkers(const std::string& db_name);
   const int kTabletsPerServer = 8;
 
   std::unique_ptr<PGConn> conn_;
+  TestThreadHolder thread_holder_;
+
+ private:
+  Result<IndexStateFlags> GetIndexStateFlags(const std::string& index_name) {
+    const std::string quoted_index_name = PqEscapeLiteral(index_name);
+
+    PGResultPtr res = VERIFY_RESULT(conn_->FetchFormat(
+        "SELECT indislive, indisready, indisvalid"
+        " FROM pg_class INNER JOIN pg_index ON pg_class.oid = pg_index.indexrelid"
+        " WHERE pg_class.relname = $0",
+        quoted_index_name));
+    if (PQntuples(res.get()) == 0) {
+      return STATUS_FORMAT(NotFound, "$0 not found in pg_class and/or pg_index", quoted_index_name);
+    }
+    if (int num_cols = PQnfields(res.get()) != 3) {
+      return STATUS_FORMAT(Corruption, "got unexpected number of columns: $0", num_cols);
+    }
+
+    IndexStateFlags index_state_flags;
+    if (VERIFY_RESULT(GetBool(res.get(), 0, 0))) {
+      index_state_flags.Set(IndexStateFlag::kIndIsLive);
+    }
+    if (VERIFY_RESULT(GetBool(res.get(), 0, 1))) {
+      index_state_flags.Set(IndexStateFlag::kIndIsReady);
+    }
+    if (VERIFY_RESULT(GetBool(res.get(), 0, 2))) {
+      index_state_flags.Set(IndexStateFlag::kIndIsValid);
+    }
+
+    return index_state_flags;
+  }
 };
 
 namespace {
-
-// A copy of the same function in pg_libpq-test.cc.  Eventually, issue #6868 should provide a way to
-// do this easily for both this file and that.
-Result<string> GetTableIdByTableName(
-    client::YBClient* client, const string& namespace_name, const string& table_name) {
-  const auto tables = VERIFY_RESULT(client->ListTables());
-  for (const auto& t : tables) {
-    if (t.namespace_name() == namespace_name && t.table_name() == table_name) {
-      return t.table_id();
-    }
-  }
-  return STATUS(NotFound, "The table does not exist");
-}
 
 Result<int> TotalBackfillRpcMetric(ExternalMiniCluster* cluster, const char* type) {
   int total_rpc_calls = 0;
   constexpr auto metric_name = "handler_latency_yb_tserver_TabletServerAdminService_BackfillIndex";
   for (auto ts : cluster->tserver_daemons()) {
-    auto val = VERIFY_RESULT(ts->GetInt64Metric("server", "yb.tabletserver", metric_name, type));
+    auto val = VERIFY_RESULT(ts->GetMetric<int64>("server", "yb.tabletserver", metric_name, type));
     total_rpc_calls += val;
     VLOG(1) << ts->bind_host() << " for " << type << " returned " << val;
   }
@@ -107,6 +169,22 @@ Result<double> AvgBackfillRpcLatencyInMicros(ExternalMiniCluster* cluster) {
 }
 
 } // namespace
+
+bool PgIndexBackfillTest::HasClientTimedOut(const Status& s) {
+  if (!s.IsNetworkError()) {
+    return false;
+  }
+
+  // The client timeout is set using the same backfill_index_client_rpc_timeout_ms for
+  // postgres-tserver RPC and tserver-master RPC.  Since they are the same value, it _may_ be
+  // possible for either timeout message to show up, so accept either, even though the
+  // postgres-tserver timeout is far more likely to show up.
+  //
+  // The first is postgres-tserver; the second is tserver-master.
+  const std::string msg = s.message().ToBuffer();
+  return msg.find("Timed out: BackfillIndex RPC") != std::string::npos ||
+         msg.find("Timed out waiting for Backfill Index") != std::string::npos;
+}
 
 void PgIndexBackfillTest::TestSimpleBackfill(const std::string& table_create_suffix) {
   ASSERT_OK(conn_->ExecuteFormat(
@@ -176,13 +254,57 @@ void PgIndexBackfillTest::TestLargeBackfill(const int num_rows) {
   PGResultPtr res = ASSERT_RESULT(conn_->Fetch(query));
   ASSERT_EQ(PQntuples(res.get()), 1);
   ASSERT_EQ(PQnfields(res.get()), 1);
-  int actual_num_rows = ASSERT_RESULT(GetInt64(res.get(), 0, 0));
+  auto actual_num_rows = ASSERT_RESULT(GetInt64(res.get(), 0, 0));
   ASSERT_EQ(actual_num_rows, num_rows);
 }
 
 // Make sure that backfill works.
 TEST_F(PgIndexBackfillTest, YB_DISABLE_TEST_IN_TSAN(Simple)) {
   TestSimpleBackfill();
+}
+
+TEST_F(PgIndexBackfillTest, YB_DISABLE_TEST_IN_TSAN(WaitForSplitsToComplete)) {
+  auto client = ASSERT_RESULT(cluster_->CreateClient());
+  constexpr int kTimeoutSec = 3;
+  constexpr int kNumRows = 1000;
+  // Use 1 tablet so we guarantee we have a middle key to split by.
+  ASSERT_OK(conn_->ExecuteFormat("CREATE TABLE $0 (i int) SPLIT INTO 1 TABLETS", kTableName));
+  ASSERT_OK(conn_->ExecuteFormat(
+      "INSERT INTO $0 VALUES (generate_series(1, $1))", kTableName, kNumRows));
+
+  const TabletId tablet_to_split = ASSERT_RESULT(GetSingleTabletId(kTableName));
+  // Flush the data to generate SST files that can be split.
+  const std::string table_id = ASSERT_RESULT(GetTableIdByTableName(
+      client.get(), kDatabaseName, kTableName));
+  ASSERT_OK(client->FlushTables(
+      {table_id},
+      false /* add_indexes */,
+      kTimeoutSec,
+      false /* is_compaction */));
+
+  // Create a split that will not complete until we set the test flag to true.
+  ASSERT_OK(cluster_->SetFlagOnTServers("TEST_pause_tserver_get_split_key", "true"));
+  auto proxy = cluster_->GetLeaderMasterProxy<master::MasterAdminProxy>();
+  master::SplitTabletRequestPB req;
+  req.set_tablet_id(tablet_to_split);
+  master::SplitTabletResponsePB resp;
+  rpc::RpcController rpc;
+  rpc.set_timeout(30s * kTimeMultiplier);
+  rpc::RpcController controller;
+  ASSERT_OK(proxy.SplitTablet(req, &resp, &controller));
+
+  // The create index should fail while there is an ongoing split.
+  auto status = conn_->ExecuteFormat("CREATE INDEX $0 ON $1 (i ASC)", kIndexName, kTableName);
+  ASSERT_TRUE(status.message().ToBuffer().find("failed") != std::string::npos);
+
+  // Drop the index since we don't automatically clean it up.
+  ASSERT_OK(conn_->ExecuteFormat("DROP INDEX $0", kIndexName));
+  // Allow the split to complete. We intentionally do not wait for the split to complete before
+  // trying to create the index again, to validate that in a normal case (in which we don't have
+  // a split that is stuck), the timeout on FLAGS_index_backfill_tablet_split_completion_timeout_sec
+  // is large enough to allow for splits to complete.
+  ASSERT_OK(cluster_->SetFlagOnTServers("TEST_pause_tserver_get_split_key", "false"));
+  ASSERT_OK(conn_->ExecuteFormat("CREATE INDEX $0 ON $1 (i ASC)", kIndexName, kTableName));
 }
 
 // Make sure that partial indexes work for index backfill.
@@ -374,7 +496,7 @@ TEST_F(PgIndexBackfillTest, YB_DISABLE_TEST_IN_TSAN(NonexistentDelete)) {
 TEST_F(PgIndexBackfillTest, YB_DISABLE_TEST_IN_TSAN(Large)) {
   constexpr int kNumRows = 10000;
   TestLargeBackfill(kNumRows);
-  int expected_calls = cluster_->num_tablet_servers() * kTabletsPerServer;
+  auto expected_calls = cluster_->num_tablet_servers() * kTabletsPerServer;
   auto actual_calls = ASSERT_RESULT(TotalBackfillRpcCalls(cluster_.get()));
   ASSERT_GE(actual_calls, expected_calls);
 }
@@ -558,7 +680,7 @@ class PgIndexBackfillTestSimultaneously : public PgIndexBackfillTest {
  public:
   void UpdateMiniClusterOptions(ExternalMiniClusterOptions* options) override {
     options->extra_tserver_flags.push_back(
-        Format("--ysql_pg_conf_csv=yb_index_state_flags_update_delay=$0",
+        Format("--ysql_yb_index_state_flags_update_delay=$0",
                kIndexStateFlagsUpdateDelay.ToMilliseconds()));
   }
  protected:
@@ -577,7 +699,6 @@ TEST_F_EX(PgIndexBackfillTest,
   constexpr int kNumRows = 10;
   constexpr int kNumThreads = 5;
   int expected_schema_version = 0;
-  TestThreadHolder thread_holder;
 
   ASSERT_OK(conn_->ExecuteFormat("CREATE TABLE $0 (i int)", kTableName));
   ASSERT_OK(conn_->ExecuteFormat(
@@ -587,7 +708,7 @@ TEST_F_EX(PgIndexBackfillTest,
 
   std::array<Status, kNumThreads> statuses;
   for (int i = 0; i < kNumThreads; ++i) {
-    thread_holder.AddThreadFunctor([i, this, &statuses] {
+    thread_holder_.AddThreadFunctor([i, this, &statuses] {
       LOG(INFO) << "Begin thread " << i;
       PGConn create_conn = ASSERT_RESULT(ConnectToDB(kDatabaseName));
       statuses[i] = MoveStatus(create_conn.ExecuteFormat(
@@ -595,7 +716,7 @@ TEST_F_EX(PgIndexBackfillTest,
           kIndexName, kTableName));
     });
   }
-  thread_holder.JoinAll();
+  thread_holder_.JoinAll();
 
   LOG(INFO) << "Inspecting statuses";
   int num_ok = 0;
@@ -671,12 +792,12 @@ TEST_F_EX(PgIndexBackfillTest,
     // Check number of DocDB indexes.  Normally, failed indexes should be cleaned up ("Table
     // transaction failed, deleting"), but in the event of an unexpected issue, they may not be.
     // (Not necessarily a fatal issue because the postgres schema is good.)
-    int num_docdb_indexes = table_info->index_map.size();
+    auto num_docdb_indexes = table_info->index_map.size();
     if (num_docdb_indexes > 1) {
       LOG(INFO) << "found " << num_docdb_indexes << " DocDB indexes";
       // These failed indexes not getting rolled back mean one less schema change each.  Therefore,
       // adjust the expected schema version.
-      int num_failed_docdb_indexes = num_docdb_indexes - 1;
+      auto num_failed_docdb_indexes = num_docdb_indexes - 1;
       expected_schema_version -= num_failed_docdb_indexes;
     }
 
@@ -775,16 +896,13 @@ TEST_F_EX(PgIndexBackfillTest,
 
   LOG(INFO) << "backfill table on " << this->kAuthDbName << " database";
   {
-    const std::string& host = pg_ts->bind_host();
-    const uint16_t port = pg_ts->pgsql_rpc_port();
-
-    PGConn auth_conn = ASSERT_RESULT(ConnectUsingString(Format(
-        "user=$0 password=$1 host=$2 port=$3 dbname=$4",
-        "yugabyte",
-        "yugabyte",
-        host,
-        port,
-        this->kAuthDbName)));
+    auto auth_conn = ASSERT_RESULT(PGConnBuilder({
+        .host = pg_ts->bind_host(),
+        .port = pg_ts->pgsql_rpc_port(),
+        .dbname = this->kAuthDbName,
+        .user = "yugabyte",
+        .password = "yugabyte"
+    }).Connect());
     ASSERT_OK(auth_conn.ExecuteFormat("CREATE TABLE $0 (i int)", kTableName));
     ASSERT_OK(auth_conn.ExecuteFormat("CREATE INDEX ON $0 (i)", kTableName));
   }
@@ -849,16 +967,75 @@ TEST_F_EX(PgIndexBackfillTest,
   ASSERT_OK(conn_->FetchFormat("SELECT * FROM $0", kTableName));
 }
 
-// Override the index backfill test to have delays for testing snapshot too old.
-class PgIndexBackfillSnapshotTooOld : public PgIndexBackfillTest {
+// Override the index backfill test to have slower backfill-related operations
+class PgIndexBackfillSlow : public PgIndexBackfillTest {
  public:
   void UpdateMiniClusterOptions(ExternalMiniClusterOptions* options) override {
     PgIndexBackfillTest::UpdateMiniClusterOptions(options);
-    options->extra_tserver_flags.push_back("--TEST_slowdown_backfill_by_ms=10000");
-    options->extra_tserver_flags.push_back(
-        "--ysql_pg_conf_csv=yb_index_state_flags_update_delay=0");
-    options->extra_tserver_flags.push_back("--timestamp_history_retention_interval_sec=3");
+    options->extra_master_flags.push_back(Format(
+        "--TEST_slowdown_backfill_alter_table_rpcs_ms=$0",
+        kBackfillAlterTableDelay.ToMilliseconds()));
+    options->extra_tserver_flags.push_back(Format(
+        "--ysql_yb_index_state_flags_update_delay=$0",
+        kIndexStateFlagsUpdateDelay.ToMilliseconds()));
+    options->extra_tserver_flags.push_back(Format(
+        "--TEST_slowdown_backfill_by_ms=$0",
+        kBackfillDelay.ToMilliseconds()));
   }
+
+ protected:
+  // gflag delay times.
+  const MonoDelta kBackfillAlterTableDelay = 0s;
+  const MonoDelta kBackfillDelay = RegularBuildVsSanitizers(3s, 7s);
+  const MonoDelta kIndexStateFlagsUpdateDelay = RegularBuildVsDebugVsSanitizers(3s, 5s, 7s);
+};
+
+class PgIndexBackfillBlockDoBackfill : public PgIndexBackfillTest {
+ public:
+  void UpdateMiniClusterOptions(ExternalMiniClusterOptions* options) override {
+    PgIndexBackfillTest::UpdateMiniClusterOptions(options);
+    options->extra_master_flags.push_back("--TEST_block_do_backfill=true");
+  }
+
+ protected:
+  Status WaitForBackfillSafeTime(const client::YBTableName& table_name) {
+    auto client = VERIFY_RESULT(cluster_->CreateClient());
+    const std::string table_id = VERIFY_RESULT(
+        GetTableIdByTableName(client.get(), table_name.namespace_name(), table_name.table_name()));
+    RETURN_NOT_OK(WaitForBackfillSafeTimeOn(
+        cluster_->GetLeaderMasterProxy<master::MasterDdlProxy>(), table_id));
+    return Status::OK();
+  }
+};
+
+class PgIndexBackfillBlockIndisready : public PgIndexBackfillTest {
+ public:
+  void UpdateMiniClusterOptions(ExternalMiniClusterOptions* options) override {
+    PgIndexBackfillTest::UpdateMiniClusterOptions(options);
+    options->extra_tserver_flags.push_back("--ysql_yb_test_block_index_state_change=indisready");
+  }
+};
+
+class PgIndexBackfillBlockIndisreadyAndDoBackfill : public PgIndexBackfillBlockDoBackfill {
+ public:
+  void UpdateMiniClusterOptions(ExternalMiniClusterOptions* options) override {
+    PgIndexBackfillBlockDoBackfill::UpdateMiniClusterOptions(options);
+    options->extra_tserver_flags.push_back("--ysql_yb_test_block_index_state_change=indisready");
+  }
+};
+
+// Override the index backfill test to have delays for testing snapshot too old.
+class PgIndexBackfillSnapshotTooOld : public PgIndexBackfillBlockDoBackfill {
+ public:
+  void UpdateMiniClusterOptions(ExternalMiniClusterOptions* options) override {
+    PgIndexBackfillBlockDoBackfill::UpdateMiniClusterOptions(options);
+    options->extra_tserver_flags.push_back("--ysql_yb_index_state_flags_update_delay=0");
+    options->extra_tserver_flags.push_back(Format(
+        "--timestamp_history_retention_interval_sec=$0", kHistoryRetentionInterval.ToSeconds()));
+  }
+
+ protected:
+  const MonoDelta kHistoryRetentionInterval = 3s;
 };
 
 // Make sure that index backfill doesn't care about snapshot too old.  Force a situation where the
@@ -870,7 +1047,6 @@ TEST_F_EX(PgIndexBackfillTest,
           PgIndexBackfillSnapshotTooOld) {
   auto client = ASSERT_RESULT(cluster_->CreateClient());
   constexpr int kTimeoutSec = 3;
-  TestThreadHolder thread_holder;
 
   // (Make it one tablet for simplicity.)
   LOG(INFO) << "Create table...";
@@ -884,7 +1060,7 @@ TEST_F_EX(PgIndexBackfillTest,
   ASSERT_OK(conn_->ExecuteFormat("INSERT INTO $0 VALUES ('s')", kTableName));
 
   // conn_ should be used by at most one thread for thread safety.
-  thread_holder.AddThreadFunctor([this] {
+  thread_holder_.AddThreadFunctor([this] {
     LOG(INFO) << "Begin create thread";
     LOG(INFO) << "Create index...";
     Status s = conn_->ExecuteFormat("CREATE INDEX $0 ON $1 (c)", kIndexName, kTableName);
@@ -898,15 +1074,12 @@ TEST_F_EX(PgIndexBackfillTest,
       FAIL() << "got snapshot too old: " << s;
     }
   });
-  thread_holder.AddThreadFunctor([&client, &table_id] {
+  thread_holder_.AddThreadFunctor([this, &client, &table_id] {
     LOG(INFO) << "Begin compact thread";
-    // Sleep until we are in the interval
-    //   (read_time + history_retention_interval, read_time + slowdown_backfill)
-    // = (read_time + 3s, read_time + 10s)
-    // Choose read_time + 5s.
-    LOG(INFO) << "Sleep...";
-    SleepFor(1s); // approximate setup time before getting to the backfill stage
-    SleepFor(5s);
+    ASSERT_OK(WaitForBackfillSafeTime(kYBTableName));
+
+    LOG(INFO) << "Sleep past history retention...";
+    SleepFor(kHistoryRetentionInterval);
 
     LOG(INFO) << "Flush and compact indexed table...";
     ASSERT_OK(client->FlushTables(
@@ -919,135 +1092,12 @@ TEST_F_EX(PgIndexBackfillTest,
         false /* add_indexes */,
         kTimeoutSec,
         true /* is_compaction */));
+
+    LOG(INFO) << "Unblock backfill...";
+    ASSERT_OK(cluster_->SetFlagOnMasters("TEST_block_do_backfill", "false"));
   });
-  thread_holder.JoinAll();
+  thread_holder_.JoinAll();
 }
-
-// Override the index backfill test to have slower backfill-related operations
-class PgIndexBackfillSlow : public PgIndexBackfillTest {
- public:
-  void UpdateMiniClusterOptions(ExternalMiniClusterOptions* options) override {
-    PgIndexBackfillTest::UpdateMiniClusterOptions(options);
-    options->extra_master_flags.push_back(Format(
-        "--TEST_slowdown_backfill_alter_table_rpcs_ms=$0",
-        kBackfillAlterTableDelay.ToMilliseconds()));
-    options->extra_tserver_flags.push_back(Format(
-        "--ysql_pg_conf_csv=yb_index_state_flags_update_delay=$0",
-        kIndexStateFlagsUpdateDelay.ToMilliseconds()));
-    options->extra_tserver_flags.push_back(Format(
-        "--TEST_slowdown_backfill_by_ms=$0",
-        kBackfillDelay.ToMilliseconds()));
-  }
-
- protected:
-  Result<bool> IsAtTargetIndexStateFlags(
-      const std::string& index_name,
-      const IndexStateFlags& target_index_state_flags) {
-    Result<IndexStateFlags> res = GetIndexStateFlags(index_name);
-    IndexStateFlags actual_index_state_flags;
-    if (res.ok()) {
-      actual_index_state_flags = res.get();
-    } else if (res.status().IsNotFound()) {
-      LOG(WARNING) << res.status();
-      return false;
-    } else {
-      return res.status();
-    }
-
-    if (actual_index_state_flags < target_index_state_flags) {
-      LOG(INFO) << index_name
-                << " not yet at target index state flags "
-                << ToString(target_index_state_flags);
-      return false;
-    } else if (actual_index_state_flags > target_index_state_flags) {
-      return STATUS(RuntimeError,
-                    Format("$0 exceeded target index state flags $1",
-                           index_name,
-                           target_index_state_flags));
-    }
-    return true;
-  }
-
-  CHECKED_STATUS WaitForBackfillSafeTime(
-      const client::YBTableName& table_name, const std::string& index_name) {
-    LOG(INFO) << "Waiting for pg_index indislive to be true";
-    RETURN_NOT_OK(WaitFor(
-        [this, &index_name] {
-          return IsAtTargetIndexStateFlags(index_name, IndexStateFlags{IndexStateFlag::kIndIsLive});
-        },
-        kCreateIndexStartupGracePeriod,
-        "Wait for pg_index indislive=true",
-        MonoDelta::FromMilliseconds(test_util::kDefaultInitialWaitMs),
-        test_util::kDefaultWaitDelayMultiplier,
-        kMaxDelay));
-
-    LOG(INFO) << "Waiting for pg_index indisready to be true";
-    RETURN_NOT_OK(WaitFor(
-        [this, &index_name] {
-          return IsAtTargetIndexStateFlags(
-              index_name, IndexStateFlags{IndexStateFlag::kIndIsLive, IndexStateFlag::kIndIsReady});
-        },
-        kIndexStateFlagsUpdateDelay + kIndexStateFlagsUpdateGracePeriod,
-        "Wait for pg_index indisready=true",
-        kIndexStateFlagsUpdateDelay - kMaxDelay /* initial_delay */,
-        test_util::kDefaultWaitDelayMultiplier,
-        kMaxDelay));
-
-    LOG(INFO) << "Waiting till (approx) the end of the delay after committing indisready true";
-    SleepFor(kIndexStateFlagsUpdateDelay);
-
-    auto client = VERIFY_RESULT(cluster_->CreateClient());
-    const std::string table_id = VERIFY_RESULT(
-        GetTableIdByTableName(client.get(), table_name.namespace_name(), table_name.table_name()));
-    RETURN_NOT_OK(WaitForBackfillSafeTimeOn(cluster_->GetLeaderMasterProxy(), table_id));
-
-    return Status::OK();
-  }
-
-  // buffer times for unexpected situations.
-  const MonoDelta kCreateIndexStartupGracePeriod = 30s;
-  const MonoDelta kIndexStateFlagsUpdateGracePeriod = 5s;
-
-  // gflag delay times.
-  const MonoDelta kBackfillAlterTableDelay = 0s;
-  const MonoDelta kBackfillDelay = RegularBuildVsSanitizers(3s, 7s);
-  const MonoDelta kIndexStateFlagsUpdateDelay = RegularBuildVsSanitizers(3s, 7s);
-
-  // maximum delay between checks on index state flags.
-  const MonoDelta kMaxDelay = 100ms;
-
-  TestThreadHolder thread_holder_;
-
- private:
-  Result<IndexStateFlags> GetIndexStateFlags(const std::string& index_name) {
-    const std::string quoted_index_name = PqEscapeLiteral(index_name);
-
-    PGResultPtr res = VERIFY_RESULT(conn_->FetchFormat(
-        "SELECT indislive, indisready, indisvalid"
-        " FROM pg_class INNER JOIN pg_index ON pg_class.oid = pg_index.indexrelid"
-        " WHERE pg_class.relname = $0",
-        quoted_index_name));
-    if (PQntuples(res.get()) == 0) {
-      return STATUS_FORMAT(NotFound, "$0 not found in pg_class and/or pg_index", quoted_index_name);
-    }
-    if (int num_cols = PQnfields(res.get()) != 3) {
-      return STATUS_FORMAT(Corruption, "got unexpected number of columns: $0", num_cols);
-    }
-
-    IndexStateFlags index_state_flags;
-    if (VERIFY_RESULT(GetBool(res.get(), 0, 0))) {
-      index_state_flags.Set(IndexStateFlag::kIndIsLive);
-    }
-    if (VERIFY_RESULT(GetBool(res.get(), 0, 1))) {
-      index_state_flags.Set(IndexStateFlag::kIndIsReady);
-    }
-    if (VERIFY_RESULT(GetBool(res.get(), 0, 2))) {
-      index_state_flags.Set(IndexStateFlag::kIndIsValid);
-    }
-
-    return index_state_flags;
-  }
-};
 
 // Make sure that read time (and write time) for backfill works.  Simulate the following:
 //   Session A                                    Session B
@@ -1065,7 +1115,7 @@ class PgIndexBackfillSlow : public PgIndexBackfillTest {
 // timestamp, the update should appear to have happened after the backfill.
 TEST_F_EX(PgIndexBackfillTest,
           YB_DISABLE_TEST_IN_TSAN(ReadTime),
-          PgIndexBackfillSlow) {
+          PgIndexBackfillBlockDoBackfill) {
   ASSERT_OK(conn_->ExecuteFormat(
       "CREATE TABLE $0 (i int, j int, PRIMARY KEY (i ASC))", kTableName));
   ASSERT_OK(conn_->ExecuteFormat(
@@ -1079,15 +1129,17 @@ TEST_F_EX(PgIndexBackfillTest,
   });
   thread_holder_.AddThreadFunctor([this] {
     LOG(INFO) << "Begin write thread";
-    ASSERT_OK(WaitForBackfillSafeTime(kYBTableName, kIndexName));
+    ASSERT_OK(WaitForBackfillSafeTime(kYBTableName));
 
     LOG(INFO) << "Updating row";
     ASSERT_OK(conn_->ExecuteFormat("UPDATE $0 SET j = j + 100 WHERE i = 3", kTableName));
     LOG(INFO) << "Done updating row";
 
-    // It should still be in the backfill stage, hopefully before the actual backfill started.
+    // It should still be in the backfill stage.
     ASSERT_TRUE(ASSERT_RESULT(IsAtTargetIndexStateFlags(
         kIndexName, IndexStateFlags{IndexStateFlag::kIndIsLive, IndexStateFlag::kIndIsReady})));
+
+    ASSERT_OK(cluster_->SetFlagOnMasters("TEST_block_do_backfill", "false"));
   });
   thread_holder_.JoinAll();
 
@@ -1097,7 +1149,7 @@ TEST_F_EX(PgIndexBackfillTest,
       [this, &query] {
         return conn_->HasIndexScan(query);
       },
-      kIndexStateFlagsUpdateGracePeriod + kIndexStateFlagsUpdateDelay,
+      30s,
       "Wait for IndexScan"));
   PGResultPtr res = ASSERT_RESULT(conn_->Fetch(query));
   int lines = PQntuples(res.get());
@@ -1124,16 +1176,17 @@ TEST_F_EX(PgIndexBackfillTest,
 // Updates should succeed and get written to the index.
 TEST_F_EX(PgIndexBackfillTest,
           YB_DISABLE_TEST_IN_TSAN(Permissions),
-          PgIndexBackfillSlow) {
+          PgIndexBackfillBlockIndisready) {
   const CoarseDuration kThreadWaitTime = 60s;
-  const std::array<std::pair<IndexStateFlags, int>, 3> index_state_flags_key_pairs = {
-    std::make_pair(IndexStateFlags{IndexStateFlag::kIndIsLive}, 2),
-    std::make_pair(IndexStateFlags{IndexStateFlag::kIndIsLive, IndexStateFlag::kIndIsReady}, 3),
-    std::make_pair(IndexStateFlags{
-        IndexStateFlag::kIndIsLive,
-        IndexStateFlag::kIndIsReady,
-        IndexStateFlag::kIndIsValid,
-      }, 4),
+  const std::array<std::tuple<IndexStateFlags, int, std::string>, 3> infos = {
+    std::make_tuple(IndexStateFlags{IndexStateFlag::kIndIsLive}, 2, "indisvalid"),
+    std::make_tuple(
+        IndexStateFlags{IndexStateFlag::kIndIsLive, IndexStateFlag::kIndIsReady}, 3, "none"),
+    std::make_tuple(
+        IndexStateFlags{
+          IndexStateFlag::kIndIsLive, IndexStateFlag::kIndIsReady, IndexStateFlag::kIndIsValid},
+        4,
+        "none"),
   };
   std::atomic<int> updates(0);
 
@@ -1148,53 +1201,38 @@ TEST_F_EX(PgIndexBackfillTest,
     PGConn create_conn = ASSERT_RESULT(ConnectToDB(kDatabaseName));
     ASSERT_OK(create_conn.ExecuteFormat("CREATE INDEX $0 ON $1 (j ASC)", kIndexName, kTableName));
   });
-  thread_holder_.AddThreadFunctor([this, &index_state_flags_key_pairs, &updates] {
+  thread_holder_.AddThreadFunctor([this, &infos, &updates] {
     LOG(INFO) << "Begin write thread";
-    for (const auto& pair : index_state_flags_key_pairs) {
-      const IndexStateFlags& index_state_flags = pair.first;
-      int key = pair.second;
+    for (const auto& tup : infos) {
+      const IndexStateFlags& index_state_flags = std::get<0>(tup);
+      int key = std::get<1>(tup);
+      const auto& label = std::get<2>(tup);
 
-      MonoDelta timeout;
-      if (index_state_flags == IndexStateFlags{IndexStateFlag::kIndIsLive}) {
-        timeout = kCreateIndexStartupGracePeriod;
-      } else if (index_state_flags == IndexStateFlags{
-            IndexStateFlag::kIndIsLive,
-            IndexStateFlag::kIndIsReady,
-          }) {
-        timeout = kIndexStateFlagsUpdateDelay + kIndexStateFlagsUpdateGracePeriod;
-      } else {
-        ASSERT_TRUE((index_state_flags == IndexStateFlags{
-            IndexStateFlag::kIndIsLive,
-            IndexStateFlag::kIndIsReady,
-            IndexStateFlag::kIndIsValid,
-          }));
-        timeout = ((kIndexStateFlagsUpdateDelay + kIndexStateFlagsUpdateGracePeriod)
-                   + (kBackfillAlterTableDelay * 2)
-                   + (kBackfillDelay + kIndexStateFlagsUpdateGracePeriod));
-      }
       ASSERT_OK(WaitFor(
           [this, &index_state_flags] {
             return IsAtTargetIndexStateFlags(kIndexName, index_state_flags);
           },
-          timeout,
+          30s,
           Format("get index state flags: $0", index_state_flags)));
       LOG(INFO) << "running UPDATE on i = " << key;
       ASSERT_OK(conn_->ExecuteFormat("UPDATE $0 SET j = j + 100 WHERE i = $1", kTableName, key));
       LOG(INFO) << "done running UPDATE on i = " << key;
 
-      // Make sure permission didn't change yet.
+      // Unblock state change (if any).
       ASSERT_TRUE(ASSERT_RESULT(IsAtTargetIndexStateFlags(kIndexName, index_state_flags)));
+      ASSERT_OK(cluster_->SetFlagOnTServers("ysql_yb_test_block_index_state_change", label));
       updates++;
     }
   });
   thread_holder_.WaitAndStop(kThreadWaitTime);
 
-  ASSERT_EQ(updates.load(std::memory_order_acquire), index_state_flags_key_pairs.size());
+  ASSERT_EQ(updates.load(std::memory_order_acquire), infos.size());
 
-  for (const auto& pair : index_state_flags_key_pairs) {
-    int key = pair.second;
+  for (const auto& tup : infos) {
+    int key = std::get<1>(tup);
 
     // Verify contents of index table.
+    LOG(INFO) << "verifying i = " << key;
     const std::string query = Format(
         "WITH j_idx AS (SELECT * FROM $0 ORDER BY j) SELECT j FROM j_idx WHERE i = $1",
         kTableName,
@@ -1203,7 +1241,7 @@ TEST_F_EX(PgIndexBackfillTest,
         [this, &query] {
           return conn_->HasIndexScan(query);
         },
-        kIndexStateFlagsUpdateGracePeriod + kIndexStateFlagsUpdateDelay,
+        30s,
         "Wait for IndexScan"));
     PGResultPtr res = ASSERT_RESULT(conn_->Fetch(query));
     int lines = PQntuples(res.get());
@@ -1220,17 +1258,17 @@ TEST_F_EX(PgIndexBackfillTest,
 // thrown.  Simulate the following:
 //   Session A                                    Session B
 //   --------------------------                   ---------------------------------
-//                                                INSERT a row to the indexed table
+//                                                INSERT row(s) to the indexed table
 //   CREATE UNIQUE INDEX
-//                                                INSERT a row to the indexed table
+//                                                INSERT row(s) to the indexed table
 //   - indislive
-//                                                INSERT a row to the indexed table
+//                                                INSERT row(s) to the indexed table
 //   - indisready
-//                                                INSERT a row to the indexed table
+//                                                INSERT row(s) to the indexed table
 //   - backfill
-//                                                INSERT a row to the indexed table
+//                                                INSERT row(s) to the indexed table
 //   - indisvalid
-//                                                INSERT a row to the indexed table
+//                                                INSERT row(s) to the indexed table
 // Particularly pay attention to the insert between indisready and backfill.  The insert
 // should cause a write to go to the index.  Backfill should choose a read time after this write, so
 // it should try to backfill this same row.  Rather than conflicting when we see the row already
@@ -1255,7 +1293,7 @@ TEST_F_EX(PgIndexBackfillTest,
         std::string msg = status.message().ToBuffer();
         const std::vector<std::string> allowed_msgs{
           "Errors occurred while reaching out to the tablet servers",
-          "Resource unavailable : RocksDB",
+          "Resource unavailable",
           "schema version mismatch",
           "Transaction aborted",
           "expired or aborted by a conflict",
@@ -1301,7 +1339,7 @@ TEST_F_EX(PgIndexBackfillTest,
 // This test is for issue #6208.
 TEST_F_EX(PgIndexBackfillTest,
           YB_DISABLE_TEST_IN_TSAN(CreateUniqueIndexWriteAfterSafeTime),
-          PgIndexBackfillSlow) {
+          PgIndexBackfillBlockIndisreadyAndDoBackfill) {
   ASSERT_OK(conn_->ExecuteFormat("CREATE TABLE $0 (i int, j char, PRIMARY KEY (i))", kTableName));
   ASSERT_OK(conn_->ExecuteFormat("INSERT INTO $0 VALUES (1, 'a')", kTableName));
 
@@ -1326,7 +1364,7 @@ TEST_F_EX(PgIndexBackfillTest,
           [this, &index_state_flags] {
             return IsAtTargetIndexStateFlags(kIndexName, index_state_flags);
           },
-          kCreateIndexStartupGracePeriod,
+          30s,
           Format("get index state flags: $0", index_state_flags)));
 
       LOG(INFO) << "Do delete and insert";
@@ -1337,46 +1375,17 @@ TEST_F_EX(PgIndexBackfillTest,
       ASSERT_TRUE(ASSERT_RESULT(IsAtTargetIndexStateFlags(kIndexName, index_state_flags)));
     }
 
-    {
-      const IndexStateFlags index_state_flags{
-        IndexStateFlag::kIndIsLive,
-        IndexStateFlag::kIndIsReady,
-      };
+    // Unblock CREATE INDEX waiting to set indisready.  The next blocking point is by master's
+    // TEST_block_do_backfill.
+    ASSERT_OK(cluster_->SetFlagOnTServers("ysql_yb_test_block_index_state_change", "none"));
 
-      LOG(INFO) << "Wait for indisready index state flag";
-      ASSERT_OK(WaitFor(
-          [this, &index_state_flags] {
-            return IsAtTargetIndexStateFlags(kIndexName, index_state_flags);
-          },
-          kIndexStateFlagsUpdateDelay + kIndexStateFlagsUpdateGracePeriod,
-          Format("get index state flags: $0", index_state_flags)));
-    }
+    ASSERT_OK(WaitForBackfillSafeTime(kYBTableName));
 
-    {
-      LOG(INFO) << "Wait for backfill (approx)";
-      SleepFor(kIndexStateFlagsUpdateDelay);
+    LOG(INFO) << "Do insert between safe time and backfill";
+    ASSERT_OK(conn_->ExecuteFormat("INSERT INTO $0 VALUES (3, 'a')", kTableName));
 
-      LOG(INFO) << "Wait to get safe time for backfill (approx)";
-      SleepFor(kBackfillDelay / 2);
-
-      LOG(INFO) << "Do insert";
-      CoarseBackoffWaiter waiter(
-          CoarseMonoClock::Now() + (kBackfillDelay / 2 + kIndexStateFlagsUpdateGracePeriod),
-          CoarseMonoClock::Duration::max());
-      while (true) {
-        Status status = conn_->ExecuteFormat("INSERT INTO $0 VALUES (3, 'a')", kTableName);
-        LOG(INFO) << "Got " << yb::ToString(status);
-        if (status.ok()) {
-          break;
-        } else {
-          ASSERT_FALSE(status.IsIllegalState() &&
-                       status.message().ToBuffer().find("Duplicate value") != std::string::npos)
-              << "The insert should come before backfill, so it should not cause duplicate"
-              << " conflict.";
-          ASSERT_TRUE(waiter.Wait());
-        }
-      }
-    }
+    // Unblock CREATE INDEX waiting to do backfill.
+    ASSERT_OK(cluster_->SetFlagOnMasters("TEST_block_do_backfill", "false"));
   });
   thread_holder_.JoinAll();
 
@@ -1391,7 +1400,7 @@ TEST_F_EX(PgIndexBackfillTest,
         ASSERT_EQ(main_table_size, 2);
         break;
       }
-      ASSERT_TRUE(result.status().IsQLError()) << result.status();
+      ASSERT_TRUE(result.status().IsNetworkError()) << result.status();
       ASSERT_TRUE(result.status().message().ToBuffer().find("schema version mismatch")
                   != std::string::npos) << result.status();
       ASSERT_TRUE(waiter.Wait());
@@ -1421,7 +1430,7 @@ TEST_F_EX(PgIndexBackfillTest,
 // the delete before the backfilled row gets written.
 TEST_F_EX(PgIndexBackfillTest,
           YB_DISABLE_TEST_IN_TSAN(RetainDeletes),
-          PgIndexBackfillSlow) {
+          PgIndexBackfillBlockDoBackfill) {
   ASSERT_OK(conn_->ExecuteFormat("CREATE TABLE $0 (i int, j char, PRIMARY KEY (i))", kTableName));
   ASSERT_OK(conn_->ExecuteFormat("INSERT INTO $0 VALUES (1, 'a')", kTableName));
 
@@ -1435,14 +1444,17 @@ TEST_F_EX(PgIndexBackfillTest,
   });
   thread_holder_.AddThreadFunctor([this] {
     LOG(INFO) << "Begin write thread";
-    ASSERT_OK(WaitForBackfillSafeTime(kYBTableName, kIndexName));
+    ASSERT_OK(WaitForBackfillSafeTime(kYBTableName));
 
     LOG(INFO) << "Deleting row";
     ASSERT_OK(conn_->ExecuteFormat("DELETE FROM $0 WHERE i = 1", kTableName));
 
-    // It should still be in the backfill stage, hopefully before the actual backfill started.
+    // It should still be in the backfill stage.
     ASSERT_TRUE(ASSERT_RESULT(IsAtTargetIndexStateFlags(
         kIndexName, IndexStateFlags{IndexStateFlag::kIndIsLive, IndexStateFlag::kIndIsReady})));
+
+    // Unblock CREATE INDEX waiting to do backfill.
+    ASSERT_OK(cluster_->SetFlagOnMasters("TEST_block_do_backfill", "false"));
   });
   thread_holder_.JoinAll();
 
@@ -1450,7 +1462,7 @@ TEST_F_EX(PgIndexBackfillTest,
   const Result<PGResultPtr>& result = conn_->FetchFormat(
       "SELECT count(*) FROM $0 WHERE j = 'a'", kTableName);
   if (result.ok()) {
-    int count = ASSERT_RESULT(GetInt64(result.get().get(), 0, 0));
+    auto count = ASSERT_RESULT(GetInt64(result.get().get(), 0, 0));
     ASSERT_EQ(count, 0);
   } else if (result.status().IsNetworkError()) {
     Status s = result.status();
@@ -1467,7 +1479,7 @@ TEST_F_EX(PgIndexBackfillTest,
 
 TEST_F_EX(PgIndexBackfillTest,
           YB_DISABLE_TEST_IN_TSAN(IndexScanVisibility),
-          PgIndexBackfillSlow) {
+          PgIndexBackfillBlockDoBackfill) {
   ExternalTabletServer* diff_ts = cluster_->tablet_server(1);
   // Make sure default tserver is 0.  At the time of writing, this is set in
   // PgWrapperTestBase::SetUp.
@@ -1478,20 +1490,25 @@ TEST_F_EX(PgIndexBackfillTest,
   LOG(INFO) << "Create connection to the same tablet server as the one running CREATE INDEX";
   PGConn same_ts_conn = ASSERT_RESULT(ConnectToDB(kDatabaseName));
   LOG(INFO) << "Create connection to a different tablet server from the one running CREATE INDEX";
-  PGConn diff_ts_conn = ASSERT_RESULT(PGConn::Connect(
-      HostPort(diff_ts->bind_host(), diff_ts->pgsql_rpc_port()),
-      kDatabaseName));
+  PGConn diff_ts_conn = ASSERT_RESULT(PGConnBuilder({
+    .host = diff_ts->bind_host(),
+    .port = diff_ts->pgsql_rpc_port(),
+    .dbname = kDatabaseName
+  }).Connect());
 
   ASSERT_OK(conn_->ExecuteFormat("CREATE TABLE $0 (i int)", kTableName));
   ASSERT_OK(conn_->ExecuteFormat("INSERT INTO $0 VALUES (1)", kTableName));
 
   thread_holder_.AddThreadFunctor([this, &same_ts_conn, &diff_ts_conn] {
     LOG(INFO) << "Begin select thread";
-    ASSERT_OK(WaitForBackfillSafeTime(kYBTableName, kIndexName));
+    ASSERT_OK(WaitForBackfillSafeTime(kYBTableName));
 
     LOG(INFO) << "Load DocDB table/index schemas to pggate cache for the other connections";
     ASSERT_RESULT(same_ts_conn.FetchFormat("SELECT * FROM $0 WHERE i = 2", kTableName));
     ASSERT_RESULT(diff_ts_conn.FetchFormat("SELECT * FROM $0 WHERE i = 2", kTableName));
+
+    // Unblock DoBackfill.
+    ASSERT_OK(cluster_->SetFlagOnMasters("TEST_block_do_backfill", "false"));
   });
 
   LOG(INFO) << "Create index...";
@@ -1521,20 +1538,18 @@ TEST_F_EX(PgIndexBackfillTest,
                   << "diff_ts_has_index_scan: " << diff_ts_has_index_scan;
         return same_ts_has_index_scan && diff_ts_has_index_scan;
       },
-      kIndexStateFlagsUpdateGracePeriod + kIndexStateFlagsUpdateDelay,
+      30s,
       "Wait for IndexScan"));
   LOG(INFO) << "It took " << yb::ToString(CoarseMonoClock::Now() - start_time)
             << " for other sessions to notice that the index became public";
 }
 
-// Override the index backfill slow test to have smaller WaitUntilIndexPermissionsAtLeast deadline.
-class PgIndexBackfillSlowClientDeadline : public PgIndexBackfillSlow {
+// Override to have smaller backfill deadline.
+class PgIndexBackfillClientDeadline : public PgIndexBackfillBlockDoBackfill {
  public:
   void UpdateMiniClusterOptions(ExternalMiniClusterOptions* options) override {
-    PgIndexBackfillSlow::UpdateMiniClusterOptions(options);
-    options->extra_tserver_flags.push_back(Format(
-        "--backfill_index_client_rpc_timeout_ms=$0",
-        (kBackfillDelay / 2).ToMilliseconds()));
+    PgIndexBackfillBlockDoBackfill::UpdateMiniClusterOptions(options);
+    options->extra_tserver_flags.push_back("--backfill_index_client_rpc_timeout_ms=3000");
   }
 };
 
@@ -1548,13 +1563,10 @@ class PgIndexBackfillSlowClientDeadline : public PgIndexBackfillSlow {
 //   - (timeout)
 TEST_F_EX(PgIndexBackfillTest,
           YB_DISABLE_TEST_IN_TSAN(WaitBackfillTimeout),
-          PgIndexBackfillSlowClientDeadline) {
+          PgIndexBackfillClientDeadline) {
   ASSERT_OK(conn_->ExecuteFormat("CREATE TABLE $0 (i int)", kTableName));
   Status status = conn_->ExecuteFormat("CREATE INDEX ON $0 (i)", kTableName);
-  ASSERT_TRUE(status.IsNetworkError()) << "Got " << status;
-  const std::string msg = status.message().ToBuffer();
-  ASSERT_TRUE(msg.find("Timed out waiting for Backfill Index") != std::string::npos)
-      << status;
+  ASSERT_TRUE(HasClientTimedOut(status)) << status;
 
   // Make sure that the index is not public.
   ASSERT_FALSE(ASSERT_RESULT(conn_->HasIndexScan(Format(
@@ -1565,16 +1577,16 @@ TEST_F_EX(PgIndexBackfillTest,
 // Make sure that you can still drop an index that failed to fully create.
 TEST_F_EX(PgIndexBackfillTest,
           YB_DISABLE_TEST_IN_TSAN(DropAfterFail),
-          PgIndexBackfillSlowClientDeadline) {
+          PgIndexBackfillClientDeadline) {
   auto client = ASSERT_RESULT(cluster_->CreateClient());
   google::protobuf::RepeatedPtrField<master::TabletLocationsPB> tablets;
 
   ASSERT_OK(conn_->ExecuteFormat("CREATE TABLE $0 (i int)", kTableName));
   Status status = conn_->ExecuteFormat("CREATE INDEX $0 ON $1 (i)", kIndexName, kTableName);
-  ASSERT_TRUE(status.IsNetworkError()) << "Got " << status;
-  const std::string msg = status.message().ToBuffer();
-  ASSERT_TRUE(msg.find("Timed out waiting for Backfill Index") != std::string::npos)
-      << status;
+  ASSERT_TRUE(HasClientTimedOut(status)) << status;
+
+  // Unblock DoBackfill.
+  ASSERT_OK(cluster_->SetFlagOnMasters("TEST_block_do_backfill", "false"));
 
   // Make sure that the index exists in DocDB metadata.
   auto tables = ASSERT_RESULT(client->ListTables());
@@ -1602,11 +1614,11 @@ TEST_F_EX(PgIndexBackfillTest,
   }
 }
 
-// Override the index backfill slow test class to have a 30s BackfillIndex client timeout.
-class PgIndexBackfillFastClientTimeout : public PgIndexBackfillSlow {
+// Override to have a 30s BackfillIndex client timeout.
+class PgIndexBackfillFastClientTimeout : public PgIndexBackfillBlockDoBackfill {
  public:
   void UpdateMiniClusterOptions(ExternalMiniClusterOptions* options) override {
-    PgIndexBackfillSlow::UpdateMiniClusterOptions(options);
+    PgIndexBackfillBlockDoBackfill::UpdateMiniClusterOptions(options);
     options->extra_tserver_flags.push_back("--backfill_index_client_rpc_timeout_ms=30000");
   }
 };
@@ -1634,19 +1646,49 @@ TEST_F_EX(PgIndexBackfillTest,
     // DROP INDEX is currently not online and removes the index info from the indexed table
     // ==> the WaitUntilIndexPermissionsAtLeast will keep failing and retrying GetTableSchema on the
     // index.
-    ASSERT_TRUE(status.IsNetworkError()) << "Got " << status;
-    const std::string msg = status.message().ToBuffer();
-    ASSERT_TRUE(msg.find("Timed out waiting for Backfill Index") != std::string::npos)
-        << status;
+    ASSERT_TRUE(HasClientTimedOut(status)) << status;
   });
   thread_holder_.AddThreadFunctor([this] {
     LOG(INFO) << "Begin drop thread";
-    ASSERT_OK(WaitForBackfillSafeTime(kYBTableName, kIndexName));
+    ASSERT_OK(WaitForBackfillSafeTime(kYBTableName));
 
     LOG(INFO) << "Drop index";
     ASSERT_OK(conn_->ExecuteFormat("DROP INDEX $0", kIndexName));
+
+    // Unblock CREATE INDEX waiting to do backfill.
+    ASSERT_OK(cluster_->SetFlagOnMasters("TEST_block_do_backfill", "false"));
   });
   thread_holder_.JoinAll();
+}
+
+// Override the index backfill test class to have a default client admin timeout one second smaller
+// than backfill delay.  Also, ensure client backfill timeout is high, and set num_tablets to 1 to
+// make the test finish more quickly.
+class PgIndexBackfillFastDefaultClientTimeout : public PgIndexBackfillTest {
+ public:
+  void UpdateMiniClusterOptions(ExternalMiniClusterOptions* options) override {
+    PgIndexBackfillTest::UpdateMiniClusterOptions(options);
+    options->extra_tserver_flags.push_back(Format(
+        "--TEST_slowdown_backfill_by_ms=$0",
+        kBackfillDelay.ToMilliseconds()));
+    options->extra_tserver_flags.push_back(Format(
+        "--yb_client_admin_operation_timeout_sec=$0", (kBackfillDelay - 1s).ToSeconds()));
+    options->extra_tserver_flags.push_back("--backfill_index_client_rpc_timeout_ms=60000"); // 1m
+    options->extra_tserver_flags.push_back("--ysql_num_tablets=1");
+  }
+ protected:
+  const MonoDelta kBackfillDelay = RegularBuildVsSanitizers(7s, 14s);
+};
+
+// Simply create table and index.  The CREATE INDEX should not timeout during backfill because the
+// BackfillIndex request from postgres should use the backfill_index_client_rpc_timeout_ms timeout
+// (default 60m) rather than the small yb_client_admin_operation_timeout_sec.
+TEST_F_EX(PgIndexBackfillTest,
+          YB_DISABLE_TEST_IN_TSAN(LowerDefaultClientTimeout),
+          PgIndexBackfillFastDefaultClientTimeout) {
+  ASSERT_OK(conn_->ExecuteFormat("CREATE TABLE $0 (i int)", kTableName));
+  // This should not time out.
+  ASSERT_OK(conn_->ExecuteFormat("CREATE INDEX ON $0 (i)", kTableName));
 }
 
 // Override the index backfill fast client timeout test class to have more than one master.
@@ -1680,22 +1722,22 @@ TEST_F_EX(PgIndexBackfillTest,
     // will be inactive at the WRITE_AND_DELETE docdb permission, it will wait until the deadline,
     // which is set to 30s.
     Status status = create_conn.ExecuteFormat("CREATE INDEX $0 ON $1 (i)", kIndexName, kTableName);
-    ASSERT_TRUE(status.IsNetworkError()) << "Got " << status;
-    const std::string msg = status.message().ToBuffer();
-    ASSERT_TRUE(msg.find("Timed out waiting for Backfill Index") != std::string::npos)
-        << status;
+    ASSERT_TRUE(HasClientTimedOut(status)) << status;
   });
   thread_holder_.AddThreadFunctor([this] {
     LOG(INFO) << "Begin master leader stepdown thread";
-    ASSERT_OK(WaitForBackfillSafeTime(kYBTableName, kIndexName));
+    ASSERT_OK(WaitForBackfillSafeTime(kYBTableName));
 
     LOG(INFO) << "Doing master leader stepdown";
     tserver::TabletServerErrorPB::Code error_code;
     ASSERT_OK(cluster_->StepDownMasterLeader(&error_code));
 
-    // It should still be in the backfill stage, hopefully before the actual backfill started.
+    // It should still be in the backfill stage.
     ASSERT_TRUE(ASSERT_RESULT(IsAtTargetIndexStateFlags(
         kIndexName, IndexStateFlags{IndexStateFlag::kIndIsLive, IndexStateFlag::kIndIsReady})));
+
+    // Unblock DoBackfill.
+    ASSERT_OK(cluster_->SetFlagOnMasters("TEST_block_do_backfill", "false"));
   });
   thread_holder_.JoinAll();
 }
@@ -1738,7 +1780,7 @@ TEST_F_EX(PgIndexBackfillTest,
   const std::string query = Format("SELECT COUNT(*) FROM $0 WHERE i > 0", kTableName);
   ASSERT_TRUE(ASSERT_RESULT(conn_->HasIndexScan(query)));
   PGResultPtr res = ASSERT_RESULT(conn_->Fetch(query));
-  int count = ASSERT_RESULT(GetInt64(res.get(), 0, 0));
+  auto count = ASSERT_RESULT(GetInt64(res.get(), 0, 0));
   ASSERT_EQ(count, 2);
 }
 

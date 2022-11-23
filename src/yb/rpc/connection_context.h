@@ -11,18 +11,15 @@
 // under the License.
 //
 
-#ifndef YB_RPC_CONNECTION_CONTEXT_H
-#define YB_RPC_CONNECTION_CONTEXT_H
+#pragma once
 
 #include <ev++.h>
 
 #include "yb/rpc/rpc_fwd.h"
 #include "yb/rpc/rpc_introspection.pb.h"
 
-#include "yb/util/result.h"
-#include "yb/util/strongly_typed_bool.h"
 #include "yb/util/net/socket.h"
-#include "yb/util/size_literals.h"
+#include "yb/util/strongly_typed_bool.h"
 
 namespace yb {
 
@@ -37,11 +34,7 @@ struct ProcessCallsResult {
   Slice buffer;
   size_t bytes_to_skip = 0;
 
-  std::string ToString() const {
-    return Format(
-        "{ consumed: $0 buffer.size(): $1 bytes_to_skip: $2 }",
-        consumed, buffer.size(), bytes_to_skip);
-  }
+  std::string ToString() const;
 };
 
 // ConnectionContext class is used by connection for doing protocol
@@ -83,7 +76,7 @@ class ConnectionContext {
 
   virtual StreamReadBuffer& ReadBuffer() = 0;
 
-  virtual CHECKED_STATUS ReportPendingWriteBytes(size_t bytes_in_queue) = 0;
+  virtual Status ReportPendingWriteBytes(size_t bytes_in_queue) = 0;
 
   virtual void UpdateLastRead(const ConnectionPtr& connection);
 
@@ -92,9 +85,7 @@ class ConnectionContext {
 
 class ConnectionContextBase : public ConnectionContext {
  public:
-  Status ReportPendingWriteBytes(size_t bytes_in_queue) override {
-    return Status::OK();
-  }
+  Status ReportPendingWriteBytes(size_t bytes_in_queue) override;
 };
 
 class ConnectionContextFactory {
@@ -144,5 +135,3 @@ std::shared_ptr<ConnectionContextFactory> CreateConnectionContextFactory(Args&&.
 
 } // namespace rpc
 } // namespace yb
-
-#endif // YB_RPC_CONNECTION_CONTEXT_H

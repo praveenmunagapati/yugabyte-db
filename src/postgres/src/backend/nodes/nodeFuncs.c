@@ -67,6 +67,9 @@ exprType(const Node *expr)
 		case T_WindowFunc:
 			type = ((const WindowFunc *) expr)->wintype;
 			break;
+		case T_YbBatchedExpr:
+			type = exprType((Node *)((const YbBatchedExpr *) expr)->orig_expr);
+			break;
 		case T_ArrayRef:
 			{
 				const ArrayRef *arrayref = (const ArrayRef *) expr;
@@ -697,6 +700,8 @@ expression_returns_set_walker(Node *node, void *context)
 
 	/* Avoid recursion for some cases that parser checks not to return a set */
 	if (IsA(node, Aggref))
+		return false;
+	if (IsA(node, GroupingFunc))
 		return false;
 	if (IsA(node, WindowFunc))
 		return false;
@@ -1870,6 +1875,8 @@ expression_tree_walker(Node *node,
 		case T_SortGroupClause:
 			/* primitive node types with no expression subnodes */
 			break;
+		case T_YbBatchedExpr:
+			return walker(((YbBatchedExpr *) node)->orig_expr, context);
 		case T_WithCheckOption:
 			return walker(((WithCheckOption *) node)->qual, context);
 		case T_Aggref:
@@ -2161,6 +2168,14 @@ expression_tree_walker(Node *node,
 		case T_PartitionPruneStepCombine:
 			/* no expression subnodes */
 			break;
+		case T_PartitionPruneStepFuncOp:
+			{
+				PartitionPruneStepFuncOp *fstep =
+					(PartitionPruneStepFuncOp *) node;
+				if (walker((Node *) fstep->exprs, context))
+					return true;
+			}
+			break;
 		case T_JoinExpr:
 			{
 				JoinExpr   *join = (JoinExpr *) node;
@@ -2282,6 +2297,8 @@ expression_tree_walker_min_attr(Node *node,
 		case T_SortGroupClause:
 			/* primitive node types with no expression subnodes */
 			break;
+		case T_YbBatchedExpr:
+			return walker(((YbBatchedExpr *) node)->orig_expr, context, min_attr);
 		case T_WithCheckOption:
 			return walker(((WithCheckOption *) node)->qual, context, min_attr);
 		case T_Aggref:
@@ -2877,6 +2894,15 @@ expression_tree_mutator(Node *node,
 		case T_RangeTblRef:
 		case T_SortGroupClause:
 			return (Node *) copyObject(node);
+		case T_YbBatchedExpr:
+			{
+				YbBatchedExpr *bexpr = (YbBatchedExpr *) node;
+				YbBatchedExpr *newnode;
+
+				FLATCOPY(newnode, bexpr, YbBatchedExpr);
+				MUTATE(newnode->orig_expr, bexpr->orig_expr, Expr *);
+				return (Node *) newnode;			
+			}
 		case T_WithCheckOption:
 			{
 				WithCheckOption *wco = (WithCheckOption *) node;
@@ -3354,6 +3380,17 @@ expression_tree_mutator(Node *node,
 		case T_PartitionPruneStepCombine:
 			/* no expression sub-nodes */
 			return (Node *) copyObject(node);
+		case T_PartitionPruneStepFuncOp:
+			{
+				PartitionPruneStepFuncOp *fstep =
+					(PartitionPruneStepFuncOp *) node;
+				PartitionPruneStepFuncOp *newnode;
+
+				FLATCOPY(newnode, fstep, PartitionPruneStepFuncOp);
+				MUTATE(newnode->exprs,fstep->exprs, List *);
+				return (Node *) newnode;
+			}
+			break;
 		case T_JoinExpr:
 			{
 				JoinExpr   *join = (JoinExpr *) node;

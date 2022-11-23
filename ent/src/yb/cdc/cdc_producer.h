@@ -10,8 +10,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 
-#ifndef ENT_SRC_YB_CDC_CDC_PRODUCER_H
-#define ENT_SRC_YB_CDC_CDC_PRODUCER_H
+#pragma once
 
 #include <memory>
 #include <string>
@@ -20,40 +19,85 @@
 #include <boost/unordered_map.hpp>
 
 #include "yb/cdc/cdc_service.service.h"
-#include "yb/client/client.h"
+#include "yb/client/client_fwd.h"
+#include "yb/common/common_fwd.h"
 #include "yb/common/transaction.h"
 #include "yb/consensus/consensus_fwd.h"
-#include "yb/consensus/consensus.pb.h"
 #include "yb/docdb/docdb.pb.h"
 #include "yb/tablet/tablet_fwd.h"
+#include "yb/util/monotime.h"
 #include "yb/util/opid.h"
+#include "yb/master/master_replication.pb.h"
 
 namespace yb {
+
+class MemTracker;
+
 namespace cdc {
 
+using EnumOidLabelMap = std::unordered_map<uint32_t, std::string>;
+using EnumLabelCache = std::unordered_map<NamespaceName, EnumOidLabelMap>;
+
+using CompositeAttsMap = std::unordered_map<uint32_t, std::vector<master::PgAttributePB>>;
+using CompositeTypeCache = std::unordered_map<NamespaceName, CompositeAttsMap>;
+
 struct StreamMetadata {
-  TableId table_id;
+  NamespaceId ns_id;
+  std::vector<TableId> table_ids;
   CDCRecordType record_type;
   CDCRecordFormat record_format;
+  CDCRequestSource source_type;
+  CDCCheckpointType checkpoint_type;
 
   StreamMetadata() = default;
 
-  StreamMetadata(TableId table_id, CDCRecordType record_type, CDCRecordFormat record_format)
-      : table_id(std::move(table_id)), record_type(record_type), record_format(record_format) {
+  StreamMetadata(NamespaceId ns_id,
+                 std::vector<TableId> table_ids,
+                 CDCRecordType record_type,
+                 CDCRecordFormat record_format,
+                 CDCRequestSource source_type,
+                 CDCCheckpointType checkpoint_type)
+      : ns_id(std::move(ns_id)),
+        table_ids((std::move(table_ids))),
+        record_type(record_type),
+        record_format(record_format),
+        source_type(source_type),
+        checkpoint_type(checkpoint_type) {
   }
 };
 
-CHECKED_STATUS GetChanges(const std::string& stream_id,
-                          const std::string& tablet_id,
-                          const OpId& op_id,
-                          const StreamMetadata& record,
-                          const std::shared_ptr<tablet::TabletPeer>& tablet_peer,
-                          const std::shared_ptr<MemTracker>& mem_tracker,
-                          consensus::ReplicateMsgsHolder* msgs_holder,
-                          GetChangesResponsePB* resp,
-                          int64_t* last_readable_opid_index = nullptr);
+Status GetChangesForCDCSDK(
+    const CDCStreamId& stream_id,
+    const TableId& tablet_id,
+    const CDCSDKCheckpointPB& op_id,
+    const StreamMetadata& record,
+    const std::shared_ptr<tablet::TabletPeer>& tablet_peer,
+    const std::shared_ptr<MemTracker>& mem_tracker,
+    const EnumOidLabelMap& enum_oid_label_map,
+    const CompositeAttsMap& composite_atts_map,
+    client::YBClient* client,
+    consensus::ReplicateMsgsHolder* msgs_holder,
+    GetChangesResponsePB* resp,
+    std::string* commit_timestamp,
+    std::shared_ptr<Schema>* cached_schema,
+    uint32_t* cached_schema_version,
+    OpId* last_streamed_op_id,
+    int64_t* last_readable_opid_index = nullptr,
+    const CoarseTimePoint deadline = CoarseTimePoint::max());
 
+using UpdateOnSplitOpFunc = std::function<Status(const consensus::ReplicateMsg&)>;
+
+Status GetChangesForXCluster(const std::string& stream_id,
+                             const std::string& tablet_id,
+                             const OpId& op_id,
+                             const StreamMetadata& record,
+                             const std::shared_ptr<tablet::TabletPeer>& tablet_peer,
+                             const client::YBSessionPtr& session,
+                             UpdateOnSplitOpFunc update_on_split_op_func,
+                             const std::shared_ptr<MemTracker>& mem_tracker,
+                             consensus::ReplicateMsgsHolder* msgs_holder,
+                             GetChangesResponsePB* resp,
+                             int64_t* last_readable_opid_index = nullptr,
+                             const CoarseTimePoint deadline = CoarseTimePoint::max());
 }  // namespace cdc
 }  // namespace yb
-
-#endif /* ENT_SRC_YB_CDC_CDC_PRODUCER_H */

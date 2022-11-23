@@ -13,15 +13,17 @@
 
 package org.yb.pgsql;
 
+import static org.yb.AssertionWrappers.*;
+
 import org.hamcrest.CoreMatchers;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.postgresql.util.PSQLException;
+import com.yugabyte.util.PSQLException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yb.minicluster.MiniYBCluster;
-import org.yb.util.MiscUtil.ThrowingRunnable;
+import org.yb.util.ThrowingRunnable;
 import org.yb.util.YBTestRunnerNonTsanOnly;
 
 import java.sql.Connection;
@@ -34,8 +36,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
-
-import static org.yb.AssertionWrappers.*;
 
 @RunWith(value = YBTestRunnerNonTsanOnly.class)
 public class TestPgCacheConsistency extends BasePgSQLTest {
@@ -433,7 +433,7 @@ public class TestPgCacheConsistency extends BasePgSQLTest {
           statement2,
           "EXPLAIN (COSTS OFF) SELECT u FROM test_table WHERE u = 1",
           new Row("Seq Scan on test_table"),
-          new Row("  Filter: (u = 1)")
+          new Row("  Remote Filter: (u = 1)")
       );
     }
   }
@@ -503,6 +503,8 @@ public class TestPgCacheConsistency extends BasePgSQLTest {
       // Mixing in some "concurrent" DDLs to invalidate cache.
       stmt2.executeUpdate("CREATE TABLE t()");
       stmt2.executeUpdate("DROP TABLE t");
+      // Make sure other connections will detect catalog version change.
+      waitForTServerHeartbeat();
 
       stmt1.executeUpdate("GRANT SELECT, INSERT, UPDATE, DELETE ON with_default TO application");
 
@@ -531,8 +533,11 @@ public class TestPgCacheConsistency extends BasePgSQLTest {
       // Mixing in some "concurrent" DDLs to invalidate cache.
       stmt2.executeUpdate("CREATE TABLE t()");
       stmt2.executeUpdate("DROP TABLE t");
+      // Make sure other connections will detect catalog version change.
+      waitForTServerHeartbeat();
 
       stmt1.executeUpdate("DROP TABLE with_default");
+      waitForTServerHeartbeat();
 
       for (Statement stmt : Arrays.asList(stmt1, stmt2)) {
         runInvalidQuery(stmt, "SELECT * FROM with_default",

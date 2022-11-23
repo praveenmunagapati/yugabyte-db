@@ -18,7 +18,7 @@
 // under the License.
 //
 
-#ifndef ROCKSDB_LITE
+
 #include "yb/rocksdb/db/forward_iterator.h"
 
 #include <limits>
@@ -27,15 +27,14 @@
 
 #include "yb/rocksdb/db/column_family.h"
 #include "yb/rocksdb/db/db_impl.h"
-#include "yb/rocksdb/db/db_iter.h"
 #include "yb/rocksdb/db/dbformat.h"
 #include "yb/rocksdb/db/job_context.h"
+#include "yb/rocksdb/db/version_set.h"
 #include "yb/rocksdb/env.h"
-#include "yb/util/slice.h"
 #include "yb/rocksdb/slice_transform.h"
-#include "yb/rocksdb/table/merger.h"
-#include "yb/util/string_util.h"
 #include "yb/rocksdb/util/sync_point.h"
+
+#include "yb/util/string_util.h"
 
 namespace rocksdb {
 
@@ -787,5 +786,3 @@ uint32_t ForwardIterator::FindFileInRange(
 }
 
 }  // namespace rocksdb
-
-#endif  // ROCKSDB_LITE

@@ -10,10 +10,12 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 
-#ifndef YB_TOOLS_YB_ADMIN_UTIL_H
-#define YB_TOOLS_YB_ADMIN_UTIL_H
+#pragma once
 
-#include "yb/common/entity_ids.h"
+#include <set>
+#include <utility>
+
+#include "yb/common/entity_ids_types.h"
 
 namespace yb {
 namespace tools {
@@ -24,5 +26,3 @@ SnapshotId StringToSnapshotId(const std::string& str);
 
 }  // namespace tools
 }  // namespace yb
-
-#endif // YB_TOOLS_YB_ADMIN_UTIL_H

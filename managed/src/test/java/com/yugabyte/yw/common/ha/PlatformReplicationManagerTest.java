@@ -22,8 +22,11 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import akka.actor.ActorSystem;
 import com.typesafe.config.Config;
+import com.yugabyte.yw.common.ConfigHelper;
+import com.yugabyte.yw.common.FakeDBApplication;
+import com.yugabyte.yw.common.ModelFactory;
+import com.yugabyte.yw.common.PlatformScheduler;
 import com.yugabyte.yw.common.ShellProcessHandler;
 import com.yugabyte.yw.common.ShellResponse;
 import com.yugabyte.yw.common.config.RuntimeConfigFactory;
@@ -35,22 +38,23 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import junit.framework.TestCase;
+import static junit.framework.TestCase.assertNull;
+import static junit.framework.TestCase.assertTrue;
 import junitparams.JUnitParamsRunner;
 import junitparams.Parameters;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
-import scala.concurrent.ExecutionContext;
 
 @RunWith(JUnitParamsRunner.class)
-public class PlatformReplicationManagerTest extends TestCase {
+public class PlatformReplicationManagerTest extends FakeDBApplication {
   @Mock Config mockConfig;
 
-  @Mock ActorSystem actorSystem;
-
-  @Mock ExecutionContext executionContext;
+  @Mock PlatformScheduler mockPlatformScheduler;
 
   @Mock ShellProcessHandler shellProcessHandler;
 
@@ -58,10 +62,16 @@ public class PlatformReplicationManagerTest extends TestCase {
 
   @Mock PlatformReplicationHelper mockReplicationUtil;
 
+  @Mock ConfigHelper mockConfigHelper;
+
+  @Mock private play.Configuration appConfig;
+
+  private static final String STORAGE_PATH = "yb.storage.path";
+
   @Before
   public void setUp() {
     MockitoAnnotations.initMocks(this);
-    when(mockConfig.getString("yb.storage.path")).thenReturn("/tmp");
+    when(mockConfig.getString(STORAGE_PATH)).thenReturn("/tmp");
   }
 
   private void setupConfig(
@@ -95,6 +105,7 @@ public class PlatformReplicationManagerTest extends TestCase {
       expectedCommandArgs.add("restore");
       expectedCommandArgs.add("--input");
       expectedCommandArgs.add(inputPath);
+      expectedCommandArgs.add("--disable_version_check");
     }
 
     expectedCommandArgs.add("--db_username");
@@ -145,7 +156,8 @@ public class PlatformReplicationManagerTest extends TestCase {
         .runCommand(any(PlatformReplicationManager.PlatformBackupParams.class));
     setupConfig(prometheusHost, dbUsername, dbPassword, dbHost, dbPort);
     PlatformReplicationManager backupManager =
-        new PlatformReplicationManager(actorSystem, executionContext, mockReplicationUtil);
+        new PlatformReplicationManager(
+            mockPlatformScheduler, mockReplicationUtil, mockConfigHelper, appConfig);
 
     List<String> expectedCommandArgs =
         getExpectedPlatformBackupCommandArgs(
@@ -190,7 +202,9 @@ public class PlatformReplicationManagerTest extends TestCase {
       doCallRealMethod().when(mockReplicationUtil).cleanupReceivedBackups(any(URL.class), anyInt());
       doCallRealMethod().when(mockReplicationUtil).listBackups(any(URL.class));
       PlatformReplicationManager backupManager =
-          spy(new PlatformReplicationManager(actorSystem, executionContext, mockReplicationUtil));
+          spy(
+              new PlatformReplicationManager(
+                  mockPlatformScheduler, mockReplicationUtil, mockConfigHelper, appConfig));
 
       List<File> backups = backupManager.listBackups(testUrl);
       assertEquals(3, backups.size());

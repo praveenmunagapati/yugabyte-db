@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_MASTER_SNAPSHOT_SCHEDULE_STATE_H
-#define YB_MASTER_SNAPSHOT_SCHEDULE_STATE_H
+#pragma once
 
 #include "yb/common/hybrid_time.h"
 #include "yb/common/snapshot.h"
@@ -22,7 +21,8 @@
 #include "yb/master/master_fwd.h"
 #include "yb/master/master_backup.pb.h"
 
-#include "yb/util/async_task_tracker.h"
+#include "yb/util/async_task_util.h"
+#include "yb/util/tostring.h"
 
 namespace yb {
 namespace master {
@@ -42,16 +42,24 @@ struct SnapshotScheduleOperation {
   }
 };
 
+struct CreatingSnapshotData {
+  CoarseTimePoint start_time;
+  TxnSnapshotId snapshot_id = TxnSnapshotId::Nil();
+};
+
 using SnapshotScheduleOperations = std::vector<SnapshotScheduleOperation>;
 
 class SnapshotScheduleState {
  public:
   SnapshotScheduleState(
-      SnapshotCoordinatorContext* context, const CreateSnapshotScheduleRequestPB& req);
+      SnapshotCoordinatorContext* context, const SnapshotScheduleOptionsPB& req);
 
   SnapshotScheduleState(
       SnapshotCoordinatorContext* context, const SnapshotScheduleId& id,
       const SnapshotScheduleOptionsPB& options);
+
+  static Result<SnapshotScheduleState> Create(
+      SnapshotCoordinatorContext* context, const SnapshotScheduleOptionsPB& options);
 
   const SnapshotScheduleId& id() const {
     return id_;
@@ -62,6 +70,10 @@ class SnapshotScheduleState {
   }
 
   const SnapshotScheduleOptionsPB& options() const {
+    return options_;
+  }
+
+  SnapshotScheduleOptionsPB& mutable_options() {
     return options_;
   }
 
@@ -80,9 +92,19 @@ class SnapshotScheduleState {
   static Result<docdb::KeyBytes> EncodedKey(
       const SnapshotScheduleId& schedule_id, SnapshotCoordinatorContext* context);
 
-  CHECKED_STATUS StoreToWriteBatch(docdb::KeyValueWriteBatchPB* write_batch) const;
-  CHECKED_STATUS ToPB(SnapshotScheduleInfoPB* pb) const;
+  Status StoreToWriteBatch(docdb::KeyValueWriteBatchPB* write_batch) const;
+  Status StoreToWriteBatch(
+      const SnapshotScheduleOptionsPB& options, docdb::KeyValueWriteBatchPB* out) const;
+  Status ToPB(SnapshotScheduleInfoPB* pb) const;
   std::string ToString() const;
+
+  const CreatingSnapshotData& creating_snapshot_data() const {
+    return creating_snapshot_data_;
+  }
+
+  Result<SnapshotScheduleOptionsPB> GetUpdatedOptions(
+      const EditSnapshotScheduleRequestPB& edit_request) const;
+  static Status ValidateOptions(const SnapshotScheduleOptionsPB& new_options);
 
  private:
   std::string LogPrefix() const;
@@ -95,12 +117,10 @@ class SnapshotScheduleState {
 
   // When snapshot is being created for this schedule, this field contains id of this snapshot.
   // To prevent creating other snapshots during that time.
-  TxnSnapshotId creating_snapshot_id_ = TxnSnapshotId::Nil();
+  CreatingSnapshotData creating_snapshot_data_;
 
   AsyncTaskTracker cleanup_tracker_;
 };
 
 } // namespace master
 } // namespace yb
-
-#endif  // YB_MASTER_SNAPSHOT_SCHEDULE_STATE_H

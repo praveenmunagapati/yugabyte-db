@@ -46,36 +46,34 @@
 #include <signal.h>
 #include <stdio.h>
 
-#include <sstream>
-#include <iostream>
 #include <fstream>
+#include <iostream>
 #include <regex>
 
-#include <boost/uuid/uuid.hpp>
-#include <boost/uuid/uuid_io.hpp>
 #include <boost/uuid/uuid_generators.hpp>
-
+#include <boost/uuid/uuid_io.hpp>
 #include <glog/logging.h>
 
 #include "yb/gutil/callback.h"
-#include "yb/gutil/spinlock.h"
 #include "yb/gutil/ref_counted.h"
+#include "yb/gutil/spinlock.h"
 
 #include "yb/util/debug-util.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
+#include "yb/util/format.h"
 
-DEFINE_string(log_filename, "",
+DEFINE_UNKNOWN_string(log_filename, "",
     "Prefix of log filename - "
     "full path is <log_dir>/<log_filename>.[INFO|WARN|ERROR|FATAL]");
 TAG_FLAG(log_filename, stable);
 
-DEFINE_string(fatal_details_path_prefix, "",
+DEFINE_UNKNOWN_string(fatal_details_path_prefix, "",
               "A prefix to use for the path of a file to save fatal failure stack trace and "
               "other details to.");
-DEFINE_string(minicluster_daemon_id, "",
+DEFINE_UNKNOWN_string(minicluster_daemon_id, "",
               "A human-readable 'daemon id', e.g. 'm-1' or 'ts-2', used in tests.");
 
-DEFINE_string(ref_counted_debug_type_name_regex, "",
+DEFINE_UNKNOWN_string(ref_counted_debug_type_name_regex, "",
               "Regex for type names for debugging RefCounted / scoped_refptr based classes. "
               "An empty string disables RefCounted debug logging.");
 
@@ -179,34 +177,12 @@ void DumpStackTraceAndExit() {
   abort();
 }
 
-void CustomGlogFailureWriter(const char* data, int size) {
-  if (size == 0) {
-    return;
-  }
-
-  std::smatch match;
-  string line = string(data, size);
-  if (std::regex_match(line, match, kStackTraceLineFormatRe)) {
-    size_t pos;
-    uintptr_t addr = std::stoul(match[1], &pos, 16);
-    string symbolized_line = SymbolizeAddress(reinterpret_cast<void*>(addr));
-    if (symbolized_line.find(':') != string::npos) {
-      // Only replace the output line if we failed to find the line number.
-      line = symbolized_line;
-    }
-  }
-
-  if (write(STDERR_FILENO, line.data(), line.size()) < 0) {
-    // Ignore errors.
-  }
-}
-
 #ifndef NDEBUG
 void ReportRefCountedDebugEvent(
     const char* type_name,
     const void* this_ptr,
-    int32_t current_refcount,
-    int ref_delta) {
+    int64_t current_refcount,
+    int64_t ref_delta) {
   std::string demangled_type = DemangleName(type_name);
   LOG(INFO) << demangled_type << "::" << (ref_delta == 1 ? "AddRef" : "Release")
             << "(this=" << this_ptr << ", ref_count_=" << current_refcount << "):\n"
@@ -224,13 +200,6 @@ void ApplyFlagsInternal() {
 } // anonymous namespace
 
 void InitializeGoogleLogging(const char *arg) {
-  // TODO: re-enable this when we make stack trace symbolization async-safe, which means we have
-  // to get rid of memory allocations there. We also need to make sure that libbacktrace is
-  // async-safe.
-  static constexpr bool kUseCustomFailureWriter = false;
-  if (kUseCustomFailureWriter) {
-    google::InstallFailureWriter(CustomGlogFailureWriter);
-  }
   google::InitGoogleLogging(arg);
 
   google::InstallFailureFunction(DumpStackTraceAndExit);
@@ -242,11 +211,10 @@ void InitGoogleLoggingSafe(const char* arg) {
   SpinLockHolder l(&logging_mutex);
   if (logging_initialized) return;
 
-  google::InstallFailureWriter(CustomGlogFailureWriter);
   google::InstallFailureSignalHandler();
 
   // Set the logbuflevel to -1 so that all logs are printed out in unbuffered.
-  FLAGS_logbuflevel = -1;
+  CHECK_OK(SET_FLAG_DEFAULT_AND_CURRENT(logbuflevel, -1));
 
   if (!FLAGS_log_filename.empty()) {
     for (int severity = google::INFO; severity <= google::FATAL; ++severity) {
@@ -259,7 +227,7 @@ void InitGoogleLoggingSafe(const char* arg) {
   // can reliably construct the log file name without duplicating the
   // complex logic that glog uses to guess at a temporary dir.
   if (FLAGS_log_dir.empty()) {
-    FLAGS_log_dir = "/tmp";
+    CHECK_OK(SET_FLAG_DEFAULT_AND_CURRENT(log_dir, "/tmp"));
   }
 
   if (!FLAGS_logtostderr) {
@@ -312,6 +280,27 @@ void InitGoogleLoggingSafeBasic(const char* arg) {
   // Stderr logging threshold: INFO.
   // Sink logging: off.
   initial_stderr_severity = google::INFO;
+
+  ApplyFlagsInternal();
+
+  logging_initialized = true;
+}
+
+void InitGoogleLoggingSafeBasicSuppressNonNativePostgresLogs(const char* arg) {
+  SpinLockHolder l(&logging_mutex);
+  if (logging_initialized) return;
+
+  InitializeGoogleLogging(arg);
+
+  // This also disables file-based logging.
+  google::LogToStderr();
+
+  // File logging: off.
+  // Stderr logging threshold: NUM_SEVERITIES;
+  // Sink logging: off.
+  // Since Postgres logging collector collects logs from stderr, we never log to stderr.
+  FLAGS_stderrthreshold = google::NUM_SEVERITIES;
+  initial_stderr_severity = google::NUM_SEVERITIES;
 
   ApplyFlagsInternal();
 
@@ -380,11 +369,6 @@ void ShutdownLoggingSafe() {
   google::ShutdownGoogleLogging();
 
   logging_initialized = false;
-}
-
-void LogCommandLineFlags() {
-  LOG(INFO) << "Flags (see also /varz are on debug webserver):" << endl
-            << google::CommandlineFlagsIntoString();
 }
 
 // Support for the special THROTTLE_MSG token in a log message stream.

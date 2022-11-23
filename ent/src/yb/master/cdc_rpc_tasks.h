@@ -11,19 +11,15 @@
 // under the License.
 //
 
-#ifndef ENT_SRC_YB_MASTER_CDC_RPC_TASKS_H
-#define ENT_SRC_YB_MASTER_CDC_RPC_TASKS_H
+#pragma once
 
 #include <stdlib.h>
 
-#include "yb/client/client.h"
-#include "yb/client/table.h"
-#include "yb/common/common.pb.h"
-#include "yb/common/entity_ids.h"
-#include "yb/master/master.proxy.h"
+#include <google/protobuf/repeated_field.h>
 
-#include "yb/util/status.h"
-#include "yb/util/result.h"
+#include "yb/common/entity_ids.h"
+
+#include "yb/util/status_fwd.h"
 #include "yb/util/net/net_util.h"
 
 namespace yb {
@@ -70,6 +66,3 @@ class CDCRpcTasks {
 
 } // namespace master
 } // namespace yb
-
-
-#endif // ENT_SRC_YB_MASTER_CDC_RPC_TASKS_H

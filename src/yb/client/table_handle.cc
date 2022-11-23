@@ -15,13 +15,23 @@
 
 #include "yb/client/client.h"
 #include "yb/client/error.h"
+#include "yb/client/schema.h"
 #include "yb/client/session.h"
+#include "yb/client/table.h"
 #include "yb/client/table_creator.h"
 #include "yb/client/yb_op.h"
 
-#include "yb/master/master.pb.h"
+#include "yb/common/partition.h"
+#include "yb/common/ql_type.h"
+#include "yb/common/schema.h"
 
-#include "yb/yql/cql/ql/util/statement_result.h"
+#include "yb/master/master_client.pb.h"
+
+#include "yb/util/format.h"
+#include "yb/util/result.h"
+#include "yb/util/status_format.h"
+
+using std::string;
 
 using namespace std::literals; // NOLINT
 
@@ -244,10 +254,11 @@ bool TableIterator::ExecuteOps() {
   constexpr size_t kMaxConcurrentOps = 5;
   const size_t new_executed_ops = std::min(ops_.size(), executed_ops_ + kMaxConcurrentOps);
   for (size_t i = executed_ops_; i != new_executed_ops; ++i) {
-    REPORT_AND_RETURN_FALSE_IF_NOT_OK(session_->Apply(ops_[i]));
+    session_->Apply(ops_[i]);
   }
 
-  if (!IsFlushStatusOkOrHandleErrors(session_->FlushAndGetOpsErrors())) {
+  // TODO(async_flush): https://github.com/yugabyte/yugabyte-db/issues/12173
+  if (!IsFlushStatusOkOrHandleErrors(session_->TEST_FlushAndGetOpsErrors())) {
     return false;
   }
 
@@ -282,8 +293,9 @@ void TableIterator::Move() {
       if (paging_state_) {
         auto& op = ops_[ops_index_];
         *op->mutable_request()->mutable_paging_state() = *paging_state_;
-        REPORT_AND_RETURN_IF_NOT_OK(session_->Apply(op));
-        if (!IsFlushStatusOkOrHandleErrors(session_->FlushAndGetOpsErrors())) {
+        session_->Apply(op);
+        // TODO(async_flush): https://github.com/yugabyte/yugabyte-db/issues/12173
+        if (!IsFlushStatusOkOrHandleErrors(session_->TEST_FlushAndGetOpsErrors())) {
           return;
         }
         if (QLResponsePB::YQL_STATUS_OK != op->response().status()) {
@@ -379,6 +391,21 @@ template <>
 void FilterEqualImpl<std::string>::operator()(
     const TableHandle& table, QLConditionPB* condition) const {
   table.SetBinaryCondition(condition, column_, QL_OP_EQUAL, t_);
+}
+
+QLMapValuePB* AddMapColumn(QLWriteRequestPB* req, const int32_t& column_id) {
+  auto column_value = req->add_column_values();
+  column_value->set_column_id(column_id);
+  QLMapValuePB* map_value = (column_value->mutable_expr()->mutable_value()->mutable_map_value());
+  return map_value;
+}
+
+void AddMapEntryToColumn(
+    QLMapValuePB* map_value_pb, const string& entry_key, const string& entry_value) {
+  QLValuePB* elem = map_value_pb->add_keys();
+  elem->set_string_value(entry_key);
+  elem = map_value_pb->add_values();
+  elem->set_string_value(entry_value);
 }
 
 } // namespace client

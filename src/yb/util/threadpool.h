@@ -29,12 +29,13 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_THREADPOOL_H
-#define YB_UTIL_THREADPOOL_H
+#pragma once
 
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_set>
 
@@ -44,16 +45,17 @@
 #include "yb/gutil/macros.h"
 #include "yb/gutil/port.h"
 #include "yb/gutil/ref_counted.h"
+
+#include "yb/util/metrics_fwd.h"
 #include "yb/util/condition_variable.h"
 #include "yb/util/enums.h"
-#include "yb/util/metrics.h"
+#include "yb/util/math_util.h"
 #include "yb/util/monotime.h"
 #include "yb/util/mutex.h"
 #include "yb/util/status.h"
 
 namespace yb {
 
-class Histogram;
 class Thread;
 class ThreadPool;
 class ThreadPoolToken;
@@ -62,7 +64,7 @@ class Trace;
 class Runnable {
  public:
   virtual void Run() = 0;
-  virtual ~Runnable() {}
+  virtual ~Runnable() = default;
 };
 
 template <class F>
@@ -90,6 +92,8 @@ struct ThreadPoolMetrics {
 
   // Measures the amount of time that tasks spend running.
   scoped_refptr<Histogram> run_time_us_histogram;
+
+  ~ThreadPoolMetrics();
 };
 
 
@@ -165,7 +169,7 @@ class ThreadPoolBuilder {
   const MonoDelta& idle_timeout() const { return idle_timeout_; }
 
   // Instantiate a new ThreadPool with the existing builder arguments.
-  CHECKED_STATUS Build(std::unique_ptr<ThreadPool>* pool) const;
+  Status Build(std::unique_ptr<ThreadPool>* pool) const;
 
  private:
   friend class ThreadPool;
@@ -228,35 +232,35 @@ class ThreadPool {
   void Shutdown();
 
   // Submit a function using the yb Closure system.
-  CHECKED_STATUS SubmitClosure(const Closure& task);
+  Status SubmitClosure(const Closure& task);
 
   // Submit a function binded using std::bind(&FuncName, args...)
-  CHECKED_STATUS SubmitFunc(const std::function<void()>& func);
-  CHECKED_STATUS SubmitFunc(std::function<void()>&& func);
+  Status SubmitFunc(const std::function<void()>& func);
+  Status SubmitFunc(std::function<void()>&& func);
 
-  CHECKED_STATUS SubmitFunc(std::function<void()>& func) { // NOLINT
+  Status SubmitFunc(std::function<void()>& func) { // NOLINT
     const auto& const_func = func;
     return SubmitFunc(const_func);
   }
 
   template <class F>
-  CHECKED_STATUS SubmitFunc(F&& f) {
-    return Submit(std::make_shared<RunnableImpl<F>>(std::move(f)));
+  Status SubmitFunc(F&& f) {
+    return Submit(std::make_shared<RunnableImpl<F>>(std::forward<F>(f)));
   }
 
   template <class F>
-  CHECKED_STATUS SubmitFunc(const F& f) {
+  Status SubmitFunc(const F& f) {
     return Submit(std::make_shared<RunnableImpl<F>>(f));
   }
 
   template <class F>
-  CHECKED_STATUS SubmitFunc(F& f) { // NOLINT
+  Status SubmitFunc(F& f) { // NOLINT
     const auto& const_f = f;
     return SubmitFunc(const_f);
   }
 
   // Submit a Runnable class
-  CHECKED_STATUS Submit(const std::shared_ptr<Runnable>& task);
+  Status Submit(const std::shared_ptr<Runnable>& task);
 
   // Wait until all the tasks are completed.
   void Wait();
@@ -297,13 +301,13 @@ class ThreadPool {
   explicit ThreadPool(const ThreadPoolBuilder& builder);
 
   // Initialize the thread pool by starting the minimum number of threads.
-  CHECKED_STATUS Init();
+  Status Init();
 
   // Dispatcher responsible for dequeueing and executing the tasks
   void DispatchThread(bool permanent);
 
   // Create new thread. Required that lock_ is held.
-  CHECKED_STATUS CreateThreadUnlocked();
+  Status CreateThreadUnlocked();
 
  private:
   FRIEND_TEST(TestThreadPool, TestThreadPoolWithNoMinimum);
@@ -510,5 +514,36 @@ class FunctionRunnable : public Runnable {
   std::function<void()> func_;
 };
 
+// Runs submitted tasks in created thread pool with specified concurrency.
+class TaskRunner {
+ public:
+  TaskRunner() = default;
+
+  Status Init(int concurrency);
+
+  template <class F>
+  void Submit(F&& f) {
+    ++running_tasks_;
+    auto status = thread_pool_->SubmitFunc([this, f = std::forward<F>(f)]() {
+      auto status = f();
+      CompleteTask(status);
+    });
+    if (!status.ok()) {
+      CompleteTask(status);
+    }
+  }
+
+  Status Wait();
+
+ private:
+  void CompleteTask(const Status& status);
+
+  std::unique_ptr<ThreadPool> thread_pool_;
+  std::atomic<size_t> running_tasks_{0};
+  std::atomic<bool> failed_{false};
+  Status first_failure_;
+  std::mutex mutex_;
+  std::condition_variable cond_;
+};
+
 } // namespace yb
-#endif // YB_UTIL_THREADPOOL_H

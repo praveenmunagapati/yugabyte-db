@@ -1,39 +1,108 @@
-import { isNonEmptyArray, isNonEmptyObject, isDefinedNotNull } from '../../../utils/ObjectUtils';
+import React from 'react';
+import { isNonEmptyArray } from '../../../utils/ObjectUtils';
+import { YBLoadingCircleIcon } from '../../common/indicators';
 
-export const getUniverseStatus = (universe, universePendingTask) => {
+import _ from 'lodash';
+
+/**
+ * A mapping from universe state to display text and className.
+ */
+export const universeState = {
+  GOOD: {
+    text: 'Ready',
+    className: 'good'
+  },
+  PAUSED: {
+    text: 'Paused',
+    className: 'paused'
+  },
+  PENDING: {
+    text: 'Pending',
+    className: 'pending'
+  },
+  WARNING: {
+    text: 'Ready',
+    className: 'warning'
+  },
+  BAD: {
+    text: 'Error',
+    className: 'bad'
+  },
+  UNKNOWN: {
+    text: 'Loading',
+    className: 'unknown'
+  }
+};
+
+/**
+ * Returns a universe status object with:
+ *  - state - A universe state from the universe state mapping {@link universeState}
+ *  - error - The error string from the current universe
+ */
+export const getUniverseStatus = (universe) => {
   const {
     updateInProgress,
+    backupInProgress,
     updateSucceeded,
     universePaused,
     errorString
   } = universe.universeDetails;
 
-  // statusText stores the status for display
-  // warning stores extra information for internal use (ex. warning icons for certain errors)
-  let statusText = '';
-  let warning = '';
-  if (!isDefinedNotNull(universePendingTask) && updateSucceeded && !universePaused) {
-    statusText = 'Ready';
-  } else if (!isDefinedNotNull(universePendingTask) && updateSucceeded && universePaused) {
-    statusText = 'Paused';
-  } else if (updateInProgress && isNonEmptyObject(universePendingTask)) {
-    statusText = 'Pending';
-  } else if (!updateInProgress && !updateSucceeded) {
-    statusText = errorString === 'Preflight checks failed.' ? 'Ready' : 'Error';
-    warning = errorString;
+  const taskInProgress = updateInProgress || backupInProgress;
+  if (!taskInProgress && updateSucceeded && !universePaused) {
+    return { state: universeState.GOOD, error: errorString };
   }
-  return { statusText, warning };
+  if (!taskInProgress && updateSucceeded && universePaused) {
+    return { state: universeState.PAUSED, error: errorString };
+  }
+  if (taskInProgress) {
+    return { state: universeState.PENDING, error: errorString };
+  }
+  if (!taskInProgress && !updateSucceeded) {
+    return errorString === 'Preflight checks failed.'
+      ? { state: universeState.WARNING, error: errorString }
+      : { state: universeState.BAD, error: errorString };
+  }
+  return { state: universeState.UNKNOWN, error: errorString };
+};
+
+export const getUniverseStatusIcon = (curStatus) => {
+  if (_.isEqual(curStatus, universeState.GOOD)) {
+    return <i className="fa fa-check-circle" />;
+  }
+  if (_.isEqual(curStatus, universeState.PAUSED)) {
+    return <i className="fa fa-pause-circle-o" />;
+  }
+  if (_.isEqual(curStatus, universeState.PENDING)) {
+    return <i className="fa fa-hourglass-half" />;
+  }
+  if (_.isEqual(curStatus, universeState.WARNING)) {
+    return <i className="fa fa-warning" />;
+  }
+  if (_.isEqual(curStatus, universeState.BAD)) {
+    return <i className="fa fa-warning" />;
+  }
+  if (_.isEqual(curStatus, universeState.UNKNOWN)) {
+    return <YBLoadingCircleIcon size="small" />;
+  }
+};
+
+export const isPendingUniverseTask = (universeUUID, taskItem) => {
+  return (
+    taskItem.targetUUID === universeUUID &&
+    (taskItem.status === 'Running' || taskItem.status === 'Initializing') &&
+    Number(taskItem.percentComplete) !== 100
+  );
 };
 
 export const getUniversePendingTask = (universeUUID, customerTaskList) => {
   return isNonEmptyArray(customerTaskList)
-    ? customerTaskList.find(function (taskItem) {
-        return (
-          taskItem.targetUUID === universeUUID &&
-          (taskItem.status === 'Running' || taskItem.status === 'Initializing') &&
-          Number(taskItem.percentComplete) !== 100 &&
-          taskItem.target.toLowerCase() !== 'backup'
-        );
-      })
+    ? customerTaskList.find((taskItem) => isPendingUniverseTask(universeUUID, taskItem))
     : null;
+};
+
+export const hasPendingTasksForUniverse = (universeUUID, customerTaskList) => {
+  return isNonEmptyArray(customerTaskList)
+    ? customerTaskList.some((taskItem) => isPendingUniverseTask(universeUUID, taskItem))
+    : false;
 };

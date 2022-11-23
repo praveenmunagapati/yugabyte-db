@@ -11,23 +11,13 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_METRICS_SNAPSHOTTER_H
-#define YB_TSERVER_METRICS_SNAPSHOTTER_H
+#pragma once
 
 #include <memory>
 
-#include "yb/server/server_base_options.h"
-
 #include "yb/gutil/macros.h"
-#include "yb/util/status.h"
-#include "yb/util/net/net_util.h"
-#include "yb/client/client.h"
 
-#include "yb/rocksdb/cache.h"
-#include "yb/rocksdb/options.h"
-#include "yb/client/async_initializer.h"
-#include "yb/client/client_fwd.h"
-
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 namespace tserver {
@@ -38,8 +28,8 @@ class TabletServerOptions;
 class MetricsSnapshotter {
  public:
   MetricsSnapshotter(const TabletServerOptions& options, TabletServer* server);
-  CHECKED_STATUS Start();
-  CHECKED_STATUS Stop();
+  Status Start();
+  Status Stop();
 
   ~MetricsSnapshotter();
 
@@ -51,5 +41,3 @@ class MetricsSnapshotter {
 
 } // namespace tserver
 } // namespace yb
-
-#endif // YB_TSERVER_METRICS_SNAPSHOTTER_H

@@ -9,40 +9,31 @@ menu:
     name: Open Source
     identifier: k8s-oss-3
     weight: 621
-type: page
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
-
 
 <ul class="nav nav-tabs-alt nav-tabs-yb">
   <li >
     <a href="{{< relref "./helm-chart.md" >}}" class="nav-link">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+      <i class="fa-solid fa-cubes" aria-hidden="true"></i>
       Helm chart
     </a>
   </li>
   <li >
     <a href="{{< relref "./yugabyte-operator.md" >}}" class="nav-link">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+      <i class="fa-solid fa-cubes" aria-hidden="true"></i>
       YugabyteDB operator
     </a>
   </li>
   <li >
     <a href="{{< relref "./operator-hub.md" >}}" class="nav-link active">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+      <i class="fa-solid fa-cubes" aria-hidden="true"></i>
       Operator Hub
-    </a>
-  </li>
-  <li>
-    <a href="{{< relref "./rook-operator.md" >}}" class="nav-link">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
-      Rook operator
     </a>
   </li>
 </ul>
 
-This is an alternative to deploying YugabyteDB manually using [Yugabyte Operator](../yugabyte-operator). The Yugabyte operator is available on Red Hat's [OperatorHub.io](https://operatorhub.io/operator/yugabyte-operator) and hence YugabyteDB can be also be deployed using [Operator Lifecycle Manager](https://github.com/operator-framework/operator-lifecycle-manager). As the name suggests, OLM is a tool to help deploy and manage Operators on your cluster.
+This is an alternative to deploying YugabyteDB manually using [Yugabyte Operator](../yugabyte-operator/). The Yugabyte operator is available on Red Hat's [OperatorHub.io](https://operatorhub.io/operator/yugabyte-operator) and hence YugabyteDB can be also be deployed using [Operator Lifecycle Manager](https://github.com/operator-framework/operator-lifecycle-manager). As the name suggests, OLM is a tool to help deploy and manage Operators on your cluster.
 
 Read on to find out how you can deploy YugabyteDB with OLM.
 

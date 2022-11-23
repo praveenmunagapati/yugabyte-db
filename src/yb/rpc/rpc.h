@@ -29,26 +29,24 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_RPC_RPC_H
-#define YB_RPC_RPC_H
+#pragma once
 
 #include <atomic>
+#include <future>
 #include <memory>
 #include <string>
 
 #include <boost/container/stable_vector.hpp>
-
 #include <boost/optional/optional.hpp>
 
-#include "yb/gutil/callback.h"
 #include "yb/rpc/rpc_controller.h"
 
 #include "yb/util/enums.h"
 #include "yb/util/monotime.h"
-#include "yb/util/result.h"
-#include "yb/util/status_callback.h"
 
 namespace yb {
+
+class Trace;
 
 namespace rpc {
 
@@ -58,6 +56,8 @@ class Rpc;
 // The command that could be retried by RpcRetrier.
 class RpcCommand : public std::enable_shared_from_this<RpcCommand> {
  public:
+  RpcCommand();
+
   // Asynchronously sends the RPC to the remote end.
   //
   // Subclasses should use Finished() below as the callback function.
@@ -74,8 +74,13 @@ class RpcCommand : public std::enable_shared_from_this<RpcCommand> {
 
   virtual CoarseTimePoint deadline() const = 0;
 
+  Trace* trace() { return trace_.get(); }
+
  protected:
-  ~RpcCommand() {}
+  virtual ~RpcCommand();
+
+  // The trace buffer.
+  scoped_refptr<Trace> trace_;
 };
 
 YB_DEFINE_ENUM(RpcRetrierState, (kIdle)(kRunning)(kScheduling)(kWaiting)(kFinished));
@@ -112,11 +117,11 @@ class RpcRetrier {
   // deadline has already expired at the time that Retry() was called.
   //
   // Callers should ensure that 'rpc' remains alive.
-  CHECKED_STATUS DelayedRetry(
+  Status DelayedRetry(
       RpcCommand* rpc, const Status& why_status,
       BackoffStrategy strategy = BackoffStrategy::kLinear);
 
-  CHECKED_STATUS DelayedRetry(
+  Status DelayedRetry(
       RpcCommand* rpc, const Status& why_status, MonoDelta add_delay);
 
   RpcController* mutable_controller() { return &controller_; }
@@ -146,8 +151,12 @@ class RpcRetrier {
     return state_.load(std::memory_order_acquire) == RpcRetrierState::kFinished;
   }
 
+  CoarseTimePoint start() const {
+    return start_;
+  }
+
  private:
-  CHECKED_STATUS DoDelayedRetry(RpcCommand* rpc, const Status& why_status);
+  Status DoDelayedRetry(RpcCommand* rpc, const Status& why_status);
 
   // Called when an RPC comes up for retrying. Actually sends the RPC.
   void DoRetry(RpcCommand* rpc, const Status& status);
@@ -204,7 +213,6 @@ class Rpc : public RpcCommand {
   }
 
   void ScheduleRetry(const Status& status);
-
  protected:
   const RpcRetrier& retrier() const { return retrier_; }
   RpcRetrier* mutable_retrier() { return &retrier_; }
@@ -235,8 +243,29 @@ class Rpcs {
   Handle Register(RpcCommandPtr call);
   void Register(RpcCommandPtr call, Handle* handle);
   bool RegisterAndStart(RpcCommandPtr call, Handle* handle);
+  Status RegisterAndStartStatus(RpcCommandPtr call, Handle* handle);
   RpcCommandPtr Unregister(Handle* handle);
-  void Abort(std::initializer_list<Handle*> list);
+
+  template <class Factory>
+  Handle RegisterConstructed(const Factory& factory) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (shutdown_) {
+      return InvalidHandle();
+    }
+    calls_.emplace_back();
+    auto result = --calls_.end();
+    *result = factory(result);
+    return result;
+  }
+
+  template<class Iter>
+  void Abort(Iter start, Iter end);
+
+  void Abort(std::initializer_list<Handle *> list) {
+    Abort(list.begin(), list.end());
+  }
+
+
   // Request all active calls to abort.
   void RequestAbortAll();
   Rpcs::Handle Prepare();
@@ -248,6 +277,8 @@ class Rpcs {
   Handle InvalidHandle() { return calls_.end(); }
 
  private:
+  Rpcs::Handle RegisterUnlocked(RpcCommandPtr call) REQUIRES(*mutex_);
+
   // Requests all active calls to abort. Returns deadline for waiting on abort completion.
   // If shutdown is true - switches Rpcs to shutting down state.
   CoarseTimePoint DoRequestAbortAll(RequestShutdown shutdown);
@@ -259,12 +290,35 @@ class Rpcs {
   bool shutdown_ = false;
 };
 
-template <class T, class... Args>
-RpcCommandPtr StartRpc(Args&&... args) {
-  auto rpc = std::make_shared<T>(std::forward<Args>(args)...);
-  rpc->SendRpc();
-  return rpc;
+template<class Iter>
+void Rpcs::Abort(Iter start, Iter end) {
+  std::vector<RpcCommandPtr> to_abort;
+  {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    for (auto it = start; it != end; ++it) {
+      auto& handle = *it;
+      if (*handle != calls_.end()) {
+        to_abort.push_back(**handle);
+      }
+    }
+  }
+  if (to_abort.empty()) {
+    return;
+  }
+  for (auto& rpc : to_abort) {
+    rpc->Abort();
+  }
+  {
+    std::unique_lock<std::mutex> lock(*mutex_);
+    for (auto it = start; it != end; ++it) {
+      auto& handle = *it;
+      while (*handle != calls_.end()) {
+        cond_.wait(lock);
+      }
+    }
+  }
 }
+
 
 template <class Value>
 class RpcFutureCallback {
@@ -319,5 +373,3 @@ WrappedRpcFuture<Value, Functor> WrapRpcFuture(const Functor& functor, Rpcs* rpc
 
 } // namespace rpc
 } // namespace yb
-
-#endif // YB_RPC_RPC_H

@@ -42,6 +42,39 @@ public class PublicCloudConstants {
     Host
   }
 
+  public enum OsType {
+    CENTOS,
+    ALMALINUX,
+    DARWIN,
+    LINUX,
+    EL8
+  }
+
+  public enum Architecture {
+    x86_64(
+        "glob:**yugabyte*{centos,alma,linux,el}*x86_64.tar.gz",
+        "glob:**ybc*{centos,alma,linux,el}*x86_64.tar.gz"),
+    aarch64(
+        "glob:**yugabyte*{centos,alma,linux,el}*aarch64.tar.gz",
+        "glob:**ybc*{centos,alma,linux,el}*aarch64.tar.gz");
+
+    private final String dbGlob;
+    private final String ybcGlob;
+
+    Architecture(String dbGlob, String ybcGlob) {
+      this.dbGlob = dbGlob;
+      this.ybcGlob = ybcGlob;
+    }
+
+    public String getDBGlob() {
+      return dbGlob;
+    }
+
+    public String getYbcGlob() {
+      return ybcGlob;
+    }
+  }
+
   /**
    * Tracks the supported storage options for each cloud provider. Options in the UI will be ordered
    * alphabetically e.g. Persistent will be the default value for GCP, not Scratch
@@ -54,7 +87,7 @@ public class PublicCloudConstants {
     Persistent(Common.CloudType.gcp, false, false),
     StandardSSD_LRS(Common.CloudType.azu, false, false),
     Premium_LRS(Common.CloudType.azu, false, false),
-    UltraSSD_LRS(Common.CloudType.azu, false, false);
+    UltraSSD_LRS(Common.CloudType.azu, true, true);
 
     private final Common.CloudType cloudType;
     private final boolean iopsProvisioning;

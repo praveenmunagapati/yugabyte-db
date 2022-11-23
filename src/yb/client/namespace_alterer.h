@@ -11,16 +11,17 @@
 // under the License.
 //
 
-#ifndef YB_CLIENT_NAMESPACE_ALTERER_H
-#define YB_CLIENT_NAMESPACE_ALTERER_H
+#pragma once
 
 #include <string>
 
-#include <boost/optional.hpp>
-
 #include "yb/client/client_fwd.h"
 
-#include "yb/master/master.pb.h"
+#include "yb/common/common_fwd.h"
+#include "yb/common/common_types.pb.h"
+
+#include "yb/master/master_ddl.fwd.h"
+#include "yb/master/master_fwd.h"
 
 #include "yb/util/monotime.h"
 #include "yb/util/status.h"
@@ -35,7 +36,7 @@ class YBNamespaceAlterer {
   YBNamespaceAlterer* RenameTo(const std::string& new_name);
   YBNamespaceAlterer* SetDatabaseType(YQLDatabase type);
 
-  CHECKED_STATUS Alter(CoarseTimePoint deadline = CoarseTimePoint());
+  Status Alter(CoarseTimePoint deadline = CoarseTimePoint());
 
  private:
   friend class YBClient;
@@ -43,7 +44,7 @@ class YBNamespaceAlterer {
   YBNamespaceAlterer(
       YBClient* client, const std::string& namespace_name, const std::string& namespace_id);
 
-  CHECKED_STATUS ToRequest(master::AlterNamespaceRequestPB* req);
+  Status ToRequest(master::AlterNamespaceRequestPB* req);
 
   YBClient* const client_;
   const std::string namespace_name_;
@@ -59,5 +60,3 @@ class YBNamespaceAlterer {
 
 }  // namespace client
 }  // namespace yb
-
-#endif  // YB_CLIENT_NAMESPACE_ALTERER_H

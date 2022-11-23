@@ -11,14 +11,12 @@
 // under the License.
 //
 
-#ifndef YB_DOCDB_DOC_OPERATION_H_
-#define YB_DOCDB_DOC_OPERATION_H_
+#pragma once
 
 #include <boost/container/small_vector.hpp>
 
-#include "yb/common/common.pb.h"
-#include "yb/common/pgsql_protocol.pb.h"
 #include "yb/common/read_hybrid_time.h"
+#include "yb/common/transaction.pb.h"
 
 #include "yb/docdb/docdb_fwd.h"
 
@@ -66,10 +64,10 @@ class DocOperation {
   // Returned doc paths are controlled by mode argument:
   //   kLock - paths should be locked for this operation.
   //   kIntents - paths that should be used when writing intents, i.e. for conflict resolution.
-  virtual CHECKED_STATUS GetDocPaths(
+  virtual Status GetDocPaths(
       GetDocPathsMode mode, DocPathsToLock *paths, IsolationLevel *level) const = 0;
 
-  virtual CHECKED_STATUS Apply(const DocOperationApplyData& data) = 0;
+  virtual Status Apply(const DocOperationApplyData& data) = 0;
   virtual Type OpType() = 0;
   virtual void ClearResponse() = 0;
 
@@ -79,6 +77,8 @@ class DocOperation {
 template <DocOperationType OperationType, class RequestPB>
 class DocOperationBase : public DocOperation {
  public:
+  explicit DocOperationBase(std::reference_wrapper<const RequestPB> request) : request_(request) {}
+
   Type OpType() override {
     return OperationType;
   }
@@ -88,12 +88,10 @@ class DocOperationBase : public DocOperation {
   }
 
  protected:
-  RequestPB request_;
+  const RequestPB& request_;
 };
 
 typedef std::vector<std::unique_ptr<DocOperation>> DocOperations;
 
 }  // namespace docdb
 }  // namespace yb
-
-#endif // YB_DOCDB_DOC_OPERATION_H_

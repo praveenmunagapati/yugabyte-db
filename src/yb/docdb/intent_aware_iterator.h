@@ -11,20 +11,22 @@
 // under the License.
 //
 
-#ifndef YB_DOCDB_INTENT_AWARE_ITERATOR_H_
-#define YB_DOCDB_INTENT_AWARE_ITERATOR_H_
+#pragma once
 
 #include <boost/optional/optional.hpp>
 
+#include "yb/common/doc_hybrid_time.h"
 #include "yb/common/read_hybrid_time.h"
 
 #include "yb/docdb/bounded_rocksdb_iterator.h"
-#include "yb/docdb/doc_key.h"
+#include "yb/docdb/intent_aware_iterator_interface.h"
 #include "yb/docdb/key_bytes.h"
 #include "yb/docdb/transaction_status_cache.h"
 
 #include "yb/rocksdb/db.h"
 #include "yb/rocksdb/options.h"
+
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 namespace docdb {
@@ -33,14 +35,7 @@ class Value;
 struct Expiration;
 
 YB_DEFINE_ENUM(ResolvedIntentState, (kNoIntent)(kInvalidPrefix)(kValid));
-YB_DEFINE_ENUM(Direction, (kForward)(kBackward));
 YB_DEFINE_ENUM(SeekIntentIterNeeded, (kNoNeed)(kSeek)(kSeekForward));
-
-struct FetchKeyResult {
-  Slice key;
-  DocHybridTime write_time;
-  bool same_transaction;
-};
 
 // Provides a way to iterate over DocDB (sub)keys with respect to committed intents transparently
 // for caller. Implementation relies on intents order in RocksDB, which is determined by intent key
@@ -58,14 +53,14 @@ struct FetchKeyResult {
 //
 // KeyBytes/Slice passed to Seek* methods should not contain hybrid time.
 // HybridTime of subdoc_key in Seek* methods would be ignored.
-class IntentAwareIterator {
+class IntentAwareIterator : public IntentAwareIteratorIf {
  public:
   IntentAwareIterator(
       const DocDB& doc_db,
       const rocksdb::ReadOptions& read_opts,
       CoarseTimePoint deadline,
       const ReadHybridTime& read_time,
-      const TransactionOperationContextOpt& txn_op_context);
+      const TransactionOperationContext& txn_op_context);
 
   IntentAwareIterator(const IntentAwareIterator& other) = delete;
   void operator=(const IntentAwareIterator& other) = delete;
@@ -75,15 +70,15 @@ class IntentAwareIterator {
 
   // Seek to specified encoded key (it is responsibility of caller to make sure it doesn't have
   // hybrid time).
-  void Seek(const Slice& key);
+  void Seek(const Slice& key) override;
 
   // Seek forward to specified encoded key (it is responsibility of caller to make sure it
   // doesn't have hybrid time). For efficiency, the method that takes a non-const KeyBytes pointer
   // avoids memory allocation by using the KeyBytes buffer to prepare the key to seek to, and may
   // append up to kMaxBytesPerEncodedHybridTime + 1 bytes of data to the buffer. The appended data
   // is removed when the method returns.
-  void SeekForward(const Slice& key);
-  void SeekForward(KeyBytes* key);
+  void SeekForward(const Slice& key) override;
+  void SeekForward(KeyBytes* key) override;
 
   // Seek past specified subdoc key (it is responsibility of caller to make sure it doesn't have
   // hybrid time).
@@ -91,11 +86,11 @@ class IntentAwareIterator {
 
   // Seek out of subdoc key (it is responsibility of caller to make sure it doesn't have hybrid
   // time).
-  void SeekOutOfSubDoc(const Slice& key);
+  void SeekOutOfSubDoc(const Slice& key) override;
   // For efficiency, this overload takes a non-const KeyBytes pointer avoids memory allocation by
   // using the KeyBytes buffer to prepare the key to seek to by appending an extra byte. The
   // appended byte is removed when the method returns.
-  void SeekOutOfSubDoc(KeyBytes* key_bytes);
+  void SeekOutOfSubDoc(KeyBytes* key_bytes) override;
 
   // Seek to last doc key.
   void SeekToLastDocKey();
@@ -106,16 +101,16 @@ class IntentAwareIterator {
   // This method positions the iterator at the beginning of the DocKey found before the doc_key
   // provided.
   void PrevDocKey(const DocKey& doc_key);
-  void PrevDocKey(const Slice& encoded_doc_key);
+  void PrevDocKey(const Slice& encoded_doc_key) override;
 
   // Fetches currently pointed key and also updates max_seen_ht to ht of this key. The key does not
   // contain the DocHybridTime but is returned separately and optionally.
-  Result<FetchKeyResult> FetchKey();
+  Result<FetchKeyResult> FetchKey() override;
 
-  bool valid();
-  Slice value();
-  const ReadHybridTime& read_time() { return read_time_; }
-  HybridTime max_seen_ht() { return max_seen_ht_; }
+  bool valid() override;
+  Slice value() override;
+  const ReadHybridTime& read_time() const override { return read_time_; }
+  HybridTime max_seen_ht() const override { return max_seen_ht_; }
 
   // Iterate through Next() until a row containing a full record (non merge record) is found, or the
   // key changes.
@@ -125,7 +120,7 @@ class IntentAwareIterator {
   //
   // If the key changes, latest_record_ht is set to the write time of the last merge record seen,
   // result_value is set to its value, and final_key is set to the key.
-  CHECKED_STATUS NextFullValue(
+  Status NextFullValue(
       DocHybridTime* latest_record_ht,
       Slice* result_value,
       Slice* final_key = nullptr);
@@ -133,7 +128,7 @@ class IntentAwareIterator {
   // Finds the latest record for a particular key after the provided max_overwrite_time, returns the
   // write time of the found record, and optionally also the result value. This latest record may
   // not be a full record, but instead a merge record (e.g. a TTL row).
-  CHECKED_STATUS FindLatestRecord(
+  Status FindLatestRecord(
       const Slice& key_without_ht,
       DocHybridTime* max_overwrite_time,
       Slice* result_value = nullptr);
@@ -146,11 +141,13 @@ class IntentAwareIterator {
   Result<HybridTime> FindOldestRecord(const Slice& key_without_ht,
                                       HybridTime min_hybrid_time);
 
-  void SetUpperbound(const Slice& upperbound) {
+  void SetUpperbound(const Slice& upperbound) override {
     upperbound_ = upperbound;
   }
 
   void DebugDump();
+
+  std::string DebugPosToString() override;
 
  private:
   friend class IntentAwareIteratorPrefixScope;
@@ -240,7 +237,7 @@ class IntentAwareIterator {
   // Set the exclusive upperbound of the intent iterator to the current SubDocKey of the regular
   // iterator. This is necessary to avoid RocksDB iterator from scanning over the deleted intents
   // beyond the current regular key unnecessarily.
-  CHECKED_STATUS SetIntentUpperbound();
+  Status SetIntentUpperbound();
 
   // Resets the exclusive upperbound of the intent iterator to the beginning of the transaction
   // metadata and reverse index region.
@@ -284,7 +281,7 @@ class IntentAwareIterator {
   // one of the strings above.
   Slice encoded_read_time_regular_limit_;
 
-  const TransactionOperationContextOpt txn_op_context_;
+  const TransactionOperationContext txn_op_context_;
   docdb::BoundedRocksDbIterator intent_iter_;
   docdb::BoundedRocksDbIterator iter_;
   // iter_valid_ is true if and only if iter_ is positioned at key which matches top prefix from
@@ -323,7 +320,7 @@ class IntentAwareIterator {
   Slice seek_key_prefix_;
 };
 
-class IntentAwareIteratorPrefixScope {
+class NODISCARD_CLASS IntentAwareIteratorPrefixScope {
  public:
   IntentAwareIteratorPrefixScope(const Slice& prefix, IntentAwareIterator* iterator)
       : iterator_(iterator) {
@@ -340,5 +337,3 @@ class IntentAwareIteratorPrefixScope {
 
 } // namespace docdb
 } // namespace yb
-
-#endif // YB_DOCDB_INTENT_AWARE_ITERATOR_H_

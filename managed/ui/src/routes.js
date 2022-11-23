@@ -24,7 +24,7 @@ import UniverseDetail from './pages/UniverseDetail';
 import Universes from './pages/Universes';
 import { Tasks, TasksList, TaskDetail } from './pages/tasks';
 import Alerts from './pages/Alerts';
-import ListUniverse from './pages/ListUniverse';
+import Backups from './pages/Backups';
 import UniverseConsole from './pages/UniverseConsole';
 import Metrics from './pages/Metrics';
 import DataCenterConfiguration from './pages/DataCenterConfiguration';
@@ -39,16 +39,15 @@ import { CreateUniverse } from './redesign/universe/CreateUniverse';
 import { EditUniverse } from './redesign/universe/EditUniverse';
 import { Administration } from './pages/Administration';
 import ToggleFeaturesInTest from './pages/ToggleFeaturesInTest';
+import { ReplicationDetails } from './components/xcluster';
 
 /**
  * Redirects to base url if no queryParmas is set else redirects to path set in queryParam
  */
 const redirectToUrl = () => {
   const searchParam = new URLSearchParams(window.location.search);
-  const pathToRedirect = searchParam.get('redirectUrl');
-  pathToRedirect
-    ? browserHistory.push(`/?redirectUrl=${pathToRedirect}`)
-    : browserHistory.push('/');
+  const pathToRedirect = searchParam.get('orig_url');
+  pathToRedirect ? browserHistory.push(`/?orig_url=${pathToRedirect}`) : browserHistory.push('/');
 };
 
 export const clearCredentials = () => {
@@ -91,6 +90,15 @@ const autoLogin = (params) => {
   browserHistory.push('/');
 };
 
+export const setCookiesFromLocalStorage = () => {
+  const storageItems = ['authToken', 'apiToken', 'customerId', 'userId', 'asdfasd'];
+  storageItems.forEach((item) => {
+    if (localStorage.getItem(item)) {
+      Cookies.set(item, localStorage.getItem(item));
+    }
+  });
+};
+
 /**
  * Checks that url query parameters contains only authToken, customerUUID,
  * and userUUID. If additional parameters are in url, returns false
@@ -111,7 +119,12 @@ axios.interceptors.response.use(
     const isAllowedUrl = /.+\/(login|register)$/i.test(error.request.responseURL);
     const isUnauthorised = error.response?.status === 403;
     if (isUnauthorised && !isAllowedUrl) {
-      browserHistory.push('/login');
+      //redirect to users current page
+      const searchParam = new URLSearchParams(window.location.search);
+      const location = searchParam.get('orig_url') || window.location.pathname;
+      browserHistory.push(
+        location && !['/', '/login'].includes(location) ? `/login?orig_url=${location}` : '/login'
+      );
     }
     return Promise.reject(error);
   }
@@ -124,7 +137,7 @@ function validateSession(store, replacePath, callback) {
   const customerId = Cookies.get('customerId') || localStorage.getItem('customerId');
   const searchParam = new URLSearchParams(window.location.search);
   if (_.isEmpty(customerId) || _.isEmpty(userId)) {
-    const location = searchParam.get('redirectUrl') || window.location.pathname;
+    const location = searchParam.get('orig_url') || window.location.pathname;
     store.dispatch(insecureLogin()).then((response) => {
       if (response.payload.status === 200) {
         store.dispatch(insecureLoginResponse(response));
@@ -148,7 +161,7 @@ function validateSession(store, replacePath, callback) {
     });
     store.dispatch(customerTokenError());
     location && location !== '/'
-      ? browserHistory.push(`/login?redirectUrl=${location}`)
+      ? browserHistory.push(`/login?orig_url=${location}`)
       : browserHistory.push('/login');
   } else {
     store.dispatch(validateToken()).then((response) => {
@@ -175,9 +188,9 @@ function validateSession(store, replacePath, callback) {
           localStorage.setItem('customerId', response.payload.data['uuid']);
         }
         localStorage.setItem('userId', userId);
-        if (searchParam.get('redirectUrl')) {
-          browserHistory.push(searchParam.get('redirectUrl'));
-          searchParam.delete('redirectUrl');
+        if (searchParam.get('orig_url')) {
+          browserHistory.push(searchParam.get('orig_url'));
+          searchParam.delete('orig_url');
         }
       } else {
         store.dispatch(resetCustomer());
@@ -218,7 +231,7 @@ export default (store) => {
       >
         <IndexRoute component={Dashboard} />
         <Route path="/universes" component={Universes}>
-          <IndexRoute component={ListUniverse} />
+          <IndexRoute component={UniverseConsole} />
           <Route path="/universes/import" component={Importer} />
           <Route path="/universes/create" component={UniverseDetail} />
           <Route path="/universes/:uuid" component={UniverseDetail} />
@@ -227,8 +240,11 @@ export default (store) => {
           </Route>
           <Route path="/universes/:uuid/:tab" component={UniverseDetail} />
           <Route path="/universes/:uuid/tables/:tableUUID" component={TableDetail} />
+          <Route
+            path="/universes/:uuid/replication/:replicationUUID"
+            component={ReplicationDetails}
+          />
         </Route>
-        <Route path="/universes_new" component={UniverseConsole} />
 
         {/* ------------------------------------------------------------------------*/}
         <Route path="/universe/create" component={CreateUniverse} />
@@ -252,6 +268,7 @@ export default (store) => {
           <Route path="/config/:tab/:section/:uuid" component={DataCenterConfiguration} />
         </Route>
         <Route path="/alerts" component={Alerts} />
+        <Route path="/backups" component={Backups} />
         <Route path="/help" component={Help} />
         <Route path="/profile" component={Profile} />
         <Route path="/profile/:tab" component={Profile} />

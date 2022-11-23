@@ -34,18 +34,37 @@
 
 #include <glog/logging.h>
 
-#include "yb/gutil/strings/substitute.h"
-#include "yb/master/call_home.h"
-#include "yb/master/master.h"
+#include "yb/common/wire_protocol.h"
+
 #include "yb/consensus/log_util.h"
+#include "yb/consensus/consensus_queue.h"
+
+#include "yb/gutil/sysinfo.h"
+
+#include "yb/master/master_call_home.h"
+#include "yb/master/master.h"
+#include "yb/master/sys_catalog_initialization.h"
+
+#include "yb/server/total_mem_watcher.h"
+
 #include "yb/util/flags.h"
 #include "yb/util/init.h"
 #include "yb/util/logging.h"
 #include "yb/util/main_util.h"
+#include "yb/util/mem_tracker.h"
+#include "yb/util/result.h"
+#include "yb/util/size_literals.h"
 #include "yb/util/ulimit_util.h"
-#include "yb/gutil/sysinfo.h"
-#include "yb/server/total_mem_watcher.h"
-#include "yb/util/net/net_util.h"
+#include "yb/util/debug/trace_event.h"
+#include "yb/util/path_util.h"
+
+#include "yb/tserver/server_main_util.h"
+
+#if YB_LTO_ENABLED
+#include "yb/tserver/tablet_server_main_impl.h"
+#endif
+
+using std::string;
 
 DECLARE_bool(callhome_enabled);
 DECLARE_bool(evict_failed_followers);
@@ -57,11 +76,10 @@ DECLARE_bool(durable_wal_write);
 DECLARE_int32(stderrthreshold);
 
 DECLARE_string(metric_node_name);
-DECLARE_int64(remote_bootstrap_rate_limit_bytes_per_sec);
-// Deprecated because it's misspelled.  But if set, this flag takes precedence over
-// remote_bootstrap_rate_limit_bytes_per_sec for compatibility.
-DECLARE_int64(remote_boostrap_rate_limit_bytes_per_sec);
+DECLARE_int32(remote_bootstrap_max_chunk_size);
 DECLARE_bool(use_docdb_aware_bloom_filter);
+DECLARE_int32(follower_unavailable_considered_failed_sec);
+DECLARE_int32(log_min_seconds_to_retain);
 
 using namespace std::literals;
 
@@ -69,6 +87,10 @@ namespace yb {
 namespace master {
 
 static int MasterMain(int argc, char** argv) {
+#ifndef NDEBUG
+  HybridTime::TEST_SetPrettyToString(true);
+#endif
+
   // Reset some default values before parsing gflags.
   FLAGS_rpc_bind_addresses = strings::Substitute("0.0.0.0:$0", kMasterDefaultPort);
   FLAGS_webserver_port = kMasterDefaultWebPort;
@@ -85,43 +107,26 @@ static int MasterMain(int argc, char** argv) {
   }
 
   FLAGS_default_memory_limit_to_ram_ratio = 0.10;
-  // For masters we always want to fsync the WAL files.
+  // For masters we always want to fsync the WAL files (except in testing).
   FLAGS_durable_wal_write = true;
+  // Master has a lot less memory and relatively less data. So by default, let's keep the
+  // RBS chunk size small.
+  FLAGS_remote_bootstrap_max_chunk_size = 1_MB;
 
   // A multi-node Master leader should not evict failed Master followers
   // because there is no-one to assign replacement servers in order to maintain
   // the desired replication factor. (It's not turtles all the way down!)
   FLAGS_evict_failed_followers = false;
 
-  // Only write FATALs by default to stderr.
-  FLAGS_stderrthreshold = google::FATAL;
+  FLAGS_follower_unavailable_considered_failed_sec = 2 * MonoTime::kSecondsPerHour;
+  FLAGS_log_min_seconds_to_retain = 2 * MonoTime::kSecondsPerHour;
 
-  // Do not sync GLOG to disk for INFO, WARNING.
-  // ERRORs, and FATALs will still cause a sync to disk.
-  FLAGS_logbuflevel = google::GLOG_WARNING;
-  ParseCommandLineFlags(&argc, &argv, true);
-  if (argc != 1) {
-    std::cerr << "usage: " << argv[0] << std::endl;
-    return 1;
-  }
-  LOG_AND_RETURN_FROM_MAIN_NOT_OK(log::ModifyDurableWriteFlagIfNotODirect());
-  LOG_AND_RETURN_FROM_MAIN_NOT_OK(InitYB(MasterOptions::kServerType, argv[0]));
-  LOG(INFO) << "NumCPUs determined to be: " << base::NumCPUs();
-
-  MemTracker::SetTCMallocCacheMemory();
-
-  LOG_AND_RETURN_FROM_MAIN_NOT_OK(GetPrivateIpMode());
+  LOG_AND_RETURN_FROM_MAIN_NOT_OK(
+      MasterTServerParseFlagsAndInit(MasterOptions::kServerType, &argc, &argv));
 
   auto opts_result = MasterOptions::CreateMasterOptions();
   LOG_AND_RETURN_FROM_MAIN_NOT_OK(opts_result);
   enterprise::Master server(*opts_result);
-
-  if (FLAGS_remote_boostrap_rate_limit_bytes_per_sec > 0) {
-    LOG(WARNING) << "Flag remote_boostrap_rate_limit_bytes_per_sec has been deprecated. "
-                 << "Use remote_bootstrap_rate_limit_bytes_per_sec flag instead";
-    FLAGS_remote_bootstrap_rate_limit_bytes_per_sec =
-        FLAGS_remote_boostrap_rate_limit_bytes_per_sec;
-  }
 
   SetDefaultInitialSysCatalogSnapshotFlags();
 
@@ -139,8 +144,8 @@ static int MasterMain(int argc, char** argv) {
 
   LOG(INFO) << "Master server successfully started.";
 
-  std::unique_ptr<CallHome> call_home;
-  call_home = std::make_unique<CallHome>(&server, ServerType::MASTER);
+  std::unique_ptr<MasterCallHome> call_home;
+  call_home = std::make_unique<MasterCallHome>(&server);
   call_home->ScheduleCallHome();
 
   auto total_mem_watcher = server::TotalMemWatcher::Create();
@@ -155,5 +160,15 @@ static int MasterMain(int argc, char** argv) {
 } // namespace yb
 
 int main(int argc, char** argv) {
+  const auto executable_basename = yb::BaseName(argv[0]);
+  if (boost::starts_with(executable_basename, "yb-tserver") ||
+      boost::starts_with(executable_basename, "tserver")) {
+#if YB_LTO_ENABLED
+    return yb::tserver::TabletServerMain(argc, argv);
+#else
+    LOG(FATAL) << "yb-master executable can only function as yb-tserver in LTO mode. "
+               << "The basename of argv[0] is: " << executable_basename;
+#endif
+  }
   return yb::master::MasterMain(argc, argv);
 }

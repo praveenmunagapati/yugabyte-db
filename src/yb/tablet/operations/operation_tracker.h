@@ -30,8 +30,7 @@
 // under the License.
 //
 
-#ifndef YB_TABLET_OPERATIONS_OPERATION_TRACKER_H
-#define YB_TABLET_OPERATIONS_OPERATION_TRACKER_H
+#pragma once
 
 #include <memory>
 #include <string>
@@ -66,7 +65,7 @@ class OperationTracker {
   //
   // In the event that the tracker's memory limit is exceeded, returns a
   // ServiceUnavailable status.
-  CHECKED_STATUS Add(OperationDriver* driver);
+  Status Add(OperationDriver* driver);
 
   // Removes the operation from the pending list.
   // Also triggers the deletion of the Operation object, if its refcount == 0.
@@ -76,10 +75,10 @@ class OperationTracker {
   std::vector<scoped_refptr<OperationDriver>> GetPendingOperations() const;
 
   // Returns number of pending operations.
-  int GetNumPendingForTests() const;
+  size_t TEST_GetNumPending() const;
 
   void WaitForAllToFinish() const;
-  CHECKED_STATUS WaitForAllToFinish(const MonoDelta& timeout) const;
+  Status WaitForAllToFinish(const MonoDelta& timeout) const;
 
   void StartInstrumentation(const scoped_refptr<MetricEntity>& metric_entity);
   void StartMemoryTracking(const std::shared_ptr<MemTracker>& parent_mem_tracker);
@@ -143,5 +142,3 @@ class OperationTracker {
 
 }  // namespace tablet
 }  // namespace yb
-
-#endif // YB_TABLET_OPERATIONS_OPERATION_TRACKER_H

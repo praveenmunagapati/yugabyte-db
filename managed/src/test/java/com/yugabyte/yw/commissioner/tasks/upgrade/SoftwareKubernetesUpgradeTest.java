@@ -3,11 +3,15 @@
 package com.yugabyte.yw.commissioner.tasks.upgrade;
 
 import static com.yugabyte.yw.models.TaskInfo.State.Success;
+import static org.hamcrest.MatcherAssert.*;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.collect.ImmutableList;
@@ -15,26 +19,34 @@ import com.google.common.collect.ImmutableMap;
 import com.yugabyte.yw.commissioner.tasks.subtasks.KubernetesCommandExecutor;
 import com.yugabyte.yw.commissioner.tasks.subtasks.KubernetesWaitForPod;
 import com.yugabyte.yw.common.RegexMatcher;
+import com.yugabyte.yw.common.ShellResponse;
 import com.yugabyte.yw.forms.SoftwareUpgradeParams;
 import com.yugabyte.yw.models.TaskInfo;
 import com.yugabyte.yw.models.helpers.TaskType;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
-import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
-import org.mockito.junit.MockitoJUnitRunner;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
+import org.yb.client.YBClient;
 import play.libs.Json;
 
-@RunWith(MockitoJUnitRunner.class)
 public class SoftwareKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
 
-  @InjectMocks SoftwareKubernetesUpgrade softwareKubernetesUpgrade;
+  @Rule public MockitoRule rule = MockitoJUnit.rule();
 
-  List<TaskType> UPGRADE_TASK_SEQUENCE =
+  @InjectMocks private SoftwareKubernetesUpgrade softwareKubernetesUpgrade;
+
+  private YBClient mockClient;
+
+  private static final List<TaskType> UPGRADE_TASK_SEQUENCE =
       ImmutableList.of(
           TaskType.KubernetesCommandExecutor,
           TaskType.KubernetesCommandExecutor,
@@ -49,22 +61,42 @@ public class SoftwareKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
           TaskType.KubernetesWaitForPod,
           TaskType.WaitForServer,
           TaskType.WaitForServerReady,
+          TaskType.ModifyBlackList,
+          TaskType.ModifyBlackList,
+          TaskType.WaitForLeaderBlacklistCompletion,
+          TaskType.KubernetesCommandExecutor,
+          TaskType.KubernetesWaitForPod,
+          TaskType.WaitForServer,
+          TaskType.WaitForServerReady,
+          TaskType.ModifyBlackList,
+          TaskType.ModifyBlackList,
+          TaskType.WaitForLeaderBlacklistCompletion,
+          TaskType.KubernetesCommandExecutor,
+          TaskType.KubernetesWaitForPod,
+          TaskType.WaitForServer,
+          TaskType.WaitForServerReady,
+          TaskType.ModifyBlackList,
+          TaskType.ModifyBlackList,
+          TaskType.WaitForLeaderBlacklistCompletion,
+          TaskType.KubernetesCommandExecutor,
+          TaskType.KubernetesWaitForPod,
+          TaskType.WaitForServer,
+          TaskType.WaitForServerReady,
+          TaskType.ModifyBlackList,
           TaskType.LoadBalancerStateChange,
-          TaskType.KubernetesCommandExecutor,
-          TaskType.KubernetesWaitForPod,
-          TaskType.WaitForServer,
-          TaskType.WaitForServerReady,
-          TaskType.KubernetesCommandExecutor,
-          TaskType.KubernetesWaitForPod,
-          TaskType.WaitForServer,
-          TaskType.WaitForServerReady,
-          TaskType.KubernetesCommandExecutor,
-          TaskType.KubernetesWaitForPod,
-          TaskType.WaitForServer,
-          TaskType.WaitForServerReady,
-          TaskType.LoadBalancerStateChange,
+          TaskType.RunYsqlUpgrade,
           TaskType.UpdateSoftwareVersion,
-          TaskType.UniverseUpdateSucceeded);
+          TaskType.UniverseUpdateSucceeded,
+          TaskType.ModifyBlackList);
+
+  @Before
+  public void setUp() {
+    super.setUp();
+    ShellResponse successResponse = new ShellResponse();
+    successResponse.message = "YSQL successfully upgraded to the latest version";
+    when(mockNodeUniverseManager.runYbAdminCommand(any(), any(), any(), anyList(), anyLong()))
+        .thenReturn(successResponse);
+  }
 
   private TaskInfo submitTask(SoftwareUpgradeParams taskParams) {
     return submitTask(taskParams, TaskType.SoftwareKubernetesUpgrade, commissioner);
@@ -106,6 +138,8 @@ public class SoftwareKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
         Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
         Json.toJson(
             ImmutableMap.of(
                 "commandType",
@@ -118,14 +152,7 @@ public class SoftwareKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
             ImmutableMap.of("commandType", KubernetesWaitForPod.CommandType.WAIT_FOR_POD.name())),
         Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
-        Json.toJson(
-            ImmutableMap.of(
-                "commandType",
-                KubernetesCommandExecutor.CommandType.HELM_UPGRADE.name(),
-                "ybSoftwareVersion",
-                "new-version")),
-        Json.toJson(
-            ImmutableMap.of("commandType", KubernetesWaitForPod.CommandType.WAIT_FOR_POD.name())),
+        Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
         Json.toJson(
@@ -136,6 +163,22 @@ public class SoftwareKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
                 "new-version")),
         Json.toJson(
             ImmutableMap.of("commandType", KubernetesWaitForPod.CommandType.WAIT_FOR_POD.name())),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(
+            ImmutableMap.of(
+                "commandType",
+                KubernetesCommandExecutor.CommandType.HELM_UPGRADE.name(),
+                "ybSoftwareVersion",
+                "new-version")),
+        Json.toJson(
+            ImmutableMap.of("commandType", KubernetesWaitForPod.CommandType.WAIT_FOR_POD.name())),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
@@ -146,7 +189,7 @@ public class SoftwareKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
   @Test
   public void testSoftwareUpgradeSingleAZ() {
     softwareKubernetesUpgrade.setUserTaskUUID(UUID.randomUUID());
-    setupUniverseSingleAZ(false);
+    setupUniverseSingleAZ(false, true);
 
     ArgumentCaptor<String> expectedYbSoftwareVersion = ArgumentCaptor.forClass(String.class);
     ArgumentCaptor<String> expectedNodePrefix = ArgumentCaptor.forClass(String.class);
@@ -169,16 +212,16 @@ public class SoftwareKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
             expectedNamespace.capture(),
             expectedOverrideFile.capture());
     verify(mockKubernetesManager, times(6))
-        .getPodStatus(
+        .getPodObject(
             expectedConfig.capture(), expectedNodePrefix.capture(), expectedPodName.capture());
     verify(mockKubernetesManager, times(1))
         .getPodInfos(
             expectedConfig.capture(), expectedNodePrefix.capture(), expectedNamespace.capture());
 
-    assertEquals(ybSoftwareVersionNew, expectedYbSoftwareVersion.getValue());
+    assertEquals(YB_SOFTWARE_VERSION_NEW, expectedYbSoftwareVersion.getValue());
     assertEquals(config, expectedConfig.getValue());
-    assertEquals(nodePrefix, expectedNodePrefix.getValue());
-    assertEquals(nodePrefix, expectedNamespace.getValue());
+    assertEquals(NODE_PREFIX, expectedNodePrefix.getValue());
+    assertEquals(NODE_PREFIX, expectedNamespace.getValue());
     assertThat(expectedOverrideFile.getValue(), RegexMatcher.matchesRegex(overrideFileRegex));
 
     List<TaskInfo> subTasks = taskInfo.getSubTasks();
@@ -191,7 +234,7 @@ public class SoftwareKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
   @Test
   public void testSoftwareUpgradeMultiAZ() {
     softwareKubernetesUpgrade.setUserTaskUUID(UUID.randomUUID());
-    setupUniverseMultiAZ(false);
+    setupUniverseMultiAZ(false, true);
 
     ArgumentCaptor<String> expectedYbSoftwareVersion = ArgumentCaptor.forClass(String.class);
     ArgumentCaptor<String> expectedNodePrefix = ArgumentCaptor.forClass(String.class);
@@ -202,7 +245,7 @@ public class SoftwareKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
     String overrideFileRegex = "(.*)" + defaultUniverse.universeUUID + "(.*).yml";
 
     SoftwareUpgradeParams taskParams = new SoftwareUpgradeParams();
-    taskParams.ybSoftwareVersion = ybSoftwareVersionNew;
+    taskParams.ybSoftwareVersion = YB_SOFTWARE_VERSION_NEW;
     TaskInfo taskInfo = submitTask(taskParams);
 
     verify(mockKubernetesManager, times(6))
@@ -213,22 +256,43 @@ public class SoftwareKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
             expectedNamespace.capture(),
             expectedOverrideFile.capture());
     verify(mockKubernetesManager, times(6))
-        .getPodStatus(
+        .getPodObject(
             expectedConfig.capture(), expectedNodePrefix.capture(), expectedPodName.capture());
     verify(mockKubernetesManager, times(3))
         .getPodInfos(
             expectedConfig.capture(), expectedNodePrefix.capture(), expectedNamespace.capture());
 
-    assertEquals(ybSoftwareVersionNew, expectedYbSoftwareVersion.getValue());
+    assertEquals(YB_SOFTWARE_VERSION_NEW, expectedYbSoftwareVersion.getValue());
     assertEquals(config, expectedConfig.getValue());
-    assertTrue(expectedNodePrefix.getValue().contains(nodePrefix));
-    assertTrue(expectedNamespace.getValue().contains(nodePrefix));
+    assertTrue(expectedNodePrefix.getValue().contains(NODE_PREFIX));
+    assertTrue(expectedNamespace.getValue().contains(NODE_PREFIX));
     assertThat(expectedOverrideFile.getValue(), RegexMatcher.matchesRegex(overrideFileRegex));
 
     List<TaskInfo> subTasks = taskInfo.getSubTasks();
     Map<Integer, List<TaskInfo>> subTasksByPosition =
         subTasks.stream().collect(Collectors.groupingBy(TaskInfo::getPosition));
     assertTaskSequence(subTasksByPosition, UPGRADE_TASK_SEQUENCE, createUpgradeResult(false));
+    assertEquals(Success, taskInfo.getTaskState());
+  }
+
+  @Test
+  public void testSoftwareUpgradeNoSystemCatalogUpgrade() {
+    softwareKubernetesUpgrade.setUserTaskUUID(UUID.randomUUID());
+    setupUniverseSingleAZ(false, true);
+
+    String overrideFileRegex = "(.*)" + defaultUniverse.universeUUID + "(.*).yml";
+
+    SoftwareUpgradeParams taskParams = new SoftwareUpgradeParams();
+    taskParams.ybSoftwareVersion = "new-version";
+    taskParams.upgradeSystemCatalog = false;
+    TaskInfo taskInfo = submitTask(taskParams);
+
+    List<TaskInfo> subTasks = taskInfo.getSubTasks();
+    Map<Integer, List<TaskInfo>> subTasksByPosition =
+        subTasks.stream().collect(Collectors.groupingBy(TaskInfo::getPosition));
+    List<TaskType> expectedTasks = new ArrayList<>(UPGRADE_TASK_SEQUENCE);
+    expectedTasks.remove(TaskType.RunYsqlUpgrade);
+    assertTaskSequence(subTasksByPosition, expectedTasks, createUpgradeResult(true));
     assertEquals(Success, taskInfo.getTaskState());
   }
 }

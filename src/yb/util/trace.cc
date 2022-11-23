@@ -33,31 +33,46 @@
 #include "yb/util/trace.h"
 
 #include <iomanip>
-#include <ios>
 #include <iostream>
-#include <strstream>
 #include <string>
 #include <vector>
 
-#include <boost/range/iterator_range.hpp>
 #include <boost/range/adaptor/indirected.hpp>
 
 #include "yb/gutil/strings/substitute.h"
 #include "yb/gutil/walltime.h"
 
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
+#include "yb/util/random.h"
+#include "yb/util/threadlocal.h"
 #include "yb/util/memory/arena.h"
 #include "yb/util/memory/memory.h"
 #include "yb/util/object_pool.h"
 #include "yb/util/size_literals.h"
 
-DEFINE_bool(enable_tracing, false, "Flag to enable/disable tracing across the code.");
-TAG_FLAG(enable_tracing, advanced);
-TAG_FLAG(enable_tracing, runtime);
+using std::vector;
+using std::string;
 
-DEFINE_int32(tracing_level, 0, "verbosity levels (like --v) up to which tracing is enabled.");
+DEFINE_RUNTIME_bool(enable_tracing, false, "Flag to enable/disable tracing across the code.");
+TAG_FLAG(enable_tracing, advanced);
+
+DEFINE_RUNTIME_int32(sampled_trace_1_in_n, 1000,
+    "Flag to enable/disable sampled tracing. 0 disables.");
+TAG_FLAG(sampled_trace_1_in_n, advanced);
+
+DEFINE_RUNTIME_bool(use_monotime_for_traces, false,
+    "Flag to enable use of MonoTime::Now() instead of "
+    "CoarseMonoClock::Now(). CoarseMonoClock is much cheaper so it is better to use it. However "
+    "if we need more accurate sub-millisecond level breakdown, we could use MonoTime.");
+TAG_FLAG(use_monotime_for_traces, advanced);
+
+DEFINE_RUNTIME_int32(tracing_level, 0,
+    "verbosity levels (like --v) up to which tracing is enabled.");
 TAG_FLAG(tracing_level, advanced);
-TAG_FLAG(tracing_level, runtime);
+
+DEFINE_RUNTIME_int32(print_nesting_levels, 5,
+    "controls the depth of the child traces to be printed.");
+TAG_FLAG(print_nesting_levels, advanced);
 
 namespace yb {
 
@@ -66,6 +81,8 @@ using strings::internal::SubstituteArg;
 __thread Trace* Trace::threadlocal_trace_;
 
 namespace {
+
+const char* kNestedChildPrefix = "..  ";
 
 // Get the part of filepath after the last path separator.
 // (Doesn't modify filepath, contrary to basename() in libgen.h.)
@@ -77,24 +94,30 @@ const char* const_basename(const char* filepath) {
 
 template <class Children>
 void DumpChildren(
-    std::ostream* out, const std::string& prefix, bool include_time_deltas,
-    const Children* children) {
+    std::ostream* out, int32_t tracing_depth, bool include_time_deltas, const Children* children) {
+  if (tracing_depth > GetAtomicFlag(&FLAGS_print_nesting_levels)) {
+    return;
+  }
   for (auto &child_trace : *children) {
-    *out << prefix << "Related trace:" << std::endl;
-    *out << child_trace->DumpToString(prefix, include_time_deltas);
+    for (int i = 0; i < tracing_depth; i++) {
+      *out << kNestedChildPrefix;
+    }
+    *out << "Related trace:" << std::endl;
+    *out << (child_trace ? child_trace->DumpToString(tracing_depth, include_time_deltas)
+                         : "Not collected");
   }
 }
 
-void DumpChildren(std::ostream* out, const std::string& prefix,
-                  bool include_time_deltas, std::nullptr_t children) {
-}
+void DumpChildren(
+    std::ostream* out, int32_t tracing_depth, bool include_time_deltas, std::nullptr_t children) {}
 
-template<class Entries>
-void DumpEntries(std::ostream* out,
-                 const std::string& prefix,
-                 bool include_time_deltas,
-                 int64_t start,
-                 const Entries& entries) {
+template <class Entries>
+void DumpEntries(
+    std::ostream* out,
+    int32_t tracing_depth,
+    bool include_time_deltas,
+    int64_t start,
+    const Entries& entries) {
   if (entries.empty()) {
     return;
   }
@@ -113,7 +136,9 @@ void DumpEntries(std::ostream* out,
     struct tm tm_time;
     localtime_r(&secs_since_epoch, &tm_time);
 
-    *out << prefix;
+    for (int i = 0; i < tracing_depth; i++) {
+      *out << kNestedChildPrefix;
+    }
     // Log format borrowed from glog/logging.cc
     using std::setw;
     out->fill('0');
@@ -134,18 +159,19 @@ void DumpEntries(std::ostream* out,
   }
 }
 
-template<class Entries, class Children>
-void DoDump(std::ostream* out,
-            const std::string& prefix,
-            bool include_time_deltas,
-            int64_t start,
-            const Entries& entries,
-            Children children) {
+template <class Entries, class Children>
+void DoDump(
+    std::ostream* out,
+    int32_t tracing_depth,
+    bool include_time_deltas,
+    int64_t start,
+    const Entries& entries,
+    Children children) {
   // Save original flags.
   std::ios::fmtflags save_flags(out->flags());
 
-  DumpEntries(out, prefix, include_time_deltas, start, entries);
-  DumpChildren(out, prefix + "..  ", include_time_deltas, children);
+  DumpEntries(out, tracing_depth, include_time_deltas, start, entries);
+  DumpChildren(out, tracing_depth + 1, include_time_deltas, children);
 
   // Restore stream flags.
   out->flags(save_flags);
@@ -170,38 +196,34 @@ int64_t GetCurrentMicrosFast(CoarseTimePoint now) {
 } // namespace
 
 ScopedAdoptTrace::ScopedAdoptTrace(Trace* t)
-    : old_trace_(Trace::threadlocal_trace_), is_enabled_(GetAtomicFlag(&FLAGS_enable_tracing)) {
-  if (is_enabled_) {
-    trace_ = t;
-    Trace::threadlocal_trace_ = t;
-    DFAKE_SCOPED_LOCK_THREAD_LOCKED(ctor_dtor_);
-  }
+    : old_trace_(Trace::threadlocal_trace_) {
+  trace_ = t;
+  Trace::threadlocal_trace_ = t;
+  DFAKE_SCOPED_LOCK_THREAD_LOCKED(ctor_dtor_);
 }
 
 ScopedAdoptTrace::~ScopedAdoptTrace() {
-  if (is_enabled_) {
-    Trace::threadlocal_trace_ = old_trace_;
-    // It's critical that we Release() the reference count on 't' only
-    // after we've unset the thread-local variable. Otherwise, we can hit
-    // a nasty interaction with tcmalloc contention profiling. Consider
-    // the following sequence:
-    //
-    //   1. threadlocal_trace_ has refcount = 1
-    //   2. we call threadlocal_trace_->Release() which decrements refcount to 0
-    //   3. this calls 'delete' on the Trace object
-    //   3a. this calls tcmalloc free() on the Trace and various sub-objects
-    //   3b. the free() calls may end up experiencing contention in tcmalloc
-    //   3c. we try to account the contention in threadlocal_trace_'s TraceMetrics,
-    //       but it has already been freed.
-    //
-    // In the best case, we just scribble into some free tcmalloc memory. In the
-    // worst case, tcmalloc would have already re-used this memory for a new
-    // allocation on another thread, and we end up overwriting someone else's memory.
-    //
-    // Waiting to Release() only after 'unpublishing' the trace solves this.
-    trace_.reset();
-    DFAKE_SCOPED_LOCK_THREAD_LOCKED(ctor_dtor_);
-  }
+  Trace::threadlocal_trace_ = old_trace_;
+  // It's critical that we Release() the reference count on 't' only
+  // after we've unset the thread-local variable. Otherwise, we can hit
+  // a nasty interaction with tcmalloc contention profiling. Consider
+  // the following sequence:
+  //
+  //   1. threadlocal_trace_ has refcount = 1
+  //   2. we call threadlocal_trace_->Release() which decrements refcount to 0
+  //   3. this calls 'delete' on the Trace object
+  //   3a. this calls tcmalloc free() on the Trace and various sub-objects
+  //   3b. the free() calls may end up experiencing contention in tcmalloc
+  //   3c. we try to account the contention in threadlocal_trace_'s TraceMetrics,
+  //       but it has already been freed.
+  //
+  // In the best case, we just scribble into some free tcmalloc memory. In the
+  // worst case, tcmalloc would have already re-used this memory for a new
+  // allocation on another thread, and we end up overwriting someone else's memory.
+  //
+  // Waiting to Release() only after 'unpublishing' the trace solves this.
+  trace_.reset();
+  DFAKE_SCOPED_LOCK_THREAD_LOCKED(ctor_dtor_);
 }
 
 // Struct which precedes each entry in the trace.
@@ -212,7 +234,7 @@ struct TraceEntry {
   const char* file_path;
   int line_number;
 
-  uint32_t message_len;
+  size_t message_len;
   TraceEntry* next;
   char message[0];
 
@@ -236,7 +258,7 @@ ThreadSafeObjectPool<ThreadSafeArena>& ArenaPool() {
 Trace::~Trace() {
   auto* arena = arena_.load(std::memory_order_acquire);
   if (arena) {
-    arena->Reset();
+    arena->Reset(ResetMode::kKeepLast);
     ArenaPool().Release(arena);
   }
 }
@@ -256,9 +278,37 @@ ThreadSafeArena* Trace::GetAndInitArena() {
   return arena;
 }
 
+scoped_refptr<Trace> Trace::NewTrace() {
+  if (GetAtomicFlag(&FLAGS_enable_tracing)) {
+    return scoped_refptr<Trace>(new Trace());
+  }
+  const int32_t sampling_freq = GetAtomicFlag(&FLAGS_sampled_trace_1_in_n);
+  if (sampling_freq <= 0) {
+    VLOG(2) << "Sampled tracing returns nullptr";
+    return nullptr;
+  }
+
+  BLOCK_STATIC_THREAD_LOCAL(yb::Random, rng_ptr, static_cast<uint32_t>(GetCurrentTimeMicros()));
+  auto ret = scoped_refptr<Trace>(rng_ptr->OneIn(sampling_freq) ? new Trace() : nullptr);
+  VLOG(2) << "Sampled tracing returns " << (ret ? "non-null" : "nullptr");
+  if (ret) {
+    TRACE_TO(ret.get(), "Sampled trace created probabilistically");
+  }
+  return ret;
+}
+
+scoped_refptr<Trace>  Trace::NewTraceForParent(Trace* parent) {
+  if (parent) {
+    scoped_refptr<Trace> trace(new Trace);
+    parent->AddChildTrace(trace.get());
+    return trace;
+  }
+  return NewTrace();
+}
+
 void Trace::SubstituteAndTrace(
     const char* file_path, int line_number, CoarseTimePoint now, GStringPiece format) {
-  int msg_len = format.size();
+  auto msg_len = format.size();
   DCHECK_NE(msg_len, 0) << "Bad format specification";
   TraceEntry* entry = NewEntry(msg_len, file_path, line_number, now);
   if (entry == nullptr) return;
@@ -288,7 +338,7 @@ void Trace::SubstituteAndTrace(const char* file_path,
 }
 
 TraceEntry* Trace::NewEntry(
-    int msg_len, const char* file_path, int line_number, CoarseTimePoint now) {
+    size_t msg_len, const char* file_path, int line_number, CoarseTimePoint now) {
   auto* arena = GetAndInitArena();
   size_t size = offsetof(TraceEntry, message) + msg_len;
   void* dst = arena->AllocateBytesAligned(size, alignof(TraceEntry));
@@ -320,10 +370,10 @@ void Trace::AddEntry(TraceEntry* entry) {
 }
 
 void Trace::Dump(std::ostream *out, bool include_time_deltas) const {
-  Dump(out, "", include_time_deltas);
+  Dump(out, 0, include_time_deltas);
 }
 
-void Trace::Dump(std::ostream* out, const std::string& prefix, bool include_time_deltas) const {
+void Trace::Dump(std::ostream* out, int32_t tracing_depth, bool include_time_deltas) const {
   // Gather a copy of the list of entries under the lock. This is fast
   // enough that we aren't worried about stalling concurrent tracers
   // (whereas doing the logging itself while holding the lock might be
@@ -343,16 +393,14 @@ void Trace::Dump(std::ostream* out, const std::string& prefix, bool include_time
     trace_start_time_usec = trace_start_time_usec_;
   }
 
-  DoDump(out, prefix,
-         include_time_deltas,
-         trace_start_time_usec,
-         entries | boost::adaptors::indirected,
-         &child_traces);
+  DoDump(
+      out, tracing_depth, include_time_deltas, trace_start_time_usec,
+      entries | boost::adaptors::indirected, &child_traces);
 }
 
-string Trace::DumpToString(const std::string& prefix, bool include_time_deltas) const {
+string Trace::DumpToString(int32_t tracing_depth, bool include_time_deltas) const {
   std::stringstream s;
-  Dump(&s, prefix, include_time_deltas);
+  Dump(&s, tracing_depth, include_time_deltas);
   return s.str();
 }
 
@@ -398,11 +446,10 @@ void PlainTrace::Trace(const char *file_path, int line_number, const char *messa
 }
 
 void PlainTrace::Dump(std::ostream *out, bool include_time_deltas) const {
-  Dump(out, "", include_time_deltas);
+  Dump(out, 0, include_time_deltas);
 }
 
-void PlainTrace::Dump(
-    std::ostream* out, const std::string& prefix, bool include_time_deltas) const {
+void PlainTrace::Dump(std::ostream* out, int32_t tracing_depth, bool include_time_deltas) const {
   size_t size;
   decltype(trace_start_time_usec_) trace_start_time_usec;
   {
@@ -411,12 +458,14 @@ void PlainTrace::Dump(
     trace_start_time_usec = trace_start_time_usec_;
   }
   auto entries = boost::make_iterator_range(entries_, entries_ + size);
-  DoDump(out, prefix, include_time_deltas, trace_start_time_usec, entries, /* children */ nullptr);
+  DoDump(
+      out, tracing_depth, include_time_deltas, trace_start_time_usec, entries,
+      /* children */ nullptr);
 }
 
-std::string PlainTrace::DumpToString(const std::string& prefix, bool include_time_deltas) const {
+std::string PlainTrace::DumpToString(int32_t tracing_depth, bool include_time_deltas) const {
   std::stringstream s;
-  Dump(&s, prefix, include_time_deltas);
+  Dump(&s, tracing_depth, include_time_deltas);
   return s.str();
 }
 

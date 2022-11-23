@@ -21,21 +21,26 @@
 #include <boost/compute/detail/lru_cache.hpp>
 
 #include "yb/client/meta_data_cache.h"
-#include "yb/client/transaction_pool.h"
+
+#include "yb/gutil/casts.h"
+#include "yb/gutil/strings/substitute.h"
+
+#include "yb/tserver/tablet_server_interface.h"
+
+#include "yb/util/bytes_formatter.h"
+#include "yb/util/format.h"
+#include "yb/util/mem_tracker.h"
+#include "yb/util/metrics.h"
+#include "yb/util/result.h"
+#include "yb/util/status_format.h"
+#include "yb/util/trace.h"
 
 #include "yb/yql/cql/cqlserver/cql_processor.h"
 #include "yb/yql/cql/cqlserver/cql_rpc.h"
 #include "yb/yql/cql/cqlserver/cql_server.h"
 #include "yb/yql/cql/cqlserver/system_query_cache.h"
-
-#include "yb/gutil/strings/substitute.h"
-#include "yb/rpc/messenger.h"
-#include "yb/rpc/rpc_context.h"
-
-#include "yb/util/bytes_formatter.h"
-#include "yb/util/crypt.h"
-
-#include "yb/util/mem_tracker.h"
+#include "yb/yql/cql/ql/parser/parser.h"
+#include "yb/util/flags.h"
 
 using namespace std::placeholders;
 using namespace yb::size_literals;
@@ -43,18 +48,21 @@ using namespace yb::size_literals;
 DECLARE_bool(use_cassandra_authentication);
 DECLARE_int32(cql_update_system_query_cache_msecs);
 
-DEFINE_int64(cql_service_max_prepared_statement_size_bytes, 128_MB,
+DEFINE_UNKNOWN_int64(cql_service_max_prepared_statement_size_bytes, 128_MB,
              "The maximum amount of memory the CQL proxy should use to maintain prepared "
              "statements. 0 or negative means unlimited.");
-DEFINE_int32(cql_ybclient_reactor_threads, 24,
+DEFINE_UNKNOWN_int32(cql_ybclient_reactor_threads, 24,
              "The number of reactor threads to be used for processing ybclient "
              "requests originating in the cql layer");
-DEFINE_int32(password_hash_cache_size, 64, "Number of password hashes to cache. 0 or "
+DEFINE_UNKNOWN_int32(password_hash_cache_size, 64, "Number of password hashes to cache. 0 or "
              "negative disables caching.");
-DEFINE_int64(cql_processors_limit, -4000,
+DEFINE_UNKNOWN_int64(cql_processors_limit, -4000,
              "Limit number of CQL processors. Positive means absolute limit. "
              "Negative means number of processors per 1GB of root mem tracker memory limit. "
              "0 - unlimited.");
+DEFINE_UNKNOWN_bool(cql_check_table_schema_in_paging_state, true,
+            "Return error for prepared SELECT statement execution if the table was altered "
+            "during the prepared statement execution.");
 
 namespace yb {
 namespace cqlserver {
@@ -233,23 +241,36 @@ void CQLServiceImpl::ReturnProcessor(const CQLProcessorListPos& pos) {
 }
 
 shared_ptr<CQLStatement> CQLServiceImpl::AllocatePreparedStatement(
-    const ql::CQLMessage::QueryId& query_id, const string& keyspace, const string& query) {
+    const ql::CQLMessage::QueryId& query_id, const string& query, ql::QLEnv* ql_env) {
   // Get exclusive lock before allocating a prepared statement and updating the LRU list.
   std::lock_guard<std::mutex> guard(prepared_stmts_mutex_);
 
   shared_ptr<CQLStatement> stmt;
   const auto itr = prepared_stmts_map_.find(query_id);
-  if (itr == prepared_stmts_map_.end()) {
+  bool is_new_stmt = (itr == prepared_stmts_map_.end());
+
+  if (!is_new_stmt) {
+    stmt = itr->second;
+    const Result<bool> is_altered_res = stmt->IsYBTableAltered(ql_env);
+    // The table is not available if (!is_altered_res.ok()).
+    // Usually it happens if the table was deleted.
+    if (!is_altered_res.ok() || *is_altered_res) {
+      is_new_stmt = true;
+      DeletePreparedStatementUnlocked(stmt);
+    }
+  }
+
+  if (is_new_stmt) {
     // Allocate the prepared statement placeholder that multiple clients trying to prepare the same
     // statement to contend on. The statement will then be prepared by one client while the rest
     // wait for the results.
     stmt = prepared_stmts_map_.emplace(
         query_id, std::make_shared<CQLStatement>(
-            keyspace, query, prepared_stmts_list_.end())).first->second;
+            DCHECK_NOTNULL(ql_env)->CurrentKeyspace(),
+            query, prepared_stmts_list_.end())).first->second;
     InsertLruPreparedStatementUnlocked(stmt);
   } else {
     // Return existing statement if found.
-    stmt = itr->second;
     MoveLruPreparedStatementUnlocked(stmt);
   }
 
@@ -260,26 +281,39 @@ shared_ptr<CQLStatement> CQLServiceImpl::AllocatePreparedStatement(
   return stmt;
 }
 
-shared_ptr<const CQLStatement> CQLServiceImpl::GetPreparedStatement(
-    const ql::CQLMessage::QueryId& query_id) {
+Result<std::shared_ptr<const CQLStatement>> CQLServiceImpl::GetPreparedStatement(
+    const ql::CQLMessage::QueryId& query_id, SchemaVersion version) {
   // Get exclusive lock before looking up a prepared statement and updating the LRU list.
   std::lock_guard<std::mutex> guard(prepared_stmts_mutex_);
 
   const auto itr = prepared_stmts_map_.find(query_id);
   if (itr == prepared_stmts_map_.end()) {
-    return nullptr;
+    return ErrorStatus(ql::ErrorCode::UNPREPARED_STATEMENT);
   }
 
   shared_ptr<CQLStatement> stmt = itr->second;
+  LOG_IF(DFATAL, stmt == nullptr) << "Unexpected null statement";
 
   // If the statement has not finished preparing, do not return it.
   if (stmt->unprepared()) {
-    return nullptr;
+    return ErrorStatus(ql::ErrorCode::UNPREPARED_STATEMENT);
   }
   // If the statement is stale, delete it.
   if (stmt->stale()) {
     DeletePreparedStatementUnlocked(stmt);
-    return nullptr;
+    return ErrorStatus(ql::ErrorCode::UNPREPARED_STATEMENT);
+  }
+  // If the statement has a later schema version, return a error.
+  if (version != ql::StatementParameters::kUseLatest &&
+      FLAGS_cql_check_table_schema_in_paging_state) {
+    const SchemaVersion stmt_schema_version = VERIFY_RESULT(stmt->GetYBTableSchemaVersion());
+    if (version != stmt_schema_version) {
+      return ErrorStatus(
+          ql::ErrorCode::WRONG_METADATA_VERSION,
+          Substitute(
+              "Table has been altered. Execute the query again. Requested schema version $0, "
+              "got $1.", version, stmt_schema_version));
+    }
   }
 
   MoveLruPreparedStatementUnlocked(stmt);
@@ -377,12 +411,16 @@ void CQLServiceImpl::CollectGarbage(size_t required) {
           << ", memory usage = " << prepared_stmts_mem_tracker_->consumption();
 }
 
-client::TransactionPool* CQLServiceImpl::TransactionPool() {
+client::TransactionPool& CQLServiceImpl::TransactionPool() {
   return server_->tserver()->TransactionPool();
 }
 
 server::Clock* CQLServiceImpl::clock() {
   return server_->clock();
+}
+
+void CQLServiceImpl::FillEndpoints(const rpc::RpcServicePtr& service, rpc::RpcEndpointMap* map) {
+  map->emplace(CQLInboundCall::static_serialized_remote_method(), std::make_pair(service, 0ULL));
 }
 
 }  // namespace cqlserver

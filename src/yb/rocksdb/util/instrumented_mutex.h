@@ -18,16 +18,12 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSDB_UTIL_INSTRUMENTED_MUTEX_H
-#define YB_ROCKSDB_UTIL_INSTRUMENTED_MUTEX_H
 
 #pragma once
 
-#include "yb/rocksdb/port/port.h"
 #include "yb/rocksdb/env.h"
+#include "yb/rocksdb/port/port.h"
 #include "yb/rocksdb/statistics.h"
-#include "yb/rocksdb/util/statistics.h"
-#include "yb/rocksdb/util/stop_watch.h"
 
 namespace rocksdb {
 class InstrumentedCondVar;
@@ -117,5 +113,3 @@ class InstrumentedCondVar {
 };
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_UTIL_INSTRUMENTED_MUTEX_H

@@ -13,18 +13,24 @@
 
 #include "yb/tablet/transaction_status_resolver.h"
 
-#include <gflags/gflags.h>
-
+#include "yb/client/client.h"
+#include "yb/client/meta_cache.h"
 #include "yb/client/transaction_rpc.h"
 
 #include "yb/common/wire_protocol.h"
 
 #include "yb/rpc/rpc.h"
 
+#include "yb/tablet/transaction_participant_context.h"
+
 #include "yb/tserver/tserver_service.pb.h"
 
 #include "yb/util/atomic.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/countdown_latch.h"
+#include "yb/util/flags.h"
+#include "yb/util/logging.h"
+#include "yb/util/result.h"
+#include "yb/util/status_format.h"
 
 DEFINE_test_flag(int32, inject_status_resolver_delay_ms, 0,
                  "Inject delay before launching transaction status resolver RPC.");
@@ -42,7 +48,7 @@ namespace tablet {
 class TransactionStatusResolver::Impl {
  public:
   Impl(TransactionParticipantContext* participant_context, rpc::Rpcs* rpcs,
-       size_t max_transactions_per_request, TransactionStatusResolverCallback callback)
+       int max_transactions_per_request, TransactionStatusResolverCallback callback)
       : participant_context_(*participant_context), rpcs_(*rpcs),
         max_transactions_per_request_(max_transactions_per_request), callback_(std::move(callback)),
         log_prefix_(participant_context->LogPrefix()), handle_(rpcs_.InvalidHandle()) {}
@@ -84,6 +90,10 @@ class TransactionStatusResolver::Impl {
   }
 
  private:
+  const std::string& LogPrefix() const {
+    return log_prefix_;
+  }
+
   void Execute() {
     LOG_IF(DFATAL, !run_latch_.count()) << "Execute while running is false";
 
@@ -104,11 +114,47 @@ class TransactionStatusResolver::Impl {
     // transaction statuses, which is NOT concurrent.
     // So we could avoid doing synchronization here.
     auto& tablet_id_and_queue = *queues_.begin();
-    tserver::GetTransactionStatusRequestPB req;
-    req.set_tablet_id(tablet_id_and_queue.first);
-    req.set_propagated_hybrid_time(participant_context_.Now().ToUint64());
+    auto client = participant_context_.client_future().get();
+    if (!client) {
+      Complete(STATUS(Aborted, "Aborted because cannot start RPC"));
+    }
+    client->LookupTabletById(
+        tablet_id_and_queue.first,
+        nullptr /* table */,
+        master::IncludeInactive::kFalse,
+        master::IncludeDeleted::kTrue,
+        std::min(deadline_, TransactionRpcDeadline()),
+        std::bind(&Impl::LookupTabletDone, this, _1),
+        client::UseCache::kTrue);
+  }
+
+  void LookupTabletDone(const Result<client::internal::RemoteTabletPtr>& result) {
+    auto& tablet_id_and_queue = *queues_.begin();
+    const auto& tablet_id = tablet_id_and_queue.first;
     const auto& tablet_queue = tablet_id_and_queue.second;
     auto request_size = std::min<size_t>(max_transactions_per_request_, tablet_queue.size());
+
+    if (!result.ok()) {
+      const auto& status = result.status();
+      LOG_WITH_PREFIX(WARNING) << "Failed to request transaction statuses: " << status;
+      if (status.IsAborted()) {
+        Complete(status);
+      } else {
+        Execute();
+      }
+      return;
+    }
+
+    auto tablet = *result;
+    if (!tablet) {
+      HandleTabletDeleted(request_size);
+      return;
+    }
+
+    tserver::GetTransactionStatusRequestPB req;
+    req.set_tablet_id(tablet_id);
+    req.set_propagated_hybrid_time(participant_context_.Now().ToUint64());
+
     for (size_t i = 0; i != request_size; ++i) {
       const auto& txn_id = tablet_queue[i];
       VLOG_WITH_PREFIX(4) << "Checking txn status: " << txn_id;
@@ -130,13 +176,38 @@ class TransactionStatusResolver::Impl {
     }
   }
 
-  const std::string& LogPrefix() const {
-    return log_prefix_;
+  void HandleTabletDeleted(size_t request_size) {
+    VLOG_WITH_PREFIX(2) << "Transaction tablet is deleted";
+
+    auto it = queues_.begin();
+    auto& queue = it->second;
+    // If the transaction status tablet has been deleted, all unapplied intents referring to it
+    // are assumed to be aborted transactions.
+    status_infos_.clear();
+    status_infos_.resize(request_size);
+    for (size_t i = 0; i != request_size; ++i) {
+      auto& status_info = status_infos_[i];
+      status_info.transaction_id = queue.front();
+      status_info.status = TransactionStatus::ABORTED;
+      status_info.status_ht = HybridTime::kMax;
+      status_info.coordinator_safe_time = HybridTime();
+      VLOG_WITH_PREFIX(4) << "Status: " << status_info.ToString();
+      queue.pop_front();
+    }
+
+    if (queue.empty()) {
+      VLOG_WITH_PREFIX(2) << "Processed queue for: " << it->first;
+      queues_.erase(it);
+    }
+
+    callback_(status_infos_);
+
+    Execute();
   }
 
   void StatusReceived(Status status,
                       const tserver::GetTransactionStatusResponsePB& response,
-                      size_t request_size) {
+                      int request_size) {
     VLOG_WITH_PREFIX(2) << "Received statuses: " << status << ", " << response.ShortDebugString();
 
     rpcs_.Unregister(&handle_);
@@ -159,9 +230,10 @@ class TransactionStatusResolver::Impl {
       participant_context_.UpdateClock(HybridTime(response.propagated_hybrid_time()));
     }
 
-    if ((response.status().size() != 1 &&
-            response.status().size() != request_size) ||
-        (response.aborted_subtxn_set().size() != 1 &&
+    auto it = queues_.begin();
+    auto& queue = it->second;
+    if ((response.status().size() != 1 && response.status().size() != request_size) ||
+        (response.aborted_subtxn_set().size() != 0 && // Old node may not populate these.
             response.aborted_subtxn_set().size() != request_size)) {
       // Node with old software version would always return 1 status.
       LOG_WITH_PREFIX(DFATAL)
@@ -173,22 +245,27 @@ class TransactionStatusResolver::Impl {
 
     status_infos_.clear();
     status_infos_.resize(response.status().size());
-    auto it = queues_.begin();
-    auto& queue = it->second;
-    for (size_t i = 0; i != response.status().size(); ++i) {
+    for (int i = 0; i != response.status().size(); ++i) {
       auto& status_info = status_infos_[i];
       status_info.transaction_id = queue.front();
       status_info.status = response.status(i);
 
-      auto aborted_subtxn_set_or_status = AbortedSubTransactionSet::FromPB(
-        response.aborted_subtxn_set(i).set());
-      if (!aborted_subtxn_set_or_status.ok()) {
-        Complete(STATUS_FORMAT(
-            IllegalState, "Cannot deserialize AbortedSubTransactionSet: $0",
-            response.aborted_subtxn_set(i).DebugString()));
-        return;
+      if (PREDICT_FALSE(response.aborted_subtxn_set().empty())) {
+        YB_LOG_EVERY_N(WARNING, 1)
+            << "Empty aborted_subtxn_set in transaction status response. "
+            << "This should only happen when nodes are on different versions, e.g. during "
+            << "upgrade.";
+      } else {
+        auto aborted_subtxn_set_or_status = AbortedSubTransactionSet::FromPB(
+          response.aborted_subtxn_set(i).set());
+        if (!aborted_subtxn_set_or_status.ok()) {
+          Complete(STATUS_FORMAT(
+              IllegalState, "Cannot deserialize AbortedSubTransactionSet: $0",
+              response.aborted_subtxn_set(i).DebugString()));
+          return;
+        }
+        status_info.aborted_subtxn_set = aborted_subtxn_set_or_status.get();
       }
-      status_info.aborted_subtxn_set = aborted_subtxn_set_or_status.get();
 
       if (i < response.status_hybrid_time().size()) {
         status_info.status_ht = HybridTime(response.status_hybrid_time(i));
@@ -206,6 +283,7 @@ class TransactionStatusResolver::Impl {
       VLOG_WITH_PREFIX(4) << "Status: " << status_info.ToString();
       queue.pop_front();
     }
+
     if (queue.empty()) {
       VLOG_WITH_PREFIX(2) << "Processed queue for: " << it->first;
       queues_.erase(it);
@@ -225,7 +303,7 @@ class TransactionStatusResolver::Impl {
 
   TransactionParticipantContext& participant_context_;
   rpc::Rpcs& rpcs_;
-  const size_t max_transactions_per_request_;
+  const int max_transactions_per_request_;
   TransactionStatusResolverCallback callback_;
 
   const std::string log_prefix_;
@@ -241,7 +319,7 @@ class TransactionStatusResolver::Impl {
 
 TransactionStatusResolver::TransactionStatusResolver(
     TransactionParticipantContext* participant_context, rpc::Rpcs* rpcs,
-    size_t max_transactions_per_request, TransactionStatusResolverCallback callback)
+    int max_transactions_per_request, TransactionStatusResolverCallback callback)
     : impl_(new Impl(
         participant_context, rpcs, max_transactions_per_request, std::move(callback))) {
 }

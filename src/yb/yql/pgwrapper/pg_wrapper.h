@@ -10,21 +10,28 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 
-#ifndef YB_YQL_PGWRAPPER_PG_WRAPPER_H
-#define YB_YQL_PGWRAPPER_PG_WRAPPER_H
+#pragma once
 
-#include <string>
 #include <atomic>
+#include <optional>
+#include <string>
 
-#include <boost/optional.hpp>
-
+#include "yb/gutil/ref_counted.h"
+#include "yb/util/flags.h"
 #include "yb/util/subprocess.h"
-#include "yb/util/status.h"
+#include "yb/util/status_fwd.h"
 #include "yb/util/enums.h"
-#include "yb/util/result.h"
-#include "yb/util/thread.h"
 
 namespace yb {
+
+class Thread;
+
+namespace tserver {
+
+class TabletServerIf;
+
+} // namespace tserver
+
 namespace pgwrapper {
 
 // Returns the root directory of our PostgreSQL installation.
@@ -63,21 +70,25 @@ class PgWrapper {
   explicit PgWrapper(PgProcessConf conf);
 
   // Checks if we have a valid configuration in order to be able to run PostgreSQL.
-  CHECKED_STATUS PreflightCheck();
+  Status PreflightCheck();
 
-  CHECKED_STATUS Start();
+  Status Start();
+
+  Status ReloadConfig();
+
+  Status UpdateAndReloadConfig();
 
   void Kill();
 
   // Calls initdb if the data directory does not exist. This is intended to use during tablet server
   // initialization.
-  CHECKED_STATUS InitDbLocalOnlyIfNeeded();
+  Status InitDbLocalOnlyIfNeeded();
 
   // Calls PostgreSQL's initdb program for initial database initialization.
   // yb_enabled - whether initdb should be talking to YugaByte cluster, or just initialize a
   //              PostgreSQL data directory. The former is only done once from outside of the YB
   //              cluster, and the latter is done on every tablet server startup.
-  CHECKED_STATUS InitDb(bool yb_enabled);
+  Status InitDb(bool yb_enabled);
 
   // Waits for the running PostgreSQL process to complete. Returns the exit code or an error.
   // Non-zero exit codes are considered non-error cases for the purpose of this function.
@@ -87,20 +98,20 @@ class PgWrapper {
   // only once after the cluster has started up. tmp_dir_base is used as a base directory to
   // create a temporary PostgreSQL directory that is later deleted.
   static Status InitDbForYSQL(
-      const string& master_addresses, const string& tmp_dir_base, int tserver_shm_fd);
+      const std::string& master_addresses, const std::string& tmp_dir_base, int tserver_shm_fd);
 
  private:
   static std::string GetPostgresExecutablePath();
   static std::string GetPostgresLibPath();
   static std::string GetPostgresThirdPartyLibPath();
   static std::string GetInitDbExecutablePath();
-  static CHECKED_STATUS CheckExecutableValid(const std::string& executable_path);
+  static Status CheckExecutableValid(const std::string& executable_path);
 
   // Set common environment for a child process (initdb or postgres itself).
   void SetCommonEnv(Subprocess* proc, bool yb_enabled);
 
   PgProcessConf conf_;
-  boost::optional<Subprocess> pg_proc_;
+  std::optional<Subprocess> pg_proc_;
 };
 
 YB_DEFINE_ENUM(PgProcessState,
@@ -113,26 +124,37 @@ YB_DEFINE_ENUM(PgProcessState,
 // Starts a separate thread to monitor the child process.
 class PgSupervisor {
  public:
-  explicit PgSupervisor(PgProcessConf conf);
+  explicit PgSupervisor(PgProcessConf conf, tserver::TabletServerIf* tserver);
+  ~PgSupervisor();
 
-  CHECKED_STATUS Start();
+  Status Start();
   void Stop();
   PgProcessState GetState();
 
+  const PgProcessConf& conf() const {
+    return conf_;
+  }
+
+  Status ReloadConfig();
+
+  Status UpdateAndReloadConfig();
+
  private:
-  CHECKED_STATUS ExpectStateUnlocked(PgProcessState state);
-  CHECKED_STATUS StartServerUnlocked();
+  Status ExpectStateUnlocked(PgProcessState state);
+  Status StartServerUnlocked();
   void RunThread();
-  CHECKED_STATUS CleanupOldServerUnlocked();
+  Status CleanupOldServerUnlocked();
+  Status RegisterPgFlagChangeNotifications() REQUIRES(mtx_);
+  Status RegisterReloadPgConfigCallback(const void* flag_ptr) REQUIRES(mtx_);
+  void DeregisterPgFlagChangeNotifications() REQUIRES(mtx_);
 
   PgProcessConf conf_;
-  boost::optional<PgWrapper> pg_wrapper_;
+  std::optional<PgWrapper> pg_wrapper_;
   PgProcessState state_ = PgProcessState::kNotStarted;
   scoped_refptr<Thread> supervisor_thread_;
+  std::vector<FlagCallbackRegistration> flag_callbacks_ GUARDED_BY(mtx_);
   std::mutex mtx_;
 };
 
 }  // namespace pgwrapper
 }  // namespace yb
-
-#endif  // YB_YQL_PGWRAPPER_PG_WRAPPER_H

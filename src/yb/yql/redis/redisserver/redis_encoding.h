@@ -10,14 +10,11 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_YQL_REDIS_REDISSERVER_REDIS_ENCODING_H
-#define YB_YQL_REDIS_REDISSERVER_REDIS_ENCODING_H
+#pragma once
 
 #include <string>
 
 #include <boost/preprocessor/seq/for_each.hpp>
-
-#include "yb/gutil/strings/join.h"
 
 namespace google {
 namespace protobuf {
@@ -88,5 +85,3 @@ std::string EncodeAsArrayOfEncodedElements(const Container& encoded_elements) {
 
 }  // namespace redisserver
 }  // namespace yb
-
-#endif  // YB_YQL_REDIS_REDISSERVER_REDIS_ENCODING_H

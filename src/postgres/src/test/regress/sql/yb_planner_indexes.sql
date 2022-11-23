@@ -5,6 +5,7 @@
 CREATE TABLE t1(h int, r int, v1 int, v2 int, v3 int, primary key(h HASH, r ASC));
 CREATE INDEX t1_v1_v2_idx on t1(v1 HASH, v2 ASC);
 CREATE UNIQUE INDEX t1_v3_uniq_idx on t1(v3 HASH);
+INSERT INTO t1 VALUES (1,1,1,1,1), (1,2,1,2,5), (5,2,8,9,0), (3,4,2,2,2), (8,2,4,5,9);
 
 --------------------------------------
 -- Test unique vs non-unique indexes.
@@ -21,10 +22,23 @@ EXPLAIN SELECT * FROM t1 WHERE v1 = 1 and v2 > 1 and v3 > 1;
 
 -- Should prioritize the pkey index because it covers all columns (index only scan).
 EXPLAIN SELECT * FROM t1 WHERE h = 1 and v1 = 1;
+SELECT * FROM t1 WHERE h = 1 and v1 = 1;
+
+EXPLAIN SELECT * FROM t1 WHERE yb_hash_code(h) = yb_hash_code(1) and v1 = 1;
+SELECT * FROM t1 WHERE yb_hash_code(h) = yb_hash_code(1) and v1 = 1;
+
 EXPLAIN SELECT * FROM t1 WHERE h = 1 and r = 2 and v1 = 1 and v2 = 2;
+SELECT * FROM t1 WHERE h = 1 and r = 2 and v1 = 1 and v2 = 2;
+
+EXPLAIN SELECT * FROM t1 WHERE yb_hash_code(h) = yb_hash_code(1) and r = 2 and v1 = 1 and v2 = 2;
+SELECT * FROM t1 WHERE yb_hash_code(h) = yb_hash_code(1) and r = 2 and v1 = 1 and v2 = 2;
 
 -- Should prioritize the t1_v1_v2_idx because it is fully specified.
 EXPLAIN SELECT * FROM t1 WHERE h = 1 and v1 = 1 and v2 = 2;
+SELECT * FROM t1 WHERE h = 1 and v1 = 1 and v2 = 2;
+
+EXPLAIN SELECT * FROM t1 WHERE yb_hash_code(h) = yb_hash_code(1) and v1 = 1 and v2 = 2;
+SELECT * FROM t1 WHERE yb_hash_code(h) = yb_hash_code(1) and v1 = 1 and v2 = 2;
 
 --------------------------------------
 -- Test partial indexes.
@@ -42,6 +56,24 @@ EXPLAIN SELECT * FROM t1 WHERE v1 = 1 AND v3 > 1;
 -- Should both use t1_v1_v2_uniq_partial_idx.
 EXPLAIN SELECT * FROM t1 WHERE v1 = 1 AND v3 > 2;
 EXPLAIN SELECT * FROM t1 WHERE v1 = 1 AND v3 > 3;
+
+--------------------------------------
+-- Multiple hash columns.
+
+CREATE TABLE t4(h1 int, h2 int, v1 int, primary key((h1, h2) hash));
+INSERT INTO t4 (SELECT s, s, s FROM generate_series(1,1000) s);
+
+-- Should use index scan when equality conditions use all hash columns 
+EXPLAIN SELECT * from t4 where h1 = 1 and h2 = 2;
+EXPLAIN SELECT * from t4 where h1 = yb_hash_code(1) and h2 = 2;
+EXPLAIN SELECT * from t4 where h1 = yb_hash_code(1) and h2 = yb_hash_code(2);
+
+-- Should not use index scan when the filter does not have equality on all hash columns
+EXPLAIN SELECT * from t4 where h1 = 1;
+EXPLAIN SELECT * from t4 where h1 = 1 and h2 > 10;
+EXPLAIN SELECT * from t4 where h1 > 1 and h2 > 10;
+EXPLAIN SELECT * from t4 where h1 > 1 and h2 = 10;
+EXPLAIN SELECT * from t4 where h1 = 1 or h2 = 2;
 
 --------------------------------------
 -- Range-partitioned tables/indexes.
@@ -107,3 +139,4 @@ EXPLAIN SELECT * FROM t3 WHERE v1 = 1 AND v2 <= 3 ORDER BY v2 DESC;
 DROP TABLE t1;
 DROP TABLE t2;
 DROP TABLE t3;
+DROP TABLE t4;

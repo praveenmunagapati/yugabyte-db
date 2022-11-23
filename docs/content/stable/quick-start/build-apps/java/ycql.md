@@ -9,38 +9,60 @@ menu:
     name: Java
     identifier: java-4
     weight: 550
-type: page
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 <ul class="nav nav-tabs-alt nav-tabs-yb">
+  <li>
+    <a href="../ysql-yb-jdbc/" class="nav-link">
+      <i class="icon-postgres" aria-hidden="true"></i>
+      YSQL - YB - JDBC
+    </a>
+  </li>
   <li >
-    <a href="/latest/quick-start/build-apps/java/ysql-jdbc" class="nav-link">
+    <a href="../ysql-jdbc/" class="nav-link">
       <i class="icon-postgres" aria-hidden="true"></i>
       YSQL - JDBC
     </a>
   </li>
   <li >
-    <a href="/latest/quick-start/build-apps/java/ysql-jdbc-ssl" class="nav-link">
+    <a href="../ysql-jdbc-ssl/" class="nav-link">
       <i class="icon-postgres" aria-hidden="true"></i>
       YSQL - JDBC SSL/TLS
     </a>
   </li>
   <li >
-    <a href="/latest/quick-start/build-apps/java/ysql-spring-data" class="nav-link">
+    <a href="../ysql-hibernate/" class="nav-link">
+      <i class="icon-postgres" aria-hidden="true"></i>
+      YSQL - Hibernate
+    </a>
+  </li>
+  <li >
+    <a href="../ysql-sdyb/" class="nav-link">
+      <i class="icon-postgres" aria-hidden="true"></i>
+      YSQL - Spring Data YugabyteDB
+    </a>
+  </li>
+  <li >
+    <a href="../ysql-spring-data/" class="nav-link">
       <i class="icon-postgres" aria-hidden="true"></i>
       YSQL - Spring Data JPA
     </a>
   </li>
   <li>
-    <a href="/latest/quick-start/build-apps/java/ycql" class="nav-link active">
+    <a href="../ysql-ebean/" class="nav-link">
+      <i class="icon-postgres" aria-hidden="true"></i>
+      YSQL - Ebean
+    </a>
+  </li>
+  <li>
+    <a href="../ycql/" class="nav-link active">
       <i class="icon-cassandra" aria-hidden="true"></i>
       YCQL
     </a>
   </li>
   <li>
-    <a href="/latest/quick-start/build-apps/java/ycql-4.6" class="nav-link">
+    <a href="../ycql-4.6/" class="nav-link">
       <i class="icon-cassandra" aria-hidden="true"></i>
       YCQL (4.6)
     </a>
@@ -56,7 +78,7 @@ To build a sample Java application with the [Yugabyte Java Driver for YCQL](http
     <dependency>
       <groupId>com.yugabyte</groupId>
       <artifactId>cassandra-driver-core</artifactId>
-      <version>3.8.0-yb-5</version>
+      <version>3.10.3-yb-2</version>
     </dependency>
   </dependencies>
 ```
@@ -67,7 +89,7 @@ To build a sample Java application with the [Yugabyte Java Driver for YCQL](http
 
 This tutorial assumes that you have:
 
-- installed YugabyteDB, created a universe, and are able to interact with it using the YCQL shell. If not, follow the steps in [Quick start YCQL](../../../../api/ycql/quick-start/).
+- installed YugabyteDB, created a universe, and are able to interact with it using the YCQL shell. If not, follow the steps in [Quick start YCQL](../../../explore/ycql/).
 - installed JDK version 1.8 or later.
 - installed Maven 3.3 or later.
 
@@ -166,7 +188,7 @@ public class YBCqlHelloWorld {
 
       // Insert a row.
       String insert = "INSERT INTO ybdemo.employee (id, name, age, language)" +
-                                          " VALUES (1, 'John', 35, 'Java');"; 
+                                          " VALUES (1, 'John', 35, 'Java');";
       ResultSet insertResult = session.execute(insert);
       System.out.println("Inserted data: " + insert);
 

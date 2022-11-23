@@ -19,8 +19,10 @@ import {
   fetchAuthConfigList,
   fetchAuthConfigListResponse
 } from '../../../actions/cloud';
-import { getTlsCertificates, getTlsCertificatesResponse } from '../../../actions/customers';
+import { fetchRunTimeConfigs, fetchRunTimeConfigsResponse, getTlsCertificates, getTlsCertificatesResponse } from '../../../actions/customers';
 import {
+  rollingUpgrade,
+  rollingUpgradeResponse,
   createUniverse,
   createUniverseResponse,
   editUniverse,
@@ -53,21 +55,26 @@ import {
   isDefinedNotNull,
   isNonEmptyObject,
   isNonEmptyString,
-  isEmptyObject
+  isEmptyObject,
+  makeFirstLetterUpperCase
 } from '../../../utils/ObjectUtils';
 import { getClusterByType } from '../../../utils/UniverseUtils';
 import { EXPOSING_SERVICE_STATE_TYPES } from './ClusterFields';
 import { toast } from 'react-toastify';
+import { createErrorMessage } from '../../../utils/ObjectUtils';
 
 const mapDispatchToProps = (dispatch) => {
   return {
     submitConfigureUniverse: (values, universeUUID = null) => {
       dispatch(configureUniverseTemplateLoading());
       return dispatch(configureUniverseTemplate(values)).then((response) => {
-        if(response.error && universeUUID) {
-          dispatch(fetchUniverseInfo(universeUUID)).then((response) => {
-            dispatch(fetchUniverseInfoResponse(response.payload));
-          });
+        if (response.error) {
+          toast.error(createErrorMessage(response.payload));
+          if (universeUUID) {
+            dispatch(fetchUniverseInfo(universeUUID)).then((response) => {
+              dispatch(fetchUniverseInfoResponse(response.payload));
+            });
+          }
         }
         return dispatch(configureUniverseTemplateResponse(response.payload));
       });
@@ -85,8 +92,7 @@ const mapDispatchToProps = (dispatch) => {
           dispatch(getTlsCertificatesResponse(response.payload));
         });
         if (response.error) {
-          const errorMessage = response.payload?.response?.data?.error || response.payload.message;
-          toast.error(errorMessage);
+          toast.error(createErrorMessage(response.payload));
         }
         return dispatch(createUniverseResponse(response.payload));
       });
@@ -103,14 +109,14 @@ const mapDispatchToProps = (dispatch) => {
     },
 
     submitAddUniverseReadReplica: (values, universeUUID) => {
-      dispatch(addUniverseReadReplica(values, universeUUID)).then((response) => {
-        dispatch(addUniverseReadReplicaResponse(response.payload));
+      return dispatch(addUniverseReadReplica(values, universeUUID)).then((response) => {
+        return dispatch(addUniverseReadReplicaResponse(response.payload));
       });
     },
 
     submitEditUniverseReadReplica: (values, universeUUID) => {
-      dispatch(editUniverseReadReplica(values, universeUUID)).then((response) => {
-        dispatch(editUniverseReadReplicaResponse(response.payload));
+      return dispatch(editUniverseReadReplica(values, universeUUID)).then((response) => {
+        return dispatch(editUniverseReadReplicaResponse(response.payload));
       });
     },
 
@@ -130,12 +136,21 @@ const mapDispatchToProps = (dispatch) => {
     },
 
     submitEditUniverse: (values, universeUUID) => {
-      dispatch(editUniverse(values, universeUUID)).then((response) => {
+      return dispatch(editUniverse(values, universeUUID)).then((response) => {
         if (response.error) {
           const errorMessage = response.payload?.response?.data?.error || response.payload.message;
           toast.error(errorMessage);
         }
-        dispatch(editUniverseResponse(response.payload));
+        return dispatch(editUniverseResponse(response.payload));
+      });
+    },
+
+    submitUniverseNodeResize: (values, universeUUID) => {
+      return dispatch(rollingUpgrade(values, universeUUID)).then((response) => {
+        if (!response.error) {
+          dispatch(closeUniverseDialog());
+        }
+        return dispatch(rollingUpgradeResponse(response.payload));
       });
     },
 
@@ -191,11 +206,24 @@ const mapDispatchToProps = (dispatch) => {
       dispatch(openDialog('fullMoveModal'));
     },
 
+    showSmartResizeModal: () => {
+      dispatch(openDialog('smartResizeModal'));
+    },
+
+    showUpgradeNodesModal: () => {
+      dispatch(openDialog('resizeNodesModal'));
+    },
+
     fetchNodeInstanceList: (providerUUID) => {
       dispatch(getNodeInstancesForProvider(providerUUID)).then((response) => {
         dispatch(getNodesInstancesForProviderResponse(response.payload));
       });
-    }
+    },
+    fetchRunTimeConfigs: () => {
+      return dispatch(fetchRunTimeConfigs('00000000-0000-0000-0000-000000000000',true)).then((response) =>
+        dispatch(fetchRunTimeConfigsResponse(response.payload))
+      );
+    },
   };
 };
 
@@ -209,6 +237,7 @@ const formFieldNames = [
   'primary.instanceType',
   'primary.ybSoftwareVersion',
   'primary.accessKeyCode',
+  'primary.gFlags',
   'primary.masterGFlags',
   'primary.tserverGFlags',
   'primary.instanceTags',
@@ -236,6 +265,9 @@ const formFieldNames = [
   'primary.mountPoints',
   'primary.awsArnString',
   'primary.useSystemd',
+  'primary.dedicatedNodes',
+  'primary.universeOverrides',
+  'primary.azOverrides',
   'async.universeName',
   'async.provider',
   'async.providerType',
@@ -259,10 +291,26 @@ const formFieldNames = [
   'async.throughput',
   'async.mountPoints',
   'async.useSystemd',
+  'async.dedicatedNodes',
   'masterGFlags',
   'tserverGFlags',
   'instanceTags',
+  'gFlags',
   'asyncClusters'
+];
+
+const portFields = [
+  'masterHttpPort',
+  'masterRpcPort',
+  'tserverHttpPort',
+  'tserverRpcPort',
+  'redisHttpPort',
+  'redisRpcPort',
+  'yqlHttpPort',
+  'yqlRpcPort',
+  'ysqlHttpPort',
+  'ysqlRpcPort',
+  'nodeExporterPort'
 ];
 
 function getFormData(currentUniverse, formType, clusterType) {
@@ -292,6 +340,7 @@ function getFormData(currentUniverse, formType, clusterType) {
     data[clusterType].replicationFactor = userIntent.replicationFactor;
     data[clusterType].instanceType = userIntent.instanceType;
     data[clusterType].ybSoftwareVersion = userIntent.ybSoftwareVersion;
+    data[clusterType].ybcSoftwareVersion = userIntent.ybcSoftwareVersion;
     data[clusterType].useSystemd = userIntent.useSystemd;
     data[clusterType].accessKeyCode = userIntent.accessKeyCode;
     data[clusterType].diskIops = userIntent.deviceInfo.diskIops;
@@ -301,16 +350,34 @@ function getFormData(currentUniverse, formType, clusterType) {
     data[clusterType].storageType = userIntent.deviceInfo.storageType;
     data[clusterType].mountPoints = userIntent.deviceInfo.mountPoints;
     data[clusterType].storageClass = userIntent.deviceInfo.storageClass;
+    data[clusterType].dedicatedNodes = userIntent.dedicatedNodes;
 
     data[clusterType].regionList = cluster.regions.map((item) => {
       return { value: item.uuid, name: item.name, label: item.name };
     });
-    data[clusterType].masterGFlags = Object.keys(userIntent.masterGFlags).map((key) => {
-      return { name: key, value: userIntent.masterGFlags[key] };
-    });
-    data[clusterType].tserverGFlags = Object.keys(userIntent.tserverGFlags).map((key) => {
-      return { name: key, value: userIntent.tserverGFlags[key] };
-    });
+    //construct gflag component DS
+    data[clusterType].gFlags = [];
+    if (isNonEmptyObject(userIntent.masterGFlags)) {
+      Object.keys(userIntent.masterGFlags).forEach((key) => {
+        const masterObj = {};
+        if (userIntent?.tserverGFlags?.hasOwnProperty(key)) {
+          masterObj['TSERVER'] = userIntent.tserverGFlags[key];
+        }
+        masterObj['Name'] = key;
+        masterObj['MASTER'] = userIntent.masterGFlags[key];
+        data[clusterType].gFlags.push(masterObj);
+      });
+    }
+    if (isNonEmptyObject(userIntent.tserverGFlags)) {
+      Object.keys(userIntent.tserverGFlags).forEach((key) => {
+        const tserverObj = {};
+        if (!userIntent.masterGFlags.hasOwnProperty(key)) {
+          tserverObj['TSERVER'] = userIntent.tserverGFlags[key];
+          tserverObj['Name'] = key;
+          data[clusterType].gFlags.push(tserverObj);
+        }
+      });
+    }
     data[clusterType].instanceTags = Object.keys(userIntent.instanceTags).map((key) => {
       return { name: key, value: userIntent.instanceTags[key] };
     });
@@ -326,19 +393,25 @@ function getFormData(currentUniverse, formType, clusterType) {
 
 function mapStateToProps(state, ownProps) {
   const {
-    universe: { currentUniverse }
+    universe: { currentUniverse },
+    customer: {
+      runtimeConfigs
+    }
   } = state;
   let data = {
     formType: 'Create',
     primary: {
       universeName: '',
       ybSoftwareVersion: '',
+      ybcSoftwareVersion: '',
+      universeOverrides: '',
+      azOverrides: '',
       numNodes: 3,
       isMultiAZ: true,
-      instanceType: 'c5.large',
+      instanceType: 'c5.4xlarge',
       accessKeyCode: '',
       assignPublicIP: true,
-      useSystemd: false,
+      useSystemd: true,
       useTimeSync: true,
       enableYSQL: true,
       enableYSQLAuth: true,
@@ -353,14 +426,17 @@ function mapStateToProps(state, ownProps) {
       awsArnString: '',
       selectEncryptionAtRestConfig: null,
       diskIops: null,
-      throughput: null
+      throughput: null,
+      dedicatedNodes: false,
     },
     async: {
       universeName: '',
+      ybSoftwareVersion: '',
+      ybcSoftwareVersion: '',
       numNodes: 3,
       isMultiAZ: true,
       assignPublicIP: true,
-      useSystemd: false,
+      useSystemd: true,
       useTimeSync: true,
       enableYSQL: true,
       enableYSQLAuth: true,
@@ -372,7 +448,8 @@ function mapStateToProps(state, ownProps) {
       enableNodeToNodeEncrypt: true,
       enableClientToNodeEncrypt: true,
       diskIops: null,
-      throughput: null
+      throughput: null,
+      dedicatedNodes: false,
     }
   };
 
@@ -394,6 +471,7 @@ function mapStateToProps(state, ownProps) {
     modal: state.modal,
     tasks: state.tasks,
     cloud: state.cloud,
+    runtimeConfigs,
     softwareVersions: state.customer.softwareVersions,
     userCertificates: state.customer.userCertificates,
     accessKeys: state.cloud.accessKeys,
@@ -411,6 +489,7 @@ function mapStateToProps(state, ownProps) {
       'primary.replicationFactor',
       'primary.ybSoftwareVersion',
       'primary.accessKeyCode',
+      'primary.gFlags',
       'primary.masterGFlags',
       'primary.tserverGFlags',
       'primary.instanceTags',
@@ -447,7 +526,12 @@ function mapStateToProps(state, ownProps) {
       'primary.yqlRpcPort',
       'primary.ysqlHttpPort',
       'primary.ysqlRpcPort',
+      'primary.nodeExporterPort',
       'primary.useSystemd',
+      'primary.ybcSoftwareVersion',
+      'primary.dedicatedNodes',
+      'primary.universeOverrides',
+      'primary.azOverrides',
       'async.universeName',
       'async.provider',
       'async.providerType',
@@ -457,6 +541,7 @@ function mapStateToProps(state, ownProps) {
       'async.instanceType',
       'async.deviceInfo',
       'async.ybSoftwareVersion',
+      'async.ybcSoftwareVersion',
       'async.accessKeyCode',
       'async.diskIops',
       'async.throughput',
@@ -476,7 +561,9 @@ function mapStateToProps(state, ownProps) {
       'async.mountPoints',
       'async.useTimeSync',
       'async.useSystemd',
+      'async.dedicatedNodes',
       'masterGFlags',
+      'gFlags',
       'tserverGFlags',
       'instanceTags'
     )
@@ -491,7 +578,11 @@ const asyncValidate = (values, dispatch) => {
       values.formType !== 'Async'
     ) {
       dispatch(checkIfUniverseExists(values.primary.universeName)).then((response) => {
-        if (response.payload.status === 200 && values.formType !== 'Edit' && response.payload.data.length > 0) {
+        if (
+          response.payload.status === 200 &&
+          values.formType !== 'Edit' &&
+          response.payload.data.length > 0
+        ) {
           reject({ primary: { universeName: 'Universe name already exists' } });
         } else {
           resolve();
@@ -505,43 +596,61 @@ const asyncValidate = (values, dispatch) => {
 
 const validateProviderFields = (values, props, clusterType) => {
   const errors = {};
-  if (isEmptyObject(values[clusterType])) {
+  const currentClusterData = values[clusterType];
+  if (isEmptyObject(currentClusterData)) {
     return errors;
   }
   const cloud = props.cloud;
   let currentProvider;
-  if (isNonEmptyObject(values[clusterType]) && isNonEmptyString(values[clusterType].provider)) {
+  if (isNonEmptyObject(currentClusterData) && isNonEmptyString(currentClusterData.provider)) {
     currentProvider = cloud.providers.data.find(
-      (provider) => provider.uuid === values[clusterType].provider
+      (provider) => provider.uuid === currentClusterData.provider
     );
   }
 
   if (clusterType === 'primary') {
-    if (!isNonEmptyString(values[clusterType].universeName)) {
+    const currentProviderCode = currentProvider?.code;
+    if (!isNonEmptyString(currentClusterData.universeName)) {
       errors.universeName = 'Universe Name is Required';
     }
-    if (currentProvider && currentProvider.code === 'gcp') {
+    if (currentProviderCode === 'gcp' || currentProviderCode === 'kubernetes') {
       const specialCharsRegex = /^[a-z0-9-]*$/;
-      if (!specialCharsRegex.test(values[clusterType].universeName)) {
+      const errorProviderName = currentProviderCode === 'gcp' ? 
+          currentProviderCode.toUpperCase() : makeFirstLetterUpperCase(currentProviderCode);
+
+      if (!specialCharsRegex.test(currentClusterData.universeName)) {
         errors.universeName =
-          'GCP Universe name cannot contain capital letters or special characters except dashes';
+          `${errorProviderName} Universe name cannot contain capital letters or special characters except dashes`;
       }
     }
     if (
-      values[clusterType].enableEncryptionAtRest &&
-      !values[clusterType].selectEncryptionAtRestConfig
+      currentClusterData.enableEncryptionAtRest &&
+      !currentClusterData.selectEncryptionAtRestConfig
     ) {
       errors.selectEncryptionAtRestConfig = 'KMS Config is Required for Encryption at Rest';
     }
+
+    const notUniquePortError = 'Port number should be unique';
+    const portMap = new Map();
+    portFields.forEach((portField) => {
+      if (portMap.has(currentClusterData[portField])) {
+        if (!errors.hasOwnProperty(portMap.get(currentClusterData[portField]))) {
+          errors[portMap.get(currentClusterData[portField])] = notUniquePortError;
+        }
+        errors[portField] = notUniquePortError;
+      } else {
+        portMap.set(currentClusterData[portField], portField);
+      }
+    });
   }
 
   if (isEmptyObject(currentProvider)) {
     errors.provider = 'Provider Value is Required';
   }
-  if (!isNonEmptyArray(values[clusterType].regionList)) {
+  if (!isNonEmptyArray(currentClusterData.regionList)) {
     errors.regionList = 'Region Value is Required';
   }
-  if (!isDefinedNotNull(values[clusterType].instanceType)) {
+  if (!isDefinedNotNull(currentClusterData.instanceType)) {
     errors.instanceType = 'Instance Type is Required';
   }
   return errors;

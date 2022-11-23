@@ -21,14 +21,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#ifndef YB_ROCKSDB_UTIL_FILE_READER_WRITER_H
-#define YB_ROCKSDB_UTIL_FILE_READER_WRITER_H
+#pragma once
+
+#include <string.h>
 
 #include <string>
+
+#include "yb/util/flags.h"
+
 #include "yb/rocksdb/env.h"
-#include "yb/rocksdb/util/aligned_buffer.h"
-#include "yb/rocksdb/util/statistics.h"
 #include "yb/rocksdb/port/port.h"
+#include "yb/rocksdb/statistics.h"
+#include "yb/rocksdb/util/aligned_buffer.h"
 
 DECLARE_int32(rocksdb_file_starting_buffer_size);
 
@@ -109,8 +113,8 @@ class RandomAccessFileReader {
   RandomAccessFileReader(const RandomAccessFileReader&) = delete;
   RandomAccessFileReader& operator=(const RandomAccessFileReader&) = delete;
 
-  CHECKED_STATUS Read(uint64_t offset, size_t n, Slice* result, char* scratch) const;
-  CHECKED_STATUS ReadAndValidate(
+  Status Read(uint64_t offset, size_t n, Slice* result, char* scratch) const;
+  Status ReadAndValidate(
       uint64_t offset, size_t n, Slice* result, char* scratch, const yb::ReadValidator& validator);
 
   RandomAccessFile* file() { return file_.get(); }
@@ -167,9 +171,7 @@ class WritableFileWriter {
 
   WritableFileWriter& operator=(const WritableFileWriter&) = delete;
 
-  ~WritableFileWriter() {
-    WARN_NOT_OK(Close(), "Failed to close file");
-  }
+  ~WritableFileWriter();
 
   Status Append(const Slice& data);
 
@@ -186,9 +188,7 @@ class WritableFileWriter {
 
   uint64_t GetFileSize() { return filesize_; }
 
-  Status InvalidateCache(size_t offset, size_t length) {
-    return writable_file_->InvalidateCache(offset, length);
-  }
+  Status InvalidateCache(size_t offset, size_t length);
 
   WritableFile* writable_file() const { return writable_file_.get(); }
 
@@ -204,8 +204,6 @@ class WritableFileWriter {
 };
 
 extern Status NewWritableFile(Env* env, const std::string& fname,
-                              unique_ptr<WritableFile>* result,
+                              std::unique_ptr<WritableFile>* result,
                               const EnvOptions& options);
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_UTIL_FILE_READER_WRITER_H

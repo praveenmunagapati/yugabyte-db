@@ -42,9 +42,9 @@ class RemoteBootstrapRocksDBClientTest : public RemoteBootstrapClientTest {
 
   void CreateSnapshot(const SnapshotId& snapshot_id) {
     LOG(INFO) << "Creating Snapshot " << snapshot_id << " ...";
-    TabletSnapshotOpRequestPB request;
-    request.set_snapshot_id(snapshot_id);
-    tablet::SnapshotOperation operation(tablet_peer_->tablet(), &request);
+    tablet::SnapshotOperation operation(ASSERT_RESULT(tablet_peer_->shared_tablet_safe()));
+    auto& request = *operation.AllocateRequest();
+    request.ref_snapshot_id(snapshot_id);
     operation.set_hybrid_time(tablet_peer_->clock().Now());
     operation.set_op_id(tablet_peer_->log()->GetLatestEntryOpId());
     ASSERT_OK(tablet_peer_->tablet()->snapshots().Create(&operation));
@@ -77,7 +77,7 @@ class RemoteBootstrapRocksDBClientTest : public RemoteBootstrapClientTest {
     std::sort(src_snapshot_files.begin(), src_snapshot_files.end());
     std::sort(dst_snapshot_files.begin(), dst_snapshot_files.end());
 
-    for (int i = 0; i < src_snapshot_files.size(); ++i) {
+    for (size_t i = 0; i < src_snapshot_files.size(); ++i) {
       // Verify that client has the same files that leader has.
       const string dst_snapshot_file = dst_snapshot_files[i];
       const string src_snapshot_file = src_snapshot_files[i];

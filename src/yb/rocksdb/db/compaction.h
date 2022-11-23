@@ -21,8 +21,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#ifndef YB_ROCKSDB_DB_COMPACTION_H
-#define YB_ROCKSDB_DB_COMPACTION_H
 
 #pragma once
 
@@ -32,7 +30,6 @@
 #include "yb/rocksdb/util/autovector.h"
 #include "yb/rocksdb/util/mutable_cf_options.h"
 #include "yb/rocksdb/db/version_edit.h"
-#include "yb/util/result.h"
 
 namespace yb {
 
@@ -395,5 +392,3 @@ class Compaction {
 extern uint64_t TotalFileSize(const std::vector<FileMetaData*>& files);
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_DB_COMPACTION_H

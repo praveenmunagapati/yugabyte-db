@@ -18,8 +18,6 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSDB_TABLE_META_BLOCKS_H
-#define YB_ROCKSDB_TABLE_META_BLOCKS_H
 
 #pragma once
 
@@ -28,14 +26,13 @@
 #include <string>
 #include <vector>
 
-#include "yb/rocksdb/db/builder.h"
-#include "yb/rocksdb/db/table_properties_collector.h"
-#include "yb/rocksdb/util/kv_map.h"
 #include "yb/rocksdb/comparator.h"
+#include "yb/rocksdb/db/table_properties_collector.h"
 #include "yb/rocksdb/options.h"
-#include "yb/util/slice.h"
-#include "yb/rocksdb/table/block_builder.h"
 #include "yb/rocksdb/table/format.h"
+#include "yb/rocksdb/util/kv_map.h"
+
+#include "yb/util/slice.h"
 
 namespace rocksdb {
 
@@ -151,5 +148,3 @@ Status ReadMetaBlock(RandomAccessFileReader* file, uint64_t file_size,
                      BlockContents* contents);
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_TABLE_META_BLOCKS_H

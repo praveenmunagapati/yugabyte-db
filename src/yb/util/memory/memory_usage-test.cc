@@ -20,8 +20,9 @@
 #include "yb/util/memory/memory_usage_test_util.h"
 #include "yb/util/size_literals.h"
 #include "yb/util/test_util.h"
+#include "yb/util/flags.h"
 
-DEFINE_bool(print_memory_usage, false, "Print real memory usage instead of assert.");
+DEFINE_UNKNOWN_bool(print_memory_usage, false, "Print real memory usage instead of assert.");
 
 namespace yb {
 
@@ -38,7 +39,7 @@ TEST_F(MemoryUsageTest, DISABLED_String) {
     size_t length_start = 0;
     size_t capacity_min = std::numeric_limits<size_t>::max();
     size_t capacity_max = std::numeric_limits<size_t>::min();
-    for (auto length = 0; length <= 1_KB; ++length) {
+    for (size_t length = 0; length <= 1_KB; ++length) {
       StartAllocationsTracking();
       std::string result(length, 'X');
       if (additional_capacity) {

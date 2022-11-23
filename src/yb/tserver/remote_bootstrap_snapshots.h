@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_REMOTE_BOOTSTRAP_SNAPSHOTS_H
-#define YB_TSERVER_REMOTE_BOOTSTRAP_SNAPSHOTS_H
+#pragma once
 
 #include "yb/tablet/tablet_fwd.h"
 
@@ -27,8 +26,8 @@ class RemoteBootstrapSnapshotsComponent : public RemoteBootstrapComponent {
   RemoteBootstrapSnapshotsComponent(RemoteBootstrapFileDownloader* downloader,
                                     tablet::RaftGroupReplicaSuperBlockPB* new_superblock);
 
-  CHECKED_STATUS CreateDirectories(const string& db_dir, FsManager* fs) override;
-  CHECKED_STATUS Download() override;
+  Status CreateDirectories(const std::string& db_dir, FsManager* fs) override;
+  Status Download() override;
 
  private:
   FsManager& fs_manager() const {
@@ -49,11 +48,11 @@ class RemoteBootstrapSnapshotsSource : public RemoteBootstrapSource {
     return DataIdPB::SNAPSHOT_FILE;
   }
 
-  CHECKED_STATUS Init() override;
+  Status Init() override;
 
-  CHECKED_STATUS ValidateDataId(const DataIdPB& data_id) override;
+  Status ValidateDataId(const DataIdPB& data_id) override;
 
-  CHECKED_STATUS GetDataPiece(const DataIdPB& data_id, GetDataPieceInfo* info) override;
+  Status GetDataPiece(const DataIdPB& data_id, GetDataPieceInfo* info) override;
 
  private:
   tablet::TabletPeerPtr tablet_peer_;
@@ -62,5 +61,3 @@ class RemoteBootstrapSnapshotsSource : public RemoteBootstrapSource {
 
 } // namespace tserver
 } // namespace yb
-
-#endif // YB_TSERVER_REMOTE_BOOTSTRAP_SNAPSHOTS_H

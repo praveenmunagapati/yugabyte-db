@@ -2,6 +2,7 @@
 */.DS_Store
 .DS_Store
 public/*
+docs/*
 npm-debug.log
 node_modules
 
@@ -15,3 +16,5 @@ static/js/site.js
 .session.vim*
 
 *.sw?
+
+.hugo_build.lock

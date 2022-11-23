@@ -21,13 +21,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#ifndef ROCKSDB_LITE
 
 #include <stdlib.h>
 
 #include <vector>
 #include <map>
 #include <string>
+
+#include <boost/function.hpp>
 
 #include "yb/rocksdb/db.h"
 #include "yb/rocksdb/db/db_impl.h"
@@ -41,7 +42,9 @@
 #include "yb/rocksdb/env.h"
 #include "yb/rocksdb/transaction_log.h"
 
+#include "yb/util/status_log.h"
 #include "yb/util/string_util.h"
+#include "yb/util/test_macros.h"
 
 using namespace std::chrono_literals;
 
@@ -49,7 +52,7 @@ namespace rocksdb {
 
 YB_STRONGLY_TYPED_BOOL(StopOnMaxFilesDeleted);
 
-class DeleteFileTest : public testing::Test {
+class DeleteFileTest : public RocksDBTest {
  public:
   std::string dbname_;
   Options options_;
@@ -123,7 +126,7 @@ class DeleteFileTest : public testing::Test {
         (*keysperlevel)[static_cast<int>(metadata[i].level)] += numkeysinfile;
       }
       fprintf(stderr, "level %d name %s smallest %s largest %s\n",
-              metadata[i].level, metadata[i].name.c_str(),
+              metadata[i].level, metadata[i].Name().c_str(),
               metadata[i].smallest.key.c_str(),
               metadata[i].largest.key.c_str());
     }
@@ -169,7 +172,7 @@ class DeleteFileTest : public testing::Test {
 
   DBImpl* dbfull() { return reinterpret_cast<DBImpl*>(db_.get()); }
 
-  CHECKED_STATUS FlushSync() {
+  Status FlushSync() {
     return dbfull()->TEST_FlushMemTable(/* wait = */ true);
   }
 
@@ -199,11 +202,11 @@ TEST_F(DeleteFileTest, AddKeysAndQueryLevels) {
     level2index = 0;
   }
 
-  level1file = metadata[level1index].name;
+  level1file = metadata[level1index].Name();
   int startkey = atoi(metadata[level1index].smallest.key.c_str());
   int endkey = atoi(metadata[level1index].largest.key.c_str());
   level1keycount = (endkey - startkey + 1);
-  level2file = metadata[level2index].name;
+  level2file = metadata[level2index].Name();
   startkey = atoi(metadata[level2index].smallest.key.c_str());
   endkey = atoi(metadata[level2index].largest.key.c_str());
   level2keycount = (endkey - startkey + 1);
@@ -269,9 +272,9 @@ TEST_F(DeleteFileTest, DeleteFileWithIterator) {
 
   ASSERT_EQ((int)metadata.size(), 2);
   if (metadata[0].level == 1) {
-    level2file = metadata[1].name;
+    level2file = metadata[1].Name();
   } else {
-    level2file = metadata[0].name;
+    level2file = metadata[0].Name();
   }
 
   Status status = db_->DeleteFile(level2file);
@@ -356,11 +359,11 @@ TEST_F(DeleteFileTest, DeleteNonDefaultColumnFamily) {
   ASSERT_EQ("new_cf", metadata[0].column_family_name);
   ASSERT_EQ("new_cf", metadata[1].column_family_name);
   auto old_file = metadata[0].smallest.seqno < metadata[1].smallest.seqno
-                      ? metadata[0].name
-                      : metadata[1].name;
+                      ? metadata[0].Name()
+                      : metadata[1].Name();
   auto new_file = metadata[0].smallest.seqno > metadata[1].smallest.seqno
-                      ? metadata[0].name
-                      : metadata[1].name;
+                      ? metadata[0].Name()
+                      : metadata[1].Name();
   ASSERT_TRUE(db->DeleteFile(new_file).IsInvalidArgument());
   ASSERT_OK(db->DeleteFile(old_file));
 
@@ -421,14 +424,14 @@ size_t DeleteFileTest::TryDeleteFiles(
         std::this_thread::sleep_for(10ms);
         continue;
       }
-      if (db_->DeleteFile(file.name).ok()) {
-        const auto file_path = file.db_path + file.name;
+      if (db_->DeleteFile(file.Name()).ok()) {
+        const auto file_path = file.FullName();
 
         std::vector<LiveFileMetaData> current_files;
         dbfull()->GetLiveFilesMetaData(&current_files);
         auto it = std::find_if(
             current_files.begin(), current_files.end(),
-            [&](const auto& current_file) { return current_file.name == file.name; });
+            [&](const auto& current_file) { return current_file.name_id == file.name_id; });
         if (it == current_files.end()) {
           LOG(INFO) << "Deleted file: " << file_path;
           ++files_deleted;
@@ -547,14 +550,3 @@ int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
-
-#else
-#include <stdio.h>
-
-int main(int argc, char** argv) {
-  fprintf(stderr,
-          "SKIPPED as DBImpl::DeleteFile is not supported in ROCKSDB_LITE\n");
-  return 0;
-}
-
-#endif  // !ROCKSDB_LITE

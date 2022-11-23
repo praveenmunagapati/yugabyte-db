@@ -19,11 +19,11 @@
 // different ExecContexts, so non-thread-safe fields should not be referenced there.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_CQL_CQLSERVER_CQL_PROCESSOR_H_
-#define YB_YQL_CQL_CQLSERVER_CQL_PROCESSOR_H_
+#pragma once
 
 #include "yb/rpc/service_if.h"
 
+#include "yb/yql/cql/cqlserver/cqlserver_fwd.h"
 #include "yb/yql/cql/cqlserver/cql_rpc.h"
 #include "yb/yql/cql/cqlserver/cql_statement.h"
 
@@ -57,11 +57,7 @@ class CQLMetrics : public ql::QLMetrics {
   scoped_refptr<Counter> parsers_created_;
 };
 
-
 // A list of CQL processors and position in the list.
-class CQLProcessor;
-using CQLProcessorList = std::list<std::unique_ptr<CQLProcessor>>;
-using CQLProcessorListPos = CQLProcessorList::iterator;
 
 class CQLProcessor : public ql::QLProcessor {
  public:
@@ -99,14 +95,15 @@ class CQLProcessor : public ql::QLProcessor {
   std::unique_ptr<ql::CQLResponse> ProcessRequest(const ql::RegisterRequest& req);
 
   // Get a prepared statement and adds it to the set of statements currently being executed.
-  std::shared_ptr<const CQLStatement> GetPreparedStatement(const ql::CQLMessage::QueryId& id);
+  Result<std::shared_ptr<const CQLStatement>> GetPreparedStatement(
+      const ql::CQLMessage::QueryId& id, SchemaVersion version);
 
   // Statement executed callback.
   void StatementExecuted(const Status& s, const ql::ExecutedResult::SharedPtr& result = nullptr);
 
   // Process statement execution result and error.
   std::unique_ptr<ql::CQLResponse> ProcessResult(const ql::ExecutedResult::SharedPtr& result);
-  std::unique_ptr<ql::CQLResponse> ProcessAuthResult(const string& saved_hash, bool can_login);
+  std::unique_ptr<ql::CQLResponse> ProcessAuthResult(const std::string& saved_hash, bool can_login);
   std::unique_ptr<ql::CQLResponse> ProcessError(
       const Status& s,
       boost::optional<ql::CQLMessage::QueryId> query_id = boost::none);
@@ -115,7 +112,7 @@ class CQLProcessor : public ql::QLProcessor {
   void PrepareAndSendResponse(const std::unique_ptr<ql::CQLResponse>& response);
   void SendResponse(const ql::CQLResponse& response);
 
-  const unordered_map<string, vector<string>> kSupportedOptions = {
+  const std::unordered_map<std::string, std::vector<std::string>> kSupportedOptions = {
       {ql::CQLMessage::kCQLVersionOption,
           {"3.0.0" /* minimum */, "3.4.2" /* current */}},
       {ql::CQLMessage::kCompressionOption,
@@ -184,5 +181,3 @@ class CQLProcessor : public ql::QLProcessor {
 
 }  // namespace cqlserver
 }  // namespace yb
-
-#endif  // YB_YQL_CQL_CQLSERVER_CQL_PROCESSOR_H_

@@ -44,14 +44,13 @@
 // ... prev vs. next pointer ordering ...
 //
 
-#ifndef YB_ROCKSDB_DB_SKIPLIST_H
-#define YB_ROCKSDB_DB_SKIPLIST_H
 
 #pragma once
 
 #include <atomic>
 
-#include "yb/rocksdb/port/port.h"
+#include <glog/logging.h>
+
 #include "yb/rocksdb/util/allocator.h"
 #include "yb/rocksdb/util/random.h"
 
@@ -651,5 +650,3 @@ class SingleWriterInlineSkipList :
 };
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_DB_SKIPLIST_H

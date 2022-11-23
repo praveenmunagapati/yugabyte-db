@@ -30,16 +30,18 @@
 # under the License.
 #
 
+set(YB_PCH_PREFIX consensus)
+set(YB_PCH_DEP_LIBS opid_proto)
+
 #########################################
 # consensus_metadata_proto
 #########################################
 
-PROTOBUF_GENERATE_CPP(
+YRPC_GENERATE(
   METADATA_PROTO_SRCS METADATA_PROTO_HDRS METADATA_PROTO_TGTS
   SOURCE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..
   BINARY_ROOT ${CMAKE_CURRENT_BINARY_DIR}/../..
-  PROTO_FILES
-    metadata.proto)
+  NO_SERVICE_MESSAGES_PROTO_FILES metadata.proto)
 set(METADATA_PROTO_LIBS
   yb_common_proto
   fs_proto
@@ -55,8 +57,10 @@ ADD_YB_LIBRARY(consensus_metadata_proto
 
 YRPC_GENERATE(
   CONSENSUS_YRPC_SRCS CONSENSUS_YRPC_HDRS CONSENSUS_YRPC_TGTS
+  MESSAGES TRUE
   SOURCE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..
   BINARY_ROOT ${CMAKE_CURRENT_BINARY_DIR}/../..
+  NO_SERVICE_PROTO_FILES consensus_types.proto
   PROTO_FILES consensus.proto)
 list(APPEND CONSENSUS_YRPC_SRCS opid_util.cc)
 set(CONSENSUS_YRPC_LIBS
@@ -67,23 +71,28 @@ set(CONSENSUS_YRPC_LIBS
   rpc_header_proto
   protobuf
   tablet_proto
-  tserver_admin_proto
-  wire_protocol_proto)
+  tserver_admin_proto)
 
 ADD_YB_LIBRARY(consensus_proto
   SRCS ${CONSENSUS_YRPC_SRCS}
   DEPS ${CONSENSUS_YRPC_LIBS}
   NONLINK_DEPS ${CONSENSUS_YRPC_TGTS})
 
+ADD_YB_LIBRARY(
+  consensus_error
+  SRCS consensus_error.cc
+  DEPS consensus_proto yb_util)
+
 #########################################
 # log_proto
 #########################################
 
-PROTOBUF_GENERATE_CPP(
+YRPC_GENERATE(
   LOG_PROTO_SRCS LOG_PROTO_HDRS LOG_PROTO_TGTS
+  MESSAGES TRUE
   SOURCE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..
   BINARY_ROOT ${CMAKE_CURRENT_BINARY_DIR}/../..
-  PROTO_FILES log.proto)
+  NO_SERVICE_PROTO_FILES log.proto)
 
 add_library(log_proto ${LOG_PROTO_SRCS} ${LOG_PROTO_HDRS})
 
@@ -101,6 +110,8 @@ set(LOG_SRCS
 )
 
 add_library(log ${LOG_SRCS})
+add_dependencies(log gen_src_yb_rpc_any_proto)
+
 target_link_libraries(log
   server_common
   gutil
@@ -118,6 +129,7 @@ set(CONSENSUS_SRCS
   consensus_round.cc
   leader_election.cc
   log_cache.cc
+  multi_raft_batcher.cc
   peer_manager.cc
   quorum_util.cc
   raft_consensus.cc
@@ -125,12 +137,8 @@ set(CONSENSUS_SRCS
   replicate_msgs_holder.cc
   retryable_requests.cc)
 
-add_library(consensus ${CONSENSUS_SRCS})
-
-ADD_YB_LIBRARY(
-  consensus_error
-  SRCS consensus_error.cc
-  DEPS consensus_proto yb_util)
+ADD_YB_LIBRARY(consensus SRCS ${CONSENSUS_SRCS})
+add_dependencies(consensus gen_src_yb_rpc_any_proto)
 
 target_link_libraries(consensus
   consensus_error
@@ -145,7 +153,9 @@ set(YB_TEST_LINK_LIBS
   rpc_test_util
   tserver
   tablet_error
+  yb_common_test_util
   yb_util
+  yb_common_test_util
   ${YB_MIN_TEST_LIBS}
 )
 
@@ -167,8 +177,9 @@ set_source_files_properties(raft_consensus-test.cc PROPERTIES COMPILE_FLAGS
   "-Wno-inconsistent-missing-override")
 ADD_YB_TEST(raft_consensus-test)
 
-#Tools
+# Tools
 add_executable(log-dump log-dump.cc)
 target_link_libraries(log-dump
   log
   ${YB_BASE_LIBS})
+add_dependencies(log-dump gen_src_yb_rpc_any_proto)

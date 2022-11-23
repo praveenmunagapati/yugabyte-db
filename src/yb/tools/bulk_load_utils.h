@@ -11,15 +11,13 @@
 // under the License.
 //
 
-#ifndef YB_TOOLS_BULK_LOAD_UTILS_H
-#define YB_TOOLS_BULK_LOAD_UTILS_H
+#pragma once
 
 #include <set>
+
 #include <boost/tokenizer.hpp>
 
-#include "yb/util/date_time.h"
-#include "yb/util/status.h"
-#include "yb/util/stol_utils.h"
+#include "yb/util/status_fwd.h"
 #include "yb/util/timestamp.h"
 
 namespace yb {
@@ -41,5 +39,3 @@ CsvTokenizer Tokenize(const std::string& line, char delimiter, char quote_char);
 
 } // namespace tools
 } // namespace yb
-
-#endif // YB_TOOLS_BULK_LOAD_UTILS_H

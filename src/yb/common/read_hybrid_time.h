@@ -11,11 +11,13 @@
 // under the License.
 //
 
-#ifndef YB_COMMON_READ_HYBRID_TIME_H
-#define YB_COMMON_READ_HYBRID_TIME_H
+#pragma once
+
+#include <functional>
 
 #include "yb/common/clock.h"
 #include "yb/common/hybrid_time.h"
+
 #include "yb/util/compare_util.h"
 #include "yb/util/tostring.h"
 
@@ -136,5 +138,3 @@ inline bool operator==(const ReadHybridTime& lhs, const ReadHybridTime& rhs) {
 }
 
 } // namespace yb
-
-#endif // YB_COMMON_READ_HYBRID_TIME_H

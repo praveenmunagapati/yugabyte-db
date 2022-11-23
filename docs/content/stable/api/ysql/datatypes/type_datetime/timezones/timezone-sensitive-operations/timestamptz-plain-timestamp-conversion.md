@@ -1,15 +1,14 @@
 ---
 title: Sensitivity of conversion between timestamptz and plain timestamp to the UTC offset [YSQL]
-headerTitle: The sensitivity of the conversion between timestamptz and plain timestamp to the UTC offset
-linkTitle: timestamptz to/from timestamp conversion
+headerTitle: Sensitivity of converting between timestamptz and plain timestamp to the UTC offset
+linkTitle: Timestamptz to/from timestamp conversion
 description: Explains the sensitivity of conversion between timestamptz and plain timestamp to the UTC offset. [YSQL]
 menu:
   stable:
     identifier: timestamptz-plain-timestamp-conversion
     parent: timezone-sensitive-operations
     weight: 10
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 The semantic rules for the conversion, in each direction, rest on a common-sense convention. Each conversion uses a value for the _UTC offset_. And this value is always known: _either_ because the _at time zone_ operator specifies it (either explicitly or implicitly via a timezone name); or from the session's current _TimeZone_ setting. This is explained in the section [Four ways to specify the _UTC offset_](../../ways-to-spec-offset/).
@@ -26,13 +25,13 @@ The demonstration uses the table function [_plain_timestamp_to_from_timestamp_tz
 - The table function [_interval_arithmetic_results()_](../timestamptz-interval-day-arithmetic/#interval-arithmetic-results) presented in the "sensitivity of _timestamptz-interval_ arithmetic to the current timezone" section. That section is the present section's peer under the parent section "Scenarios that are sensitive to the _UTC offset_ and possibly, additionally, to the timezone".
 - The table function [_timestamptz_vs_plain_timestamp()_](../../../date-time-data-types-semantics/type-timestamp/#timestamptz-vs-plain-timestamp) presented in the "plain _timestamp_ and _timestamptz_ data types" section.
 
-<p id="demo-goals">The demonstration sets these <i>three</i> goals:</p>
+<a name="demo-goals"></a>The demonstration sets these _three_ goals:
 
 - _Goal one:_ to use _assert_ statements to test the identity of effect of the _typecast_ operator and the _at time zone current('TimeZone')_ operator in the two directions of interest: the [plain _timestamp_ to _timestamptz_](../../../typecasting-between-date-time-values/#plain-timestamp-to-timestamptz) direction and the [_timestamptz_ to plain _timestamp_](../../../typecasting-between-date-time-values/#timestamptz-to-plain-timestamp) direction:
 
 - _Goal two:_ to use _assert_ statements to test the _assumed rules_ for the conversions in each direction, as empirical observations suggest they might be..
 
-- _Goal three_: to let you vizualize the rules for the conversions by outputting the _"from-to"_ value pairs for each conversion direction on a single line, doing the conversions at each of a set of representative timezones, each of which has a different _UTC offset_. (The visualization is enriched by showing the conversion outcomes first with _UTC_ as the session's current _TimeZone_ setting and then with, for each outcome, the timezone at which the conversions are done as the session's current _TimeZone_ setting. 
+- _Goal three_: to let you vizualize the rules for the conversions by outputting the _"from-to"_ value pairs for each conversion direction on a single line, doing the conversions at each of a set of representative timezones, each of which has a different _UTC offset_. (The visualization is enriched by showing the conversion outcomes first with _UTC_ as the session's current _TimeZone_ setting and then with, for each outcome, the timezone at which the conversions are done as the session's current _TimeZone_ setting.
 
 The demonstration that follows is designed like this:
 
@@ -42,13 +41,14 @@ The demonstration that follows is designed like this:
 
 - Two _constants_, one with data type plain _timestamp_ and one with data type _timestamptz_ are initialized so that the internal representations (as opposed to the metadata) are identical. Look:
 
-    ```output
-    ts_plain    constant timestamp   not null := make_timestamp  (yyyy, mm, dd, hh, mi, ss);
-    ts_with_tz  constant timestamptz not null := make_timestamptz(yyyy, mm, dd, hh, mi, ss, 'UTC');
-    ```
+  ```output
+  ts_plain    constant timestamp   not null := make_timestamp  (yyyy, mm, dd, hh, mi, ss);
+  ts_with_tz  constant timestamptz not null := make_timestamptz(yyyy, mm, dd, hh, mi, ss, 'UTC');
+  ```
 
 - Each uses the same _constant int_ values, _yyyy_, _mm_, _dd_, _hh_, _mi_, and _ss_, to define the identical _date-and-time_ part for each of the two moments. The fact that _UTC_ is used for the _timezone_ argument of the _make_timestamptz()_ invocation ensures the required identity of the internal representations of the two moments—actually, both as plain _timestamp_ values.
 - The _extract(epoch from ... )_ function is used to get the numbers of seconds, as _constant double precision_ values, from the start of the epoch for the two moment values. These two numbers of seconds are actually identical. But two distinct names (_ts_plain_epoch_ and _ts_with_tz_epoch_) are used for these to help the reader see the symmetry of the two tests—one in each direction.
+
 - A _constant_ array,  _timezones_, is initialized thus:
 
     ```output
@@ -95,14 +95,14 @@ The demonstration that follows is designed like this:
 
   - These _assert_ statements are executed to show that the expected rules for the conversion of the internal representations hold, in both directions between plain _timestamp_ and _timestamptz_:
 
-      ```output
-      assert ( ts_with_tz_1_epoch = (ts_plain_epoch   - z_epoch) ), 'Assert #3 failed.';
-      assert ( ts_plain_1_epoch   = (ts_with_tz_epoch + z_epoch) ), 'Assert #4 failed.';
-      ```
+  ```output
+  assert ( ts_with_tz_1_epoch = (ts_plain_epoch   - z_epoch) ), 'Assert #3 failed.';
+  assert ( ts_plain_1_epoch   = (ts_with_tz_epoch + z_epoch) ), 'Assert #4 failed.';
+  ```
 
   - According to the choice for _at_utc:_ _either_ the timezone is set to _UTC;_ _or_ it is simply left at what the loop iterand, _z_, set it to. Then these values are formatted as a _text_ line using the _to_char()_ built-in function: _ts_plain_, _ts_with_tz_1_, _ts_with_tz_, and _ts_plain_1_. The row is labeled with the value of the loop iterand, _z_.
 
-- Finally, after the loop completes and before exiting, the session's _TimeZone_ setting is restored to the value that it had on entry to the function. (It's always good practice to do this for any settings that your programs need, temporarily, to change.) 
+- Finally, after the loop completes and before exiting, the session's _TimeZone_ setting is restored to the value that it had on entry to the function. (It's always good practice to do this for any settings that your programs need, temporarily, to change.)
 
 ## The demonstration
 
@@ -210,9 +210,7 @@ end;
 $body$;
 ```
 
-<p id="plain-timestamp-to-from-timestamp-tz">&nbsp;</p>
-
-Now create and execute the _plain_timestamp_to_from_timestamp_tz()_ table function thus.
+<a name="plain-timestamp-to-from-timestamp-tz"></a>Now create and execute the _plain_timestamp_to_from_timestamp_tz()_ table function thus.
 
 ```plpgsql
 drop function if exists plain_timestamp_to_from_timestamp_tz(boolean) cascade;
@@ -311,20 +309,20 @@ select t from plain_timestamp_to_from_timestamp_tz(true);
 This is the result:
 
 ```output
- ---------------------------------------------------------------------------------------------
- Displaying all results using UTC.
- ---------------------------------------------------------------------------------------------
- 
-                                From        To                    From               To
- [Timezone            Offset]   ts_plain    ts_with_tz            ts_with_tz         ts_plain
- ----------------------------   ---------   ----------------      ----------------   ---------
- [Pacific/Pago_Pago      -11]   Sat 10:15   Sat 21:15 +00:00      Sat 10:15 +00:00   Fri 23:15
- [America/Porto_Velho    -04]   Sat 10:15   Sat 14:15 +00:00      Sat 10:15 +00:00   Sat 06:15
- [Atlantic/South_Georgia -02]   Sat 10:15   Sat 12:15 +00:00      Sat 10:15 +00:00   Sat 08:15
- [UTC                    +00]   Sat 10:15   Sat 10:15 +00:00      Sat 10:15 +00:00   Sat 10:15
- [Africa/Tripoli         +02]   Sat 10:15   Sat 08:15 +00:00      Sat 10:15 +00:00   Sat 12:15
- [Asia/Dubai             +04]   Sat 10:15   Sat 06:15 +00:00      Sat 10:15 +00:00   Sat 14:15
- [Pacific/Kiritimati     +14]   Sat 10:15   Fri 20:15 +00:00      Sat 10:15 +00:00   Sun 00:15
+---------------------------------------------------------------------------------------------
+Displaying all results using UTC.
+---------------------------------------------------------------------------------------------
+
+                              From        To                    From               To
+[Timezone            Offset]   ts_plain    ts_with_tz            ts_with_tz         ts_plain
+----------------------------   ---------   ----------------      ----------------   ---------
+[Pacific/Pago_Pago      -11]   Sat 10:15   Sat 21:15 +00:00      Sat 10:15 +00:00   Fri 23:15
+[America/Porto_Velho    -04]   Sat 10:15   Sat 14:15 +00:00      Sat 10:15 +00:00   Sat 06:15
+[Atlantic/South_Georgia -02]   Sat 10:15   Sat 12:15 +00:00      Sat 10:15 +00:00   Sat 08:15
+[UTC                    +00]   Sat 10:15   Sat 10:15 +00:00      Sat 10:15 +00:00   Sat 10:15
+[Africa/Tripoli         +02]   Sat 10:15   Sat 08:15 +00:00      Sat 10:15 +00:00   Sat 12:15
+[Asia/Dubai             +04]   Sat 10:15   Sat 06:15 +00:00      Sat 10:15 +00:00   Sat 14:15
+[Pacific/Kiritimati     +14]   Sat 10:15   Fri 20:15 +00:00      Sat 10:15 +00:00   Sun 00:15
 ```
 
 The execution finishes without error, confirming that the assertions hold.
@@ -339,68 +337,68 @@ The interpretation of the demonstration's outcome depends on this fact, stated a
 
 The demonstration meets the goals set out in the "The philosophy of the demonstration's design" section:
 
-- _[Goal one](#demo-goals)_ is met because there are no _assert_ violations: these two properties of the mutual conversion shown in the paragraph that defines this goal are seen to hold.
+- _[Goal one](#demo-goals)_ is met because there are no _assert_ violations: these two properties of the mutual conversion shown in the paragraph that defines this goal are seen to hold.</br>
 
-<p id="goal-one-met">&nbsp;</p>
-
-```output
+  ```output
   IF:
     ts_with_tz_1 ◄— ts_plain::timestamptz
   AND:
     ts_with_tz_2 ◄— ts_plain at time zone current_setting('timezone')
   THEN:
     ts_with_tz_2 == ts_with_tz_1
-```
+  ```
 
-&nbsp;&nbsp;&nbsp;_and:_
+  </br>_and:_
 
-```output
+  ```output
   IF:
     ts_plain_1 ◄— ts_with_tz::timestamp
   AND:
     ts_plain_2 ◄— ts_with_tz at time zone current_setting('timezone')
   THEN:
     ts_plain_2 == ts_plain_1
-```
+  ```
+  </br>
 
 - _[Goal two](#demo-goals)_ is met because there are no _assert_ violations: these rules for the mutual conversions are seen to hold.
 
-```output
-    ts-with-tz-internal-seconds ◄— ts-plain-internal-seconds - specified-utc-offset-in-seconds
-```
+  ```output
+  ts-with-tz-internal-seconds ◄— ts-plain-internal-seconds - specified-utc-offset-in-seconds
+  ```
 
-&nbsp;&nbsp;&nbsp;_and:_
+  </br>_and:_
 
-```output
-    ts-plain-internal-seconds ◄— ts-with-tz-internal-seconds + specified-utc-offset-in-seconds
-```
+  ```output
+  ts-plain-internal-seconds ◄— ts-with-tz-internal-seconds + specified-utc-offset-in-seconds
+  ```
+  </br>
 
 - _[Goal three](#demo-goals)_ is met by inspecting the output immediately above and by Invoking the table function again to show each result row using the timezone in which it was computed.
 
-```plpgsql
+  ```plpgsql
   select t from plain_timestamp_to_from_timestamp_tz(false);
-```
+  ```
 
-This is the new result:
+  </br>This is the new result:
 
-```output
- ---------------------------------------------------------------------------------------------
- Displaying each set of results using the timezone in which they were computed.
- ---------------------------------------------------------------------------------------------
- 
+  ```output
+  ---------------------------------------------------------------------------------------------
+  Displaying each set of results using the timezone in which they were computed.
+  ---------------------------------------------------------------------------------------------
+
                                 From        To                    From               To
- [Timezone            Offset]   ts_plain    ts_with_tz            ts_with_tz         ts_plain
- ----------------------------   ---------   ----------------      ----------------   ---------
- [Pacific/Pago_Pago      -11]   Sat 10:15   Sat 10:15 -11:00      Fri 23:15 -11:00   Fri 23:15
- [America/Porto_Velho    -04]   Sat 10:15   Sat 10:15 -04:00      Sat 06:15 -04:00   Sat 06:15
- [Atlantic/South_Georgia -02]   Sat 10:15   Sat 10:15 -02:00      Sat 08:15 -02:00   Sat 08:15
- [UTC                    +00]   Sat 10:15   Sat 10:15 +00:00      Sat 10:15 +00:00   Sat 10:15
- [Africa/Tripoli         +02]   Sat 10:15   Sat 10:15 +02:00      Sat 12:15 +02:00   Sat 12:15
- [Asia/Dubai             +04]   Sat 10:15   Sat 10:15 +04:00      Sat 14:15 +04:00   Sat 14:15
- [Pacific/Kiritimati     +14]   Sat 10:15   Sat 10:15 +14:00      Sun 00:15 +14:00   Sun 00:15
-```
+  [Timezone            Offset]   ts_plain    ts_with_tz            ts_with_tz         ts_plain
+  ----------------------------   ---------   ----------------      ----------------   ---------
+  [Pacific/Pago_Pago      -11]   Sat 10:15   Sat 10:15 -11:00      Fri 23:15 -11:00   Fri 23:15
+  [America/Porto_Velho    -04]   Sat 10:15   Sat 10:15 -04:00      Sat 06:15 -04:00   Sat 06:15
+  [Atlantic/South_Georgia -02]   Sat 10:15   Sat 10:15 -02:00      Sat 08:15 -02:00   Sat 08:15
+  [UTC                    +00]   Sat 10:15   Sat 10:15 +00:00      Sat 10:15 +00:00   Sat 10:15
+  [Africa/Tripoli         +02]   Sat 10:15   Sat 10:15 +02:00      Sat 12:15 +02:00   Sat 12:15
+  [Asia/Dubai             +04]   Sat 10:15   Sat 10:15 +04:00      Sat 14:15 +04:00   Sat 14:15
+  [Pacific/Kiritimati     +14]   Sat 10:15   Sat 10:15 +14:00      Sun 00:15 +14:00   Sun 00:15
+  ```
 
-### The results at _"Displaying all results using UTC"_ 
+### The results at _"Displaying all results using UTC"_
 
 These show what is really happening at the level of the internal representation—albeit that you have to deal with a degree of circularity of logic to accept this claim. It's equivalent to looking at the numbers of seconds from _12:00_ on _1-Jan-1070_. (You could write your own formatter, using the _trunc()_ and _mod()_ built-in functions, to produce the same display.) Of course, only the display of _timestamptz_ values is sensitive to the current value of the session's _TimeZone_ setting.
 
@@ -431,4 +429,3 @@ You should aim to be comfortable with these three different ways to state the ru
 - _Third_ in terms of the _text_ display of the results using the timezones at which the conversions are done.
 
 Notice that the first way to state the rules is by far the most terse and precise—and therefore the most reliable. The other two ways are subject to the limitations of composing, and interpreting, tortuous natural language prose.
-

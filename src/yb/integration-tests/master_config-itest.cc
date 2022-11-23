@@ -11,24 +11,40 @@
 // under the License.
 //
 
+#include <algorithm>
+#include <functional>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include <glog/logging.h>
 #include <gtest/gtest.h>
+
+#include "yb/common/common.pb.h"
+#include "yb/common/entity_ids_types.h"
 
 #include "yb/consensus/consensus.pb.h"
 #include "yb/consensus/consensus.proxy.h"
-#include "yb/gutil/strings/join.h"
-#include "yb/integration-tests/mini_cluster.h"
+
+#include "yb/gutil/algorithm.h"
+#include "yb/gutil/strings/substitute.h"
+
 #include "yb/integration-tests/external_mini_cluster.h"
-#include "yb/integration-tests/cluster_verifier.h"
-#include "yb/master/master.h"
-#include "yb/master/master-test-util.h"
-#include "yb/master/sys_catalog.h"
-#include "yb/master/master.proxy.h"
-#include "yb/rpc/messenger.h"
-#include "yb/rpc/rpc_controller.h"
+
+
+#include "yb/util/backoff_waiter.h"
+#include "yb/util/result.h"
+#include "yb/util/status.h"
+#include "yb/util/test_util.h"
+#include "yb/util/tsan_util.h"
 
 using std::shared_ptr;
 using std::string;
 using std::vector;
+using std::min;
 using strings::Substitute;
 using yb::rpc::Messenger;
 using yb::rpc::MessengerBuilder;
@@ -36,8 +52,6 @@ using yb::consensus::ChangeConfigRequestPB;
 using yb::consensus::ChangeConfigResponsePB;
 using yb::consensus::ConsensusServiceProxy;
 using yb::consensus::RaftPeerPB;
-using yb::master::ListMastersRequestPB;
-using yb::master::ListMastersResponsePB;
 using yb::tserver::TabletServerErrorPB;
 
 using namespace std::chrono_literals;
@@ -57,7 +71,7 @@ class MasterChangeConfigTest : public YBTest {
     YBTest::SetUp();
     ExternalMiniClusterOptions opts;
     opts.master_rpc_ports = { 0, 0, 0 }; // external mini-cluster Start() gets the free ports.
-    opts.num_masters = num_masters_ = static_cast<int>(opts.master_rpc_ports.size());
+    opts.num_masters = num_masters_ = opts.master_rpc_ports.size();
     opts.num_tablet_servers = 0;
     opts.timeout = MonoDelta::FromSeconds(30);
     // Master failovers should not be happening concurrently with us trying to load an initial sys
@@ -121,8 +135,8 @@ class MasterChangeConfigTest : public YBTest {
   // API to capture the latest commit index on the master leader.
   void SetCurLogIndex();
 
-  int num_masters_;
-  int cur_log_index_;
+  size_t num_masters_;
+  int64_t cur_log_index_;
   std::unique_ptr<ExternalMiniCluster> cluster_;
 };
 
@@ -137,14 +151,9 @@ void MasterChangeConfigTest::VerifyLeaderMasterPeerCount() {
 
 void MasterChangeConfigTest::VerifyNonLeaderMastersPeerCount() {
   int num_peers = 0;
-  int leader_index = -1;
-  ASSERT_OK_PREPEND(cluster_->GetLeaderMasterIndex(&leader_index), "Leader index get failed.");
+  auto leader_index = ASSERT_RESULT(cluster_->GetLeaderMasterIndex());
 
-  if (leader_index == -1) {
-    FAIL() << "Leader index not found.";
-  }
-
-  for (int i = 0; i < num_masters_; i++) {
+  for (size_t i = 0; i < num_masters_; i++) {
     if (i == leader_index) {
       continue;
     }
@@ -242,19 +251,14 @@ TEST_F(MasterChangeConfigTest, TestSlowRemoteBootstrapDoesNotCrashMaster) {
 }
 
 TEST_F(MasterChangeConfigTest, TestRemoveMaster) {
-  int non_leader_index = -1;
-  Status s = cluster_->GetFirstNonLeaderMasterIndex(&non_leader_index);
-  ASSERT_OK_PREPEND(s, "Non-leader master lookup returned error");
-  if (non_leader_index == -1) {
-    FAIL() << "Failed to get a non-leader master index.";
-  }
+  auto non_leader_index = ASSERT_RESULT(cluster_->GetFirstNonLeaderMasterIndex());
   ExternalMaster* remove_master = cluster_->master(non_leader_index);
 
   LOG(INFO) << "Going to remove master at port " << remove_master->bound_rpc_hostport().port();
 
   SetCurLogIndex();
 
-  s = cluster_->ChangeConfig(remove_master, consensus::REMOVE_SERVER);
+  auto s = cluster_->ChangeConfig(remove_master, consensus::REMOVE_SERVER);
   ASSERT_OK_PREPEND(s, "Change Config returned error");
 
   // REMOVE_SERVER causes the op index to increase by one.
@@ -267,20 +271,15 @@ TEST_F(MasterChangeConfigTest, TestRemoveMaster) {
 }
 
 TEST_F(MasterChangeConfigTest, TestRemoveDeadMaster) {
-  int non_leader_index = -1;
-  Status s = cluster_->GetFirstNonLeaderMasterIndex(&non_leader_index);
-  ASSERT_OK_PREPEND(s, "Non-leader master lookup returned error");
-  if (non_leader_index == -1) {
-    FAIL() << "Failed to get a non-leader master index.";
-  }
+  auto non_leader_index = ASSERT_RESULT(cluster_->GetFirstNonLeaderMasterIndex());
   ExternalMaster* remove_master = cluster_->master(non_leader_index);
   remove_master->Shutdown();
   LOG(INFO) << "Stopped and removing master at " << remove_master->bound_rpc_hostport().port();
 
   SetCurLogIndex();
 
-  s = cluster_->ChangeConfig(remove_master, consensus::REMOVE_SERVER,
-                             consensus::RaftPeerPB::PRE_VOTER, true /* use_hostport */);
+  auto s = cluster_->ChangeConfig(remove_master, consensus::REMOVE_SERVER,
+                                  consensus::PeerMemberType::PRE_VOTER, true /* use_hostport */);
   ASSERT_OK_PREPEND(s, "Change Config returned error");
 
   // REMOVE_SERVER causes the op index to increase by one.
@@ -418,7 +417,7 @@ TEST_F(MasterChangeConfigTest, TestAddPreObserverMaster) {
 
   SetCurLogIndex();
   ASSERT_OK_PREPEND(cluster_->ChangeConfig(new_master, consensus::ADD_SERVER,
-                                           consensus::RaftPeerPB::PRE_OBSERVER),
+                                           consensus::PeerMemberType::PRE_OBSERVER),
                     "Add Change Config returned error");
   ++num_masters_;
 

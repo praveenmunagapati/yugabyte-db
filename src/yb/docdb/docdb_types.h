@@ -11,10 +11,10 @@
 // under the License.
 //
 
-#ifndef YB_DOCDB_DOCDB_TYPES_H_
-#define YB_DOCDB_DOCDB_TYPES_H_
+#pragma once
 
 #include "yb/util/enums.h"
+#include "yb/util/math_util.h"
 #include "yb/util/strongly_typed_bool.h"
 
 namespace yb {
@@ -58,5 +58,3 @@ inline BoundType UpperBound(bool exclusive) {
 
 } // namespace docdb
 } // namespace yb
-
-#endif  // YB_DOCDB_DOCDB_TYPES_H_

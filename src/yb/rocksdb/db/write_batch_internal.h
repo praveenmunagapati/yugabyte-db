@@ -21,17 +21,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#ifndef YB_ROCKSDB_DB_WRITE_BATCH_INTERNAL_H
-#define YB_ROCKSDB_DB_WRITE_BATCH_INTERNAL_H
 
 #pragma once
+
 #include <vector>
+
 #include "yb/rocksdb/db/write_thread.h"
 #include "yb/rocksdb/types.h"
-#include "yb/rocksdb/write_batch.h"
-#include "yb/rocksdb/db.h"
-#include "yb/rocksdb/options.h"
 #include "yb/rocksdb/util/autovector.h"
+#include "yb/rocksdb/write_batch.h"
 
 #include "yb/util/enums.h"
 
@@ -184,5 +182,3 @@ class WriteBatchInternal {
 };
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_DB_WRITE_BATCH_INTERNAL_H

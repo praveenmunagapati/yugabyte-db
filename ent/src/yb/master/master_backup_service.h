@@ -10,8 +10,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 
-#ifndef ENT_SRC_YB_MASTER_MASTER_BACKUP_SERVICE_H
-#define ENT_SRC_YB_MASTER_MASTER_BACKUP_SERVICE_H
+#pragma once
 
 #include "yb/master/master_backup.service.h"
 #include "yb/master/master_service_base.h"
@@ -21,7 +20,8 @@ namespace master {
 
 #define YB_MASTER_BACKUP_SERVICE_METHODS \
   (CreateSnapshot)(ListSnapshots)(ListSnapshotRestorations)(RestoreSnapshot)(DeleteSnapshot) \
-  (ImportSnapshotMeta)(CreateSnapshotSchedule)(ListSnapshotSchedules)(DeleteSnapshotSchedule)
+  (ImportSnapshotMeta)(CreateSnapshotSchedule)(ListSnapshotSchedules)(DeleteSnapshotSchedule) \
+  (EditSnapshotSchedule)(RestoreSnapshotSchedule)
 
 #define YB_MASTER_BACKUP_SERVICE_METHOD_DECLARE(r, data, elem) \
   void elem( \
@@ -29,7 +29,7 @@ namespace master {
       rpc::RpcContext rpc) override;
 
 // Implementation of the master backup service. See master_backup.proto.
-class MasterBackupServiceImpl : public MasterBackupServiceIf,
+class MasterBackupServiceImpl : public MasterBackupIf,
                                 public MasterServiceBase {
  public:
   explicit MasterBackupServiceImpl(Master* server);
@@ -43,5 +43,3 @@ class MasterBackupServiceImpl : public MasterBackupServiceIf,
 
 } // namespace master
 } // namespace yb
-
-#endif // ENT_SRC_YB_MASTER_MASTER_BACKUP_SERVICE_H

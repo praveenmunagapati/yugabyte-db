@@ -13,7 +13,7 @@ package com.yugabyte.yw.commissioner.tasks.subtasks;
 import com.google.common.net.HostAndPort;
 import com.yugabyte.yw.commissioner.AbstractTaskBase;
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
-import com.yugabyte.yw.commissioner.tasks.UniverseDefinitionTaskBase.ServerType;
+import com.yugabyte.yw.commissioner.tasks.UniverseTaskBase.ServerType;
 import com.yugabyte.yw.commissioner.tasks.params.ServerSubTaskParams;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.helpers.NodeDetails;
@@ -47,8 +47,12 @@ public abstract class ServerSubTaskBase extends AbstractTaskBase {
   }
 
   public String getMasterAddresses() {
+    return getMasterAddresses(false);
+  }
+
+  public String getMasterAddresses(boolean getSecondary) {
     Universe universe = Universe.getOrBadRequest(taskParams().universeUUID);
-    return universe.getMasterAddresses();
+    return universe.getMasterAddresses(false /* mastersQueryable */, getSecondary);
   }
 
   public HostAndPort getHostPort() {
@@ -84,15 +88,12 @@ public abstract class ServerSubTaskBase extends AbstractTaskBase {
 
     if (node == null) {
       throw new IllegalArgumentException(
-          "Node "
-              + taskParams().nodeName
-              + " not found in "
-              + "universe "
-              + taskParams().universeUUID);
+          "Node " + taskParams().nodeName + " not found in universe " + taskParams().universeUUID);
     }
 
     if (taskParams().serverType != ServerType.TSERVER
-        && taskParams().serverType != ServerType.MASTER) {
+        && taskParams().serverType != ServerType.MASTER
+        && taskParams().serverType != ServerType.CONTROLLER) {
       throw new IllegalArgumentException(
           "Unexpected server type "
               + taskParams().serverType
@@ -105,8 +106,7 @@ public abstract class ServerSubTaskBase extends AbstractTaskBase {
       throw new IllegalArgumentException(
           "Task server type "
               + taskParams().serverType
-              + " is "
-              + "not for a node running tserver : "
+              + " is for a node running tserver: "
               + node.toString());
     }
 
@@ -114,8 +114,7 @@ public abstract class ServerSubTaskBase extends AbstractTaskBase {
       throw new IllegalArgumentException(
           "Task server type "
               + taskParams().serverType
-              + " is "
-              + "not for a node running master : "
+              + " is for a node running master: "
               + node.toString());
     }
   }

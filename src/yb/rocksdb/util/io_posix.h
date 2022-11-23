@@ -20,8 +20,6 @@
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
-#ifndef YB_ROCKSDB_UTIL_IO_POSIX_H
-#define YB_ROCKSDB_UTIL_IO_POSIX_H
 
 #pragma once
 #include <unistd.h>
@@ -41,39 +39,6 @@ namespace rocksdb {
 
 #define STATUS_IO_ERROR(context, err_number) STATUS(IOError, (context), strerror(err_number))
 
-class PosixWritableFile : public WritableFile {
- private:
-  const std::string filename_;
-  int fd_;
-  uint64_t filesize_;
-#ifdef ROCKSDB_FALLOCATE_PRESENT
-  bool allow_fallocate_;
-  bool fallocate_with_keep_size_;
-#endif
-
- public:
-  PosixWritableFile(const std::string& fname, int fd,
-                    const EnvOptions& options);
-  ~PosixWritableFile();
-
-  // Means Close() will properly take care of truncate
-  // and it does not need any additional information
-  virtual Status Truncate(uint64_t size) override { return Status::OK(); }
-  virtual Status Close() override;
-  virtual Status Append(const Slice& data) override;
-  virtual Status Flush() override;
-  virtual Status Sync() override;
-  virtual Status Fsync() override;
-  virtual bool IsSyncThreadSafe() const override;
-  virtual uint64_t GetFileSize() override;
-  virtual Status InvalidateCache(size_t offset, size_t length) override;
-#ifdef ROCKSDB_FALLOCATE_PRESENT
-  virtual Status Allocate(uint64_t offset, uint64_t len) override;
-  virtual Status RangeSync(uint64_t offset, uint64_t nbytes) override;
-  virtual size_t GetUniqueId(char* id) const override;
-#endif
-};
-
 class PosixMmapReadableFile : public RandomAccessFile {
  private:
   int fd_;
@@ -85,9 +50,9 @@ class PosixMmapReadableFile : public RandomAccessFile {
   PosixMmapReadableFile(const int fd, const std::string& fname, void* base,
                         size_t length, const EnvOptions& options);
   ~PosixMmapReadableFile();
-  CHECKED_STATUS Read(uint64_t offset, size_t n, Slice* result, uint8_t* scratch) const override;
-  CHECKED_STATUS InvalidateCache(size_t offset, size_t length) override;
-  yb::Result<uint64_t> Size() const override { return length_; }
+  Status Read(uint64_t offset, size_t n, Slice* result, uint8_t* scratch) const override;
+  Status InvalidateCache(size_t offset, size_t length) override;
+  yb::Result<uint64_t> Size() const override;
   yb::Result<uint64_t> INode() const override;
   // Doesn't include memory usage by mmap.
   size_t memory_footprint() const override;
@@ -130,16 +95,16 @@ class PosixMmapFile : public WritableFile {
 
   // Means Close() will properly take care of truncate
   // and it does not need any additional information
-  virtual Status Truncate(uint64_t size) override { return Status::OK(); }
-  virtual Status Close() override;
-  virtual Status Append(const Slice& data) override;
-  virtual Status Flush() override;
-  virtual Status Sync() override;
-  virtual Status Fsync() override;
-  virtual uint64_t GetFileSize() override;
-  virtual Status InvalidateCache(size_t offset, size_t length) override;
+  Status Truncate(uint64_t size) override;
+  Status Close() override;
+  Status Append(const Slice& data) override;
+  Status Flush() override;
+  Status Sync() override;
+  Status Fsync() override;
+  uint64_t GetFileSize() override;
+  Status InvalidateCache(size_t offset, size_t length) override;
 #ifdef ROCKSDB_FALLOCATE_PRESENT
-  virtual Status Allocate(uint64_t offset, uint64_t len) override;
+  Status Allocate(uint64_t offset, uint64_t len) override;
 #endif
 };
 
@@ -154,5 +119,3 @@ class PosixDirectory : public Directory {
 };
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_UTIL_IO_POSIX_H

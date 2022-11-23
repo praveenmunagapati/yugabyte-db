@@ -6,11 +6,9 @@
 #
 # https://github.com/YugaByte/yugabyte-db/blob/master/licenses/POLYFORM-FREE-TRIAL-LICENSE-1.0.0.txt
 
-import httplib2
 import logging
 import os
 import requests
-import six
 import socket
 import time
 import json
@@ -41,10 +39,15 @@ YB_PEERING_CONNECTION_FORMAT = "yb-peering-{}-with-{}"
 YB_FIREWALL_NAME = "yb-internal-firewall"
 YB_FIREWALL_TARGET_TAGS = "cluster-server"
 
+STARTUP_SCRIPT_META_KEY = "startup-script"
+SERVER_TYPE_META_KEY = "server_type"
+SSH_KEYS_META_KEY = "ssh-keys"
+BLOCK_PROJECT_SSH_KEY = "block-project-ssh-keys"
+
+META_KEYS = [STARTUP_SCRIPT_META_KEY, SERVER_TYPE_META_KEY, SSH_KEYS_META_KEY]
 
 GCP_SCRATCH = "scratch"
 GCP_PERSISTENT = "persistent"
-GCP_INTERNAL_INSTANCE_PREFIXES = ("N2-")
 
 
 # Code 429 does not have a name in httplib.
@@ -64,26 +67,26 @@ def gcp_exception_handler(e):
     if isinstance(e, (http_client.BadStatusLine,
                       http_client.IncompleteRead,
                       http_client.ResponseNotReady)):
-        logging.warn('Caught HTTP error %s, retrying: %s', type(e).__name__, e)
+        logging.warning('Caught HTTP error %s, retrying: %s', type(e).__name__, e)
     elif isinstance(e, socket.error):
         # Note: this also catches ssl.SSLError flavors of:
         # ssl.SSLError: ('The read operation timed out',)
-        logging.warn('Caught socket error, retrying: %s', e)
+        logging.warning('Caught socket error, retrying: %s', e)
     elif isinstance(e, socket.gaierror):
-        logging.warn('Caught socket address error, retrying: %s', e)
-    elif isinstance(e, socket.timeout):
-        logging.warn('Caught socket timeout error, retrying: %s', e)
-    elif isinstance(e, httplib2.ServerNotFoundError):
-        logging.warn('Caught server not found error, retrying: %s', e)
+        logging.warning('Caught socket address error, retrying: %s', e)
     elif isinstance(e, ValueError):
         # oauth2client tries to JSON-decode the response, which can result
         # in a ValueError if the response was invalid. Until that is fixed in
         # oauth2client, need to handle it here.
-        logging.warn('Response content was invalid (%s), retrying', e)
+        logging.warning('Response content was invalid (%s), retrying', e)
     elif (isinstance(e, oauth2client.client.HttpAccessTokenRefreshError) and
           (e.status == TOO_MANY_REQUESTS or
            e.status >= 500)):
-        logging.warn('Caught transient credential refresh error (%s), retrying', e)
+        logging.warning('Caught transient credential refresh error (%s), retrying', e)
+    elif (isinstance(e, HttpError) and
+          (e.resp.status == TOO_MANY_REQUESTS or
+           e.resp.status >= 500)):
+        logging.warning('Caught transient server error (%s), retrying', e)
     else:
         return False
     return True
@@ -110,13 +113,21 @@ class GcpMetadata():
         try:
             url = "{}/{}".format(GcpMetadata.METADATA_URL_BASE, endpoint)
             req = requests.get(url, headers=GcpMetadata.CUSTOM_HEADERS, timeout=2)
-            return req.content.decode('utf-8') if req.status_code == requests.codes.ok else None
+
+            if req.status_code != requests.codes.ok:
+                logging.warning("Request {} returned http error code {}".format(
+                    url, req.status_code))
+                return None
+
+            return req.content.decode('utf-8')
+
         except requests.exceptions.ConnectionError as e:
+            logging.warning("Request {} had a connection error {}".format(url, str(e)))
             return None
 
     @staticmethod
     def project():
-        return GcpMetadata._query_endpoint("/project/project-id")
+        return GcpMetadata._query_endpoint("project/project-id")
 
     @staticmethod
     def host_project():
@@ -140,6 +151,22 @@ class Waiter():
     def __init__(self, project, compute):
         self.project = project
         self.compute = compute
+
+    def get_in_progress_operation(self, zone, instance, operation_type):
+        target_link = \
+            RESOURCE_BASE_URL + "{}/zones/{}/instances/{}".format(self.project, zone, instance)
+        cmd = self.compute.zoneOperations().list(
+            project=self.project,
+            zone=zone,
+            filter='targetLink = "{}" AND status != "DONE" AND '
+                   'operationType = "{}"'.format(target_link, operation_type),
+            maxResults=1)
+        result = cmd.execute()
+        if 'error' in result:
+            raise RuntimeError(result['error'])
+        if 'items' not in result or len(result['items']) == 0:
+            return None
+        return result['items'][0]['id']
 
     def wait(self, operation, region=None, zone=None):
         # This allows easier chaining of waits on functions that are NOOPs if items already exist.
@@ -513,7 +540,8 @@ class GoogleCloudAdmin():
         # If these are not provided, then get_application_default will try to use the service
         # account associated with the instance we're running on, if one exists.
         self.credentials = oauth2client.client.GoogleCredentials.get_application_default()
-        self.compute = discovery.build("compute", "beta", credentials=self.credentials)
+        self.compute = discovery.build(
+            "compute", "beta", credentials=self.credentials, num_retries=3)
         # If we have specified a GCE_PROJECT, use that, else, try the instance metadata, else fail.
         self.project = os.environ.get("GCE_PROJECT") or GcpMetadata.project()
         if self.project is None:
@@ -523,7 +551,9 @@ class GoogleCloudAdmin():
         self.metadata = metadata
         self.waiter = Waiter(self.project, self.compute)
 
-    def network(self, dest_vpc_id=None, host_vpc_id=None, per_region_meta={}):
+    def network(self, dest_vpc_id=None, host_vpc_id=None, per_region_meta=None):
+        if per_region_meta is None:
+            per_region_meta = {}
         return NetworkManager(
             self.project, self.compute, self.metadata, dest_vpc_id, host_vpc_id, per_region_meta)
 
@@ -557,6 +587,57 @@ class GoogleCloudAdmin():
                                                 body=body).execute()
         return self.waiter.wait(operation, zone=zone)
 
+    def delete_disks(self, zone, tags):
+        if not tags:
+            raise YBOpsRuntimeError('Tags must be specified')
+        universe_uuid = tags.get('universe-uuid')
+        if universe_uuid is None:
+            raise YBOpsRuntimeError('Universe UUID must be specified')
+        node_uuid = tags.get('node-uuid')
+        if node_uuid is None:
+            raise YBOpsRuntimeError('Node UUID must be specified')
+        filters = []
+        tagPairs = {}
+        tagPairs['universe-uuid'] = universe_uuid
+        tagPairs['node-uuid'] = node_uuid
+        for tag in tagPairs:
+            value = tagPairs[tag]
+            filters.append('labels.{}={}'.format(tag, value))
+        disk_names = []
+        list_disks_args = {
+            'project': self.project,
+            'zone': zone,
+            'filter': ' AND '.join(filters)
+        }
+        while True:
+            response = self.compute.disks().list(**list_disks_args).execute()
+            for disk in response.get('items', []):
+                status = disk['status']
+                disk_name = disk['name']
+                present_tags = disk['labels']
+                users = disk.get('users', [])
+                # API returns READY for used disks as it is the creation state.
+                # Users refer to the users (instance).
+                if status.lower() != 'ready' or users:
+                    continue
+                tag_match_count = 0
+                # Extra caution to make sure tags are present.
+                for tag in tagPairs:
+                    value = tagPairs[tag]
+                    for present_tag in present_tags:
+                        if present_tag == tag and present_tags[present_tag] == value:
+                            tag_match_count += 1
+                            break
+                if tag_match_count == len(tagPairs):
+                    disk_names.append(disk_name)
+            if 'nextPageToken' in response:
+                list_disks_args['pageToken'] = response['nextPageToken']
+            else:
+                break
+        for disk_name in disk_names:
+            logging.info('[app] Deleting disk {}'.format(disk_name))
+            self.compute.disks().delete(project=self.project, zone=zone, disk=disk_name).execute()
+
     def mount_disk(self, zone, instance, body):
         operation = self.compute.instances().attachDisk(project=self.project,
                                                         zone=zone,
@@ -584,7 +665,7 @@ class GoogleCloudAdmin():
             if disk['index'] != 0:
                 # The source is the complete URL of the disk, with the last
                 # component being the name.
-                disk_name = disk['source'].split('/')[-1]
+                disk_name = self.get_disk_name(disk)
                 print("Updating disk " + disk_name)
                 operation = self.compute.disks().resize(project=self.project,
                                                         zone=zone,
@@ -605,10 +686,12 @@ class GoogleCloudAdmin():
     def delete_instance(self, region, zone, instance_name, has_static_ip=False):
         if has_static_ip:
             address = "ip-" + instance_name
-            logging.info("Deleting static ip {} attached to VM {}".format(address, instance_name))
+            logging.info("[app] Deleting static ip {} attached to VM {}".format(
+                address, instance_name))
             self.compute.addresses().delete(
                 project=self.project, region=region, address=address).execute()
-            logging.info("Deleted static ip {} attached to VM {}".format(address, instance_name))
+            logging.info("[app] Deleted static ip {} attached to VM {}".format(
+                address, instance_name))
         operation = self.compute.instances().delete(
             project=self.project, zone=zone, instance=instance_name).execute()
         self.waiter.wait(operation, zone=zone)
@@ -619,11 +702,24 @@ class GoogleCloudAdmin():
                                                   instance=instance_name).execute()
         self.waiter.wait(operation, zone=zone)
 
+    def wait_for_operation(self, zone, instance, operation_type):
+        operation = self.waiter.get_in_progress_operation(zone=zone,
+                                                          instance=instance,
+                                                          operation_type=operation_type)
+        if operation:
+            self.waiter.wait(operation=operation, zone=zone)
+
     def start_instance(self, zone, instance_name):
         operation = self.compute.instances().start(project=self.project,
                                                    zone=zone,
                                                    instance=instance_name).execute()
         return self.waiter.wait(operation, zone=zone)
+
+    def reboot_instance(self, zone, instance_name):
+        operation = self.compute.instances().reset(project=self.project,
+                                                   zone=zone,
+                                                   instance=instance_name).execute()
+        self.waiter.wait(operation, zone=zone)
 
     def query_vpc(self, region):
         """
@@ -676,10 +772,13 @@ class GoogleCloudAdmin():
     @gcp_request_limit_retry
     def get_instances(self, zone, instance_name, get_all=False, filters=None):
         # TODO: filter should work to do (zone eq args.zone), but it doesn't right now...
-        if not filters:
-            filters = "(status eq RUNNING)"
+        filter_params = []
+        if filters:
+            filter_params.append(filters)
         if instance_name is not None:
-            filters += " (name eq {})".format(instance_name)
+            filter_params.append("(name = \"{}\")".format(instance_name))
+        if len(filter_params) > 0:
+            filters = " AND ".join(filter_params)
         instances = self.compute.instances().aggregatedList(
             project=self.project,
             filter=filters,
@@ -701,7 +800,8 @@ class GoogleCloudAdmin():
             disks = data.get("disks", [])
             root_vol = next(disk for disk in disks if disk.get("boot", False))
             server_types = [i["value"] for i in metadata if i["key"] == "server_type"]
-            interface = [None]
+            node_uuid_tags = [i["value"] for i in metadata if i["key"] == "node-uuid"]
+            universe_uuid_tags = [i["value"] for i in metadata if i["key"] == "universe-uuid"]
             private_ip = None
             primary_subnet = None
             secondary_private_ip = None
@@ -710,12 +810,14 @@ class GoogleCloudAdmin():
             if data.get("networkInterfaces"):
                 interface = data.get("networkInterfaces")
                 if len(interface):
+                    # Interface names are of form
+                    # nic0, nic1, nic2, etc.
                     for i in interface:
-                        # Interface names are of form
-                        # nic0, nic1, nic2, etc.
+                        # This will only be true for one of the NICs.
+                        access_config = i.get("accessConfigs", [None])[0]
+                        if access_config:
+                            public_ip = access_config.get("natIP")
                         if i.get("name") == 'nic0':
-                            access_config = i.get("accessConfigs", [None])[0]
-                            public_ip = access_config.get("natIP") if access_config else None
                             private_ip = i.get("networkIP")
                             primary_subnet = i.get("subnetwork").split("/")[-1]
                         elif i.get("name") == 'nic1':
@@ -724,6 +826,8 @@ class GoogleCloudAdmin():
             zone = data["zone"].split("/")[-1]
             region = zone[:-2]
             machine_type = data["machineType"].split("/")[-1]
+            instance_state = data.get("status")
+            logging.info("VM state {}".format(instance_state))
             result = dict(
                 id=data.get("name"),
                 name=data.get("name"),
@@ -736,10 +840,14 @@ class GoogleCloudAdmin():
                 zone=zone,
                 instance_type=machine_type,
                 server_type=server_types[0] if server_types else None,
+                node_uuid=node_uuid_tags[0] if node_uuid_tags else None,
+                universe_uuid=universe_uuid_tags[0] if universe_uuid_tags else None,
                 launched_by=None,
                 launch_time=data.get("creationTimestamp"),
                 root_volume=root_vol["source"],
-                root_volume_device_name=root_vol["deviceName"]
+                root_volume_device_name=root_vol["deviceName"],
+                instance_state=instance_state,
+                is_running=True if instance_state == "RUNNING" else False
             )
             if not get_all:
                 return result
@@ -764,9 +872,12 @@ class GoogleCloudAdmin():
         if boot_disk_size_gb is not None:
             # Default: 10GB
             boot_disk_init_params["diskSizeGb"] = boot_disk_size_gb
+        # Create boot disk backed by a zonal persistent SSD
+        boot_disk_init_params["diskType"] = "zones/{}/diskTypes/pd-ssd".format(zone)
         boot_disk_json["initializeParams"] = boot_disk_init_params
 
-        access_configs = [{"natIP": None}] if assign_public_ip else None
+        access_configs = [{"natIP": None}
+                          ] if assign_public_ip and not cloud_subnet_secondary else None
 
         if assign_static_public_ip:
             # Create external static ip.
@@ -795,12 +906,16 @@ class GoogleCloudAdmin():
             "metadata": {
                 "items": [
                     {
-                        "key": "server_type",
+                        "key": SERVER_TYPE_META_KEY,
                         "value": server_type
                     },
                     {
-                        "key": "ssh-keys",
+                        "key": SSH_KEYS_META_KEY,
                         "value": ssh_keys
+                    },
+                    {
+                        "key": BLOCK_PROJECT_SSH_KEY,
+                        "value": True
                     }
                 ]
             },
@@ -820,7 +935,7 @@ class GoogleCloudAdmin():
         # Attach a secondary network interface if present.
         if cloud_subnet_secondary:
             body["networkInterfaces"].append({
-                "accessConfigs": None,
+                "accessConfigs": [{"natIP": None}],
                 "subnetwork": "projects/{}/regions/{}/subnetworks/{}".format(
                     host_project, region, cloud_subnet_secondary)
             })
@@ -828,7 +943,7 @@ class GoogleCloudAdmin():
         if boot_script:
             with open(boot_script, 'r') as script:
                 body["metadata"]["items"].append({
-                    "key": "startup-script",
+                    "key": STARTUP_SCRIPT_META_KEY,
                     "value": script.read()
                 })
 
@@ -853,7 +968,8 @@ class GoogleCloudAdmin():
         if tags is not None:
             tags_dict = json.loads(tags)
             body.update({"labels": tags_dict})
-            initial_params.update({"labels": tags_dict})
+            if volume_type != GCP_SCRATCH:
+                initial_params.update({"labels": tags_dict})
             boot_disk_init_params.update({"labels": tags_dict})
             body["metadata"]["items"].append(
                 [{"key": k, "value": v} for (k, v) in tags_dict.items()])
@@ -868,3 +984,77 @@ class GoogleCloudAdmin():
             zone=zone,
             body=body).execute(), zone=zone)
         logging.info("[app] Created GCP VM {}".format(instance_name))
+
+    def get_console_output(self, zone, instance_name):
+        try:
+            return self.compute.instances().getSerialPortOutput(
+                project=self.project,
+                zone=zone,
+                instance=instance_name).execute().get('contents', '')
+        except HttpError:
+            logging.exception('Failed to get console output from {}'.format(instance_name))
+            return ''
+
+    def modify_tags(self, args, instance, tags_to_set_str, tags_to_remove_str):
+        tags_to_set = json.loads(tags_to_set_str) if tags_to_set_str is not None else {}
+        tags_to_remove = set(tags_to_remove_str.split(",") if tags_to_remove_str else [])
+
+        zone = args.zone
+        instance_info = self.compute.instances().get(project=self.project,
+                                                     zone=zone,
+                                                     instance=instance).execute()
+        # modifying metadata
+        metadata_items = instance_info["metadata"]["items"]
+        meta_to_set = dict(tags_to_set)
+        for entry in metadata_items:
+            key = entry["key"]
+            value = entry["value"]
+            if key in META_KEYS or (key not in tags_to_set and key not in tags_to_remove):
+                meta_to_set[key] = value
+        metadata_items = [{"key": k, "value": v} for (k, v) in meta_to_set.items()]
+        metadata_body = {
+            "items": metadata_items,
+            "kind": instance_info["metadata"]["kind"],
+            "fingerprint": instance_info["metadata"]["fingerprint"]
+        }
+        operations = []
+        operations.append(self.compute.instances().setMetadata(project=self.project,
+                                                               zone=zone,
+                                                               instance=instance,
+                                                               body=metadata_body).execute())
+        # modifying labels
+        cur_labels = instance_info.get("labels", {})
+        for (k, v) in tags_to_set.items():
+            cur_labels[k] = v
+        for k in tags_to_remove:
+            if k in cur_labels:
+                del cur_labels[k]
+        body = {
+            "labels": cur_labels,
+            "labelFingerprint": instance_info["labelFingerprint"]
+        }
+        # modifying instance labels
+        operations.append(self.compute.instances().setLabels(project=self.project,
+                                                             zone=zone,
+                                                             instance=instance,
+                                                             body=body).execute())
+        # modifying disks labels
+        for disk in instance_info.get("disks", []):
+            disk = self.compute.disks().get(project=self.project,
+                                            zone=zone,
+                                            disk=self.get_disk_name(disk)).execute()
+            disk_body = {
+                "labels": cur_labels,
+                "labelFingerprint": disk["labelFingerprint"]
+            }
+            operations.append(self.compute.disks().setLabels(project=self.project,
+                                                             zone=zone,
+                                                             resource=disk["id"],
+                                                             body=disk_body).execute())
+        # waiting for all operations to complete
+        for operation in operations:
+            self.waiter.wait(operation, zone=zone)
+
+    @staticmethod
+    def get_disk_name(disk):
+        return disk['source'].split('/')[-1]

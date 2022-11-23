@@ -13,6 +13,8 @@
 
 #include "yb/tserver/metrics_snapshotter.h"
 
+#include <sys/statvfs.h>
+
 #include <memory>
 #include <vector>
 #include <mutex>
@@ -32,65 +34,68 @@
 #include <string.h>
 #endif
 
-#include <sys/statvfs.h>
+#include <boost/algorithm/string.hpp>
+
 #include <rapidjson/document.h>
 
-#include <gflags/gflags.h>
 #include <glog/logging.h>
 
 #include "yb/common/jsonb.h"
 #include "yb/common/wire_protocol.h"
-#include "yb/util/bytes_formatter.h"
-#include "yb/util/date_time.h"
-#include "yb/util/decimal.h"
-#include "yb/util/varint.h"
-#include "yb/util/enums.h"
 
 #include "yb/client/client.h"
-#include "yb/client/client-test-util.h"
 #include "yb/client/error.h"
 #include "yb/client/schema.h"
 #include "yb/client/session.h"
-#include "yb/client/table.h"
 #include "yb/client/table_handle.h"
 #include "yb/client/yb_op.h"
+#include "yb/client/yb_table_name.h"
 
 #include "yb/gutil/ref_counted.h"
 #include "yb/gutil/stringprintf.h"
 #include "yb/gutil/strings/escaping.h"
-#include "yb/gutil/strings/split.h"
 #include "yb/gutil/strings/substitute.h"
+
+#include "yb/master/master_defaults.h"
+
 #include "yb/tablet/tablet.h"
 #include "yb/tablet/tablet_peer.h"
 #include "yb/tserver/tablet_server.h"
 #include "yb/tserver/tablet_server_options.h"
 #include "yb/tserver/ts_tablet_manager.h"
-#include "yb/util/capabilities.h"
-#include "yb/util/flag_tags.h"
-#include "yb/util/monotime.h"
-#include "yb/util/net/net_util.h"
-#include "yb/util/status.h"
-#include "yb/util/thread.h"
-#include "yb/util/mem_tracker.h"
 
 #include "yb/client/client_fwd.h"
 #include "yb/gutil/macros.h"
-#include "yb/util/tsan_util.h"
 
-#include <boost/algorithm/string.hpp>
+#include "yb/util/bytes_formatter.h"
+#include "yb/util/capabilities.h"
+#include "yb/util/date_time.h"
+#include "yb/util/decimal.h"
+#include "yb/util/enums.h"
+#include "yb/util/flags.h"
+#include "yb/util/logging.h"
+#include "yb/util/mem_tracker.h"
+#include "yb/util/metrics.h"
+#include "yb/util/monotime.h"
+#include "yb/util/net/net_util.h"
+#include "yb/util/status.h"
+#include "yb/util/status_log.h"
+#include "yb/util/thread.h"
+#include "yb/util/tsan_util.h"
+#include "yb/util/varint.h"
 
 using namespace std::literals;
 
-DEFINE_int32(metrics_snapshotter_interval_ms, 30 * 1000,
+DEFINE_UNKNOWN_int32(metrics_snapshotter_interval_ms, 30 * 1000,
              "Interval at which the metrics are snapshotted.");
 TAG_FLAG(metrics_snapshotter_interval_ms, advanced);
 
-DEFINE_string(metrics_snapshotter_tserver_metrics_whitelist,
+DEFINE_UNKNOWN_string(metrics_snapshotter_tserver_metrics_whitelist,
     "handler_latency_yb_client_read_local_sum,handler_latency_yb_client_read_local_count",
     "Tserver metrics to record in native metrics storage.");
 TAG_FLAG(metrics_snapshotter_tserver_metrics_whitelist, advanced);
 
-DEFINE_string(metrics_snapshotter_table_metrics_whitelist,
+DEFINE_UNKNOWN_string(metrics_snapshotter_table_metrics_whitelist,
     "rocksdb_sst_read_micros_sum,rocksdb_sst_read_micros_count",
     "Table metrics to record in native metrics storage.");
 TAG_FLAG(metrics_snapshotter_table_metrics_whitelist, advanced);
@@ -98,13 +103,13 @@ TAG_FLAG(metrics_snapshotter_table_metrics_whitelist, advanced);
 constexpr int kTServerMetricsSnapshotterYbClientDefaultTimeoutMs =
   yb::RegularBuildVsSanitizers(5, 60) * 1000;
 
-DEFINE_int32(tserver_metrics_snapshotter_yb_client_default_timeout_ms,
+DEFINE_UNKNOWN_int32(tserver_metrics_snapshotter_yb_client_default_timeout_ms,
     kTServerMetricsSnapshotterYbClientDefaultTimeoutMs,
     "Default timeout for the YBClient embedded into the tablet server that is used "
     "by metrics snapshotter.");
 TAG_FLAG(tserver_metrics_snapshotter_yb_client_default_timeout_ms, advanced);
 
-DEFINE_uint64(metrics_snapshotter_ttl_ms, 7 * 24 * 60 * 60 * 1000 /* 1 week */,
+DEFINE_UNKNOWN_uint64(metrics_snapshotter_ttl_ms, 7 * 24 * 60 * 60 * 1000 /* 1 week */,
              "Ttl for snapshotted metrics.");
 TAG_FLAG(metrics_snapshotter_ttl_ms, advanced);
 
@@ -112,6 +117,7 @@ DECLARE_int32(max_tables_metrics_breakdowns);
 
 using std::shared_ptr;
 using std::vector;
+using std::set;
 using strings::Substitute;
 
 namespace yb {
@@ -137,10 +143,10 @@ class MetricsSnapshotter::Thread {
   void RunThread();
   int GetMillisUntilNextMetricsSnapshot() const;
 
-  CHECKED_STATUS DoPrometheusMetricsSnapshot(const client::TableHandle& table,
+  Status DoPrometheusMetricsSnapshot(const client::TableHandle& table,
     shared_ptr<YBSession> session, const std::string& entity_type, const std::string& entity_id,
     const std::string& metric_name, int64_t metric_val, const rapidjson::Document* details);
-  CHECKED_STATUS DoMetricsSnapshot();
+  Status DoMetricsSnapshot();
 
   void FlushSession(const std::shared_ptr<YBSession>& session,
       const std::vector<std::shared_ptr<YBqlOp>>& ops = {});
@@ -230,9 +236,9 @@ MetricsSnapshotter::Thread::Thread(const TabletServerOptions& opts, TabletServer
   table_metrics_whitelist_ = CSVToSet(FLAGS_metrics_snapshotter_table_metrics_whitelist);
 
   async_client_init_.emplace(
-      "tserver_metrics_snapshotter_client", 0 /* num_reactors */,
-      FLAGS_tserver_metrics_snapshotter_yb_client_default_timeout_ms / 1000, "" /* tserver_uuid */,
-      &server->options(), server->metric_entity(), server->mem_tracker(),
+      "tserver_metrics_snapshotter_client",
+      std::chrono::milliseconds(FLAGS_tserver_metrics_snapshotter_yb_client_default_timeout_ms),
+      "" /* tserver_uuid */, &server->options(), server->metric_entity(), server->mem_tracker(),
       server->messenger());
 }
 
@@ -248,11 +254,11 @@ int MetricsSnapshotter::Thread::GetMillisUntilNextMetricsSnapshot() const {
 void MetricsSnapshotter::Thread::LogSessionErrors(const client::FlushStatus& flush_status) {
   const auto& errors = flush_status.errors;
 
-  int num_errors_to_log = 10;
+  size_t num_errors_to_log = 10;
 
   // Log only the first 10 errors.
   LOG_WITH_PREFIX(INFO) << errors.size() << " failed ops. First few errors follow";
-  int i = 0;
+  size_t i = 0;
   for (const auto& e : errors) {
     if (i == num_errors_to_log) {
       break;
@@ -267,9 +273,11 @@ void MetricsSnapshotter::Thread::LogSessionErrors(const client::FlushStatus& flu
   }
 }
 
-void MetricsSnapshotter::Thread::FlushSession(const std::shared_ptr<YBSession>& session,
-                       const std::vector<std::shared_ptr<YBqlOp>>& ops) {
-  auto flush_status = session->FlushAndGetOpsErrors();
+void MetricsSnapshotter::Thread::FlushSession(
+    const std::shared_ptr<YBSession>& session,
+    const std::vector<std::shared_ptr<YBqlOp>>& ops) {
+  // TODO(async_flush): https://github.com/yugabyte/yugabyte-db/issues/12173
+  auto flush_status = session->TEST_FlushAndGetOpsErrors();
   if (PREDICT_FALSE(!flush_status.status.ok())) {
     LogSessionErrors(flush_status);
     return;
@@ -303,7 +311,8 @@ Status MetricsSnapshotter::Thread::DoPrometheusMetricsSnapshot(const client::Tab
   }
 
   req->set_ttl(FLAGS_metrics_snapshotter_ttl_ms);
-  return session->Apply(op);
+  session->Apply(op);
+  return Status::OK();
 }
 
 Status MetricsSnapshotter::Thread::DoMetricsSnapshot() {
@@ -322,10 +331,12 @@ Status MetricsSnapshotter::Thread::DoMetricsSnapshot() {
   NMSWriter::EntityMetricsMap table_metrics;
   NMSWriter::MetricsMap server_metrics;
   NMSWriter nmswriter{&table_metrics, &server_metrics};
-  auto opt = MetricPrometheusOptions();
+  MetricPrometheusOptions opt;
+  MetricEntityOptions entity_opts;
+  entity_opts.metrics.push_back("*");
   opt.max_tables_metrics_breakdowns = FLAGS_max_tables_metrics_breakdowns;
   WARN_NOT_OK(
-      server_->metric_registry()->WriteForPrometheus(&nmswriter, opt),
+      server_->metric_registry()->WriteForPrometheus(&nmswriter, entity_opts, opt),
       "Couldn't write metrics for native metrics storage");
   for (const auto& kv : server_metrics) {
     if (tserver_metrics_whitelist_.find(kv.first) != tserver_metrics_whitelist_.end()) {

@@ -11,10 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_PG_CREATE_TABLE_H
-#define YB_TSERVER_PG_CREATE_TABLE_H
-
-#include "yb/tserver/tserver_fwd.h"
+#pragma once
 
 #include "yb/client/client_fwd.h"
 #include "yb/client/schema.h"
@@ -24,8 +21,10 @@
 #include "yb/common/partition.h"
 #include "yb/common/pg_types.h"
 
+#include "yb/tserver/pg_client.fwd.h"
+
 #include "yb/util/monotime.h"
-#include "yb/util/status.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 namespace tserver {
@@ -34,13 +33,17 @@ class PgCreateTable {
  public:
   explicit PgCreateTable(const PgCreateTableRequestPB& req);
 
-  CHECKED_STATUS Prepare();
-  CHECKED_STATUS Exec(
+  Status Prepare();
+  Status Exec(
       client::YBClient* client, const TransactionMetadata* transaction_metadata,
       CoarseTimePoint deadline);
 
+  const PgObjectId& indexed_table_id() const {
+    return indexed_table_id_;
+  }
+
  private:
-  CHECKED_STATUS AddColumn(const PgCreateColumnPB& req);
+  Status AddColumn(const PgCreateColumnPB& req);
   void EnsureYBbasectidColumnCreated();
   Result<std::vector<std::string>> BuildSplitRows(const client::YBSchema& schema);
 
@@ -55,7 +58,7 @@ class PgCreateTable {
   bool ybbasectid_added_ = false;
 };
 
+Status CreateSequencesDataTable(client::YBClient* client, CoarseTimePoint deadline);
+
 }  // namespace tserver
 }  // namespace yb
-
-#endif  // YB_TSERVER_PG_CREATE_TABLE_H

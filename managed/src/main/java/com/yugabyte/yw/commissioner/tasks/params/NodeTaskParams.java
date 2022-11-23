@@ -2,16 +2,18 @@
 
 package com.yugabyte.yw.commissioner.tasks.params;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.models.AvailabilityZone;
-import com.yugabyte.yw.models.Provider;
-import com.yugabyte.yw.models.Region;
+import io.ebean.annotation.JsonIgnore;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
-public class NodeTaskParams extends UniverseDefinitionTaskParams {
+@JsonIgnoreProperties(ignoreUnknown = true)
+@JsonDeserialize(converter = NodeTaskParams.Converter.class)
+public class NodeTaskParams extends UniverseDefinitionTaskParams implements INodeTaskParams {
   // The AZ in which the node should be. This can be used to find the region.
   public UUID azUuid;
 
@@ -26,31 +28,28 @@ public class NodeTaskParams extends UniverseDefinitionTaskParams {
   public UUID placementUuid;
 
   // The type of instance for this node
-  // TODO: currently only used for onprem cloud.
   public String instanceType;
 
   public boolean useSystemd;
 
+  @JsonIgnore private AvailabilityZone zone;
+
+  @Override
+  public String getNodeName() {
+    return nodeName;
+  }
+
+  @Override
+  public UUID getAzUuid() {
+    return azUuid;
+  }
+
+  @Override
   public AvailabilityZone getAZ() {
-    if (azUuid != null) {
-      return AvailabilityZone.find.query().fetch("region").where().idEq(azUuid).findOne();
+    if (zone == null) {
+      zone = INodeTaskParams.super.getAZ();
     }
-    return null;
-  }
-
-  public Region getRegion() {
-    if (getAZ() != null) {
-      return getAZ().region;
-    }
-    return null;
-  }
-
-  @JsonIgnore
-  public Provider getProvider() {
-    if (getAZ() != null) {
-      return getAZ().getProvider();
-    }
-    return null;
+    return zone;
   }
 
   // Less prominent params can be added to properties variable
@@ -67,4 +66,6 @@ public class NodeTaskParams extends UniverseDefinitionTaskParams {
   public String getProperty(String key) {
     return properties.getOrDefault(key, null);
   }
+
+  public static class Converter extends BaseConverter<NodeTaskParams> {}
 }

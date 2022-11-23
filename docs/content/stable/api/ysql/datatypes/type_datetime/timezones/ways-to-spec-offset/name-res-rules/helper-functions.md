@@ -1,18 +1,17 @@
 ---
 title: Helper functions for rules 2, 3, and 4 for specifying the UTC offset [YSQL]
 headerTitle: Helper functions for rules 2, 3, and 4 for specifying the UTC offset
-linkTitle: helper functions
+linkTitle: Helper functions
 description: Code to create helper functions for substantiating rules 2, 3, and 4 for specifying the UTC offset. [YSQL]
 menu:
   stable:
     identifier: helper-functions
     parent: name-res-rules
     weight: 50
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
-This page presents two helper functions. They are useful in substantiating [Rule 2](../rule-2/), [Rule 3](../rule-3/), and [Rule 4](../rule-4/)—explained in this page's peer pages: 
+This page presents two helper functions. They are useful in substantiating [Rule 2](../rule-2/), [Rule 3](../rule-3/), and [Rule 4](../rule-4/)—explained in this page's peer pages:
 
 ## function occurrences(string in text)
 
@@ -92,7 +91,7 @@ declare
 
   ts_plain                 constant timestamp     not null := '2021-06-07 12:00:00';
   ts_text                  constant text          not null := ts_plain::text;
-  ts_tz                             timestamptz   not null := now();
+  ts_tz                             timestamptz   not null := 'infinity'; -- any not null value will do
 
   set_timezone             constant text          not null := format(set_timezone_, string);
   timezone_invocation      constant text          not null := format(timezone_invocation_, string, ts_plain);
@@ -137,7 +136,6 @@ $body$;
 ```
 
 Test it for a selection of strings:
-
 
 ```plpgsql
 select x from legal_scopes_for_syntax_context('WEST');

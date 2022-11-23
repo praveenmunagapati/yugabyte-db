@@ -18,12 +18,9 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSDB_UTIL_PERF_CONTEXT_IMP_H
-#define YB_ROCKSDB_UTIL_PERF_CONTEXT_IMP_H
+#pragma once
 
 #include "yb/rocksdb/perf_context.h"
-#include "yb/rocksdb/util/stop_watch.h"
-#include "yb/util/stats/perf_step_timer.h"
 
 namespace rocksdb {
 
@@ -68,5 +65,3 @@ namespace rocksdb {
 #endif
 
 } // namespace rocksdb
-
-#endif // YB_ROCKSDB_UTIL_PERF_CONTEXT_IMP_H

@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_MASTER_TS_DESCRIPTOR_H
-#define YB_MASTER_TS_DESCRIPTOR_H
+#pragma once
 
 #include <shared_mutex>
 
@@ -39,18 +38,23 @@
 #include <mutex>
 #include <string>
 
+#include <gtest/gtest_prod.h>
+
+#include "yb/common/common_net.pb.h"
 #include "yb/common/hybrid_time.h"
 
+#include "yb/master/master_heartbeat.fwd.h"
 #include "yb/master/master_fwd.h"
-#include "yb/master/master.pb.h"
 
-#include "yb/tserver/tserver_service.proxy.h"
+#include "yb/rpc/rpc_fwd.h"
 
 #include "yb/util/capabilities.h"
 #include "yb/util/locks.h"
 #include "yb/util/monotime.h"
+#include "yb/util/net/net_util.h"
 #include "yb/util/physical_time.h"
-#include "yb/util/status.h"
+#include "yb/util/result.h"
+#include "yb/util/status_fwd.h"
 #include "yb/util/shared_ptr_tuple.h"
 #include "yb/util/shared_lock.h"
 
@@ -77,7 +81,6 @@ class TServerMetricsPB;
 typedef util::SharedPtrTuple<tserver::TabletServerAdminServiceProxy,
                              tserver::TabletServerServiceProxy,
                              consensus::ConsensusServiceProxy> ProxyTuple;
-typedef std::unordered_set<HostPort, HostPortHash> BlacklistSet;
 
 // Master-side view of a single tablet server.
 //
@@ -94,26 +97,28 @@ class TSDescriptor {
 
   static std::string generate_placement_id(const CloudInfoPB& ci);
 
-  virtual ~TSDescriptor();
+  virtual ~TSDescriptor() = default;
 
   // Set the last-heartbeat time to now.
   void UpdateHeartbeat(const TSHeartbeatRequestPB* req);
 
-  // Return the amount of time since the last heartbeat received
-  // from this TS.
+  // Return the amount of time since the last heartbeat received from this TS.
   MonoDelta TimeSinceHeartbeat() const;
+  MonoTime LastHeartbeatTime() const;
 
   // Register this tablet server.
-  CHECKED_STATUS Register(const NodeInstancePB& instance,
-                          const TSRegistrationPB& registration,
-                          CloudInfoPB local_cloud_info,
-                          rpc::ProxyCache* proxy_cache);
+  Status Register(const NodeInstancePB& instance,
+                  const TSRegistrationPB& registration,
+                  CloudInfoPB local_cloud_info,
+                  rpc::ProxyCache* proxy_cache);
 
   const std::string &permanent_uuid() const { return permanent_uuid_; }
   int64_t latest_seqno() const;
 
   bool has_tablet_report() const;
   void set_has_tablet_report(bool has_report);
+
+  bool has_faulty_drive() const;
 
   bool registered_through_heartbeat() const;
 
@@ -136,8 +141,6 @@ class TSDescriptor {
 
   std::string placement_uuid() const;
 
-  template<typename Lambda>
-  bool DoesRegistrationMatch(Lambda predicate) const;
   bool IsRunningOn(const HostPortPB& hp) const;
   bool IsBlacklisted(const BlacklistSet& blacklist) const;
 
@@ -146,7 +149,7 @@ class TSDescriptor {
 
   // Return an RPC proxy to a service.
   template <class TProxy>
-  CHECKED_STATUS GetProxy(std::shared_ptr<TProxy>* proxy) {
+  Status GetProxy(std::shared_ptr<TProxy>* proxy) {
     return GetOrCreateProxy(proxy, &proxies_.get<TProxy>());
   }
 
@@ -249,6 +252,11 @@ class TSDescriptor {
     return ts_metrics_.path_metrics;
   }
 
+  bool get_disable_tablet_split_if_default_ttl() {
+    SharedLock<decltype(lock_)> l(lock_);
+    return ts_metrics_.disable_tablet_split_if_default_ttl;
+  }
+
   void UpdateMetrics(const TServerMetricsPB& metrics);
 
   void GetMetrics(TServerMetricsPB* metrics);
@@ -277,7 +285,9 @@ class TSDescriptor {
     removed_.store(removed, std::memory_order_release);
   }
 
-  explicit TSDescriptor(std::string perm_id);
+  explicit TSDescriptor(
+      std::string perm_id,
+      RegisteredThroughHeartbeat registered_through_heartbeat = RegisteredThroughHeartbeat::kTrue);
 
   std::size_t NumTasks() const;
 
@@ -290,7 +300,7 @@ class TSDescriptor {
   virtual bool IsLiveAndHasReported() const;
 
  protected:
-  virtual CHECKED_STATUS RegisterUnlocked(const NodeInstancePB& instance,
+  virtual Status RegisterUnlocked(const NodeInstancePB& instance,
                                           const TSRegistrationPB& registration,
                                           CloudInfoPB local_cloud_info,
                                           rpc::ProxyCache* proxy_cache);
@@ -298,8 +308,8 @@ class TSDescriptor {
   mutable rw_spinlock lock_;
  private:
   template <class TProxy>
-  CHECKED_STATUS GetOrCreateProxy(std::shared_ptr<TProxy>* result,
-                                  std::shared_ptr<TProxy>* result_cache);
+  Status GetOrCreateProxy(std::shared_ptr<TProxy>* result,
+                          std::shared_ptr<TProxy>* result_cache);
 
   FRIEND_TEST(TestTSDescriptor, TestReplicaCreationsDecay);
   template<class ClusterLoadBalancerClass> friend class TestLoadBalancerBase;
@@ -327,6 +337,8 @@ class TSDescriptor {
 
     std::unordered_map<std::string, TSPathMetrics> path_metrics;
 
+    bool disable_tablet_split_if_default_ttl = false;
+
     void ClearMetrics() {
       total_memory_usage = 0;
       total_sst_file_size = 0;
@@ -336,6 +348,7 @@ class TSDescriptor {
       write_ops_per_sec = 0;
       uptime_seconds = 0;
       path_metrics.clear();
+      disable_tablet_split_if_default_ttl = false;
     }
   };
 
@@ -358,6 +371,9 @@ class TSDescriptor {
 
   // Set to true once this instance has reported all of its tablets.
   bool has_tablet_report_;
+
+  // Tablet server has at least one faulty drive.
+  bool has_faulty_drive_;
 
   // The number of times this tablet server has recently been selected to create a
   // tablet replica. This value decays back to 0 over time.
@@ -392,7 +408,7 @@ class TSDescriptor {
 
   // Did this tserver register by heartbeating through master. If false, we registered through
   // peer's Raft config.
-  RegisteredThroughHeartbeat registered_through_heartbeat_ = RegisteredThroughHeartbeat::kTrue;
+  const RegisteredThroughHeartbeat registered_through_heartbeat_;
 
   DISALLOW_COPY_AND_ASSIGN(TSDescriptor);
 };
@@ -415,6 +431,17 @@ Status TSDescriptor::GetOrCreateProxy(std::shared_ptr<TProxy>* result,
   return Status::OK();
 }
 
+struct cloud_equal_to {
+  bool operator()(const yb::CloudInfoPB& x, const yb::CloudInfoPB& y) const {
+    return x.placement_cloud() == y.placement_cloud() &&
+           x.placement_region() == y.placement_region() && x.placement_zone() == y.placement_zone();
+  }
+};
+
+struct cloud_hash {
+  std::size_t operator()(const yb::CloudInfoPB& ci) const {
+    return std::hash<std::string>{}(TSDescriptor::generate_placement_id(ci));
+  }
+};
 } // namespace master
 } // namespace yb
-#endif // YB_MASTER_TS_DESCRIPTOR_H

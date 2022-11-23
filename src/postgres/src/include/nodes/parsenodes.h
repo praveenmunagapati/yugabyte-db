@@ -1682,7 +1682,7 @@ typedef enum ObjectType
 	OBJECT_STATISTIC_EXT,
 	OBJECT_TABCONSTRAINT,
 	OBJECT_TABLE,
-	OBJECT_TABLEGROUP,
+	OBJECT_YBTABLEGROUP,
 	OBJECT_TABLESPACE,
 	OBJECT_TRANSFORM,
 	OBJECT_TRIGGER,
@@ -1823,6 +1823,7 @@ typedef struct AlterTableCmd	/* one subcommand of an ALTER TABLE */
 								 * constraint, or parent table */
 	DropBehavior behavior;		/* RESTRICT or CASCADE for DROP cases */
 	bool		missing_ok;		/* skip error if missing? */
+	bool		yb_is_add_primary_key;	/* checks if adding primary key */
 } AlterTableCmd;
 
 
@@ -2033,7 +2034,8 @@ typedef struct CreateStmt
 	OnCommitAction oncommit;	/* what do we do at COMMIT? */
 	char	   *tablespacename; /* table space to use, or NULL */
 	bool		if_not_exists;	/* just do nothing if it already exists? */
-	struct OptTableGroup *tablegroup; /* Tablegroup node - NULL if not provided */
+
+	char	   *tablegroupname; /* tablegroup to use, or NULL */
 	struct OptSplit *split_options; /* SPLIT statement options */
 } CreateStmt;
 
@@ -2191,29 +2193,16 @@ typedef struct OptSplit
 typedef struct CreateTableGroupStmt
 {
 	NodeTag		type;
-	char 		 *tablegroupname;
-	RoleSpec *owner;
+	char 	   *tablegroupname;
+	RoleSpec   *owner;
 	List 	   *options;
+	char 	   *tablespacename;
+	/*
+	 * Whether this tablegroup is created implicitly by YB
+	 * or created explicitly by users.
+	 */
+	bool		implicit;
 } CreateTableGroupStmt;
-
-typedef struct DropTableGroupStmt
-{
-	NodeTag		type;
-	char 		 *tablegroupname;
-} DropTableGroupStmt;
-
-/* ----------------------
- * YugaByte Tablegroup options
- * ----------------------
-*/
-
-typedef struct OptTableGroup
-{
-	NodeTag type;
-
-	bool	has_tablegroup;
-	char   *tablegroup_name;
-} OptTableGroup;
 
 /* ----------------------
  *		Create/Drop Table Space Statements
@@ -2798,7 +2787,6 @@ typedef struct IndexStmt
 	Oid			relationId;		/* OID of relation to build index on */
 	char	   *accessMethod;	/* name of access method (eg. btree) */
 	char	   *tableSpace;		/* tablespace, or NULL for default */
-	OptTableGroup *tablegroup;	/* Tablegroup node - NULL if not provided */
 	List	   *indexParams;	/* columns to index: a list of IndexElem */
 	List	   *indexIncludingParams;	/* additional columns to index: a list
 										 * of IndexElem */
@@ -2814,7 +2802,7 @@ typedef struct IndexStmt
 	bool		deferrable;		/* is the constraint DEFERRABLE? */
 	bool		initdeferred;	/* is the constraint INITIALLY DEFERRED? */
 	bool		transformed;	/* true when transformIndexStmt is finished */
-	bool		concurrent;		/* should this be a concurrent index build? */
+	YbConcurrencyContext concurrent;	/* is this a concurrent index build? */
 	bool		if_not_exists;	/* just do nothing if index already exists? */
 
 	OptSplit *split_options; /* SPLIT statement options */

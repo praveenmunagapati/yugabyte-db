@@ -38,6 +38,8 @@
 
 #include "yb/rpc/outbound_call.h"
 
+#include "yb/util/result.h"
+
 namespace yb { namespace rpc {
 
 RpcController::RpcController() {
@@ -108,8 +110,12 @@ const ErrorStatusPB* RpcController::error_response() const {
   return nullptr;
 }
 
-Result<Slice> RpcController::GetSidecar(int idx) const {
-  return call_->GetSidecar(idx);
+Status RpcController::AssignSidecarTo(int idx, std::string* out) const {
+  return call_->AssignSidecarTo(idx, out);
+}
+
+size_t RpcController::TransferSidecars(rpc::RpcContext* dest) {
+  return call_->TransferSidecars(dest);
 }
 
 void RpcController::set_timeout(const MonoDelta& timeout) {
@@ -136,6 +142,10 @@ int32_t RpcController::call_id() const {
     return call_->call_id();
   }
   return -1;
+}
+
+CallResponsePtr RpcController::response() const {
+  return CallResponsePtr(call_, &call_->call_response_);
 }
 
 } // namespace rpc

@@ -1,3 +1,9 @@
+# Settings in the [build] context are global and are applied to
+# all contexts unless otherwise overridden by more specific contexts.
+[build]
+  # Default build command.
+  command = "npm run build"
+
 # Deploy contexts
 # Environment variables here override variables set in the web UI.
 #
@@ -5,24 +11,24 @@
 # https://docs.netlify.com/configure-builds/file-based-configuration/#deploy-contexts
 
 [context.deploy-preview.environment]
-  HUGO_VERSION = "0.88.1"
+  HUGO_VERSION = "0.104.3"
   NODE_VERSION = "16"
   CXXFLAGS = "-std=c++17"
 
 [context.branch-deploy.environment]
-  HUGO_VERSION = "0.88.1"
+  HUGO_VERSION = "0.104.3"
   NODE_VERSION = "16"
   CXXFLAGS = "-std=c++17"
 
 [context.production.environment]
-  HUGO_VERSION = "0.88.1"
+  HUGO_VERSION = "0.104.3"
   NODE_VERSION = "16"
   CXXFLAGS = "-std=c++17"
 
 # Redirects
 # - Default status is a 301 unless otherwise specified.
 # - First match wins: put wildcards AFTER specific paths!
-# - Wildcards include empty matches: /v1.0/* WILL match /v1.0 
+# - Wildcards include empty matches: /v1.0/* WILL match /v1.0
 #
 # docs: https://docs.netlify.com/routing/redirects/
 #
@@ -35,57 +41,296 @@
   to = "/images/:splat"
   status = 200
 
-# Legal, FAQ, and release notes should always point to the latest,
-# even if we have content in the older version's folder.
+# Bypass the landing page
+
+# [[redirects]]
+#   from = "/"
+#   to = "/preview/"
+#   force = true
+
+# Catch-all for old links to /latest (now called /preview)
 
 [[redirects]]
-  from = "/"
-  to = "/latest/"
+  from = "/latest/*"
+  to = "/preview/:splat"
+  force = true
+
+# Redirect old cloud docs to root of current
+
+#[[redirects]]
+#  from = "/:version/yugabyte-cloud/cloud-quickstart/"
+#  to = "/preview/yugabyte-cloud/cloud-quickstart/"
+#  force = true
+
+[[redirects]]
+  from = "/:version/yugabyte-cloud/cloud-quickstart/qs-add/"
+  to = "/preview/yugabyte-cloud/cloud-quickstart/"
   force = true
 
 [[redirects]]
+  from = "/:version/yugabyte-cloud/cloud-quickstart/qs-connect/"
+  to = "/preview/yugabyte-cloud/cloud-quickstart/"
+  force = true
+
+[[redirects]]
+  from = "/:version/yugabyte-cloud/*"
+  to = "/preview/yugabyte-cloud/"
+  force = true
+
+# Redirect EOL docs to the archive site
+# (And note that v1.0-1.2 don't exist)
+
+[[redirects]]
+  from = "/v1.0/*"
+  to = "https://docs-archive.yugabyte.com/"
+  force = true
+
+[[redirects]]
+  from = "/v1.1/*"
+  to = "https://docs-archive.yugabyte.com/"
+  force = true
+
+[[redirects]]
+  from = "/v1.2/*"
+  to = "https://docs-archive.yugabyte.com/"
+  force = true
+
+[[redirects]]
+  from = "/v1.3/*"
+  to = "https://docs-archive.yugabyte.com/v1.3/"
+  force = true
+
+[[redirects]]
+  from = "/v2.0/*"
+  to = "https://docs-archive.yugabyte.com/v2.0/"
+  force = true
+
+[[redirects]]
+  from = "/v2.1/*"
+  to = "https://docs-archive.yugabyte.com/v2.1/"
+  force = true
+
+[[redirects]]
+  from = "/v2.2/*"
+  to = "https://docs-archive.yugabyte.com/v2.2/"
+  force = true
+
+[[redirects]]
+  from = "/v2.4/*"
+  to = "https://docs-archive.yugabyte.com/v2.4/"
+  force = true
+
+# Build an app was in quick-start, now in develop
+
+[[redirects]]
+  from = "/preview/yugabyte-cloud/cloud-quickstart/cloud-build-apps/cloud-ysql-c/*"
+  to = "/preview/develop/build-apps/c/cloud-ysql-c/"
+  force = true
+[[redirects]]
+  from = "/preview/yugabyte-cloud/cloud-quickstart/cloud-build-apps/cloud-ysql-csharp/*"
+  to = "/preview/develop/build-apps/csharp/cloud-ysql-csharp/"
+  force = true
+[[redirects]]
+  from = "/preview/yugabyte-cloud/cloud-quickstart/cloud-build-apps/cloud-ysql-cpp/*"
+  to = "/preview/develop/build-apps/cpp/cloud-ysql-cpp/"
+  force = true
+[[redirects]]
+  from = "/preview/yugabyte-cloud/cloud-quickstart/cloud-build-apps/cloud-ysql-go/*"
+  to = "/preview/develop/build-apps/go/cloud-ysql-go/"
+  force = true
+[[redirects]]
+  from = "/preview/yugabyte-cloud/cloud-quickstart/cloud-build-apps/cloud-ysql-yb-jdbc/*"
+  to = "/preview/develop/build-apps/java/cloud-ysql-jdbc/"
+  force = true
+[[redirects]]
+  from = "/preview/yugabyte-cloud/cloud-quickstart/cloud-build-apps/cloud-ysql-node/*"
+  to = "/preview/develop/build-apps/nodejs/cloud-ysql-node/"
+  force = true
+[[redirects]]
+  from = "/preview/yugabyte-cloud/cloud-quickstart/cloud-build-apps/cloud-ysql-php/*"
+  to = "/preview/develop/build-apps/php/cloud-ysql-php/"
+  force = true
+[[redirects]]
+  from = "/preview/yugabyte-cloud/cloud-quickstart/cloud-build-apps/cloud-ysql-python/*"
+  to = "/preview/develop/build-apps/python/cloud-ysql-python/"
+  force = true
+[[redirects]]
+  from = "/preview/yugabyte-cloud/cloud-quickstart/cloud-build-apps/cloud-ysql-ruby/*"
+  to = "/preview/develop/build-apps/ruby/cloud-ysql-ruby/"
+  force = true
+[[redirects]]
+  from = "/preview/yugabyte-cloud/cloud-quickstart/cloud-build-apps/cloud-ysql-rust/*"
+  to = "/preview/develop/build-apps/rust/cloud-ysql-rust/"
+  force = true
+
+# Build an app for aiopg, now in integrations
+
+[[redirects]]
+  from = "/preview/develop/build-apps/python/ysql-aiopg/"
+  to = "/preview/integrations/aiopg/"
+  force = true
+
+# Manual import was in migrate, now in manage
+
+[[redirects]]
+  from = "/preview/migrate/manual-import/migrate-schema/"
+  to = "/preview/manage/data-migration/bulk-export-ysql/"
+  force = true
+
+[[redirects]]
+  from = "/preview/migrate/manual-import/migrate-application/"
+  to = "/preview/manage/data-migration/bulk-export-ysql/"
+  force = true
+
+[[redirects]]
+  from = "/preview/migrate/manual-import/export-data/"
+  to = "/preview/manage/data-migration/bulk-export-ysql/"
+  force = true
+
+[[redirects]]
+  from = "/preview/migrate/manual-import/prepare-cluster/"
+  to = "/preview/manage/data-migration/bulk-import-ysql/"
+  force = true
+
+[[redirects]]
+  from = "/preview/migrate/manual-import/import-data/"
+  to = "/preview/manage/data-migration/bulk-import-ysql/"
+  force = true
+
+[[redirects]]
+  from = "/preview/migrate/manual-import/verify-migration/"
+  to = "/preview/manage/data-migration/bulk-import-ysql/"
+  force = true
+
+[[redirects]]
+  from = "/preview/migrate/migrate-from-postgresql/"
+  to = "/preview/manage/data-migration/bulk-export-ysql/"
+  force = true
+
+[[redirects]]
+  from = "/stable/migrate/manual-import/migrate-schema/"
+  to = "/stable/manage/data-migration/bulk-export-ysql/"
+  force = true
+
+[[redirects]]
+  from = "/stable/migrate/manual-import/migrate-application/"
+  to = "/stable/manage/data-migration/bulk-export-ysql/"
+  force = true
+
+[[redirects]]
+  from = "/stable/migrate/manual-import/export-data/"
+  to = "/stable/manage/data-migration/bulk-export-ysql/"
+  force = true
+
+[[redirects]]
+  from = "/stable/migrate/manual-import/prepare-cluster/"
+  to = "/stable/manage/data-migration/bulk-import-ysql/"
+  force = true
+
+[[redirects]]
+  from = "/stable/migrate/manual-import/import-data/"
+  to = "/stable/manage/data-migration/bulk-import-ysql/"
+  force = true
+
+[[redirects]]
+  from = "/stable/migrate/manual-import/verify-migration/"
+  to = "/stable/manage/data-migration/bulk-import-ysql/"
+  force = true
+
+[[redirects]]
+  from = "/stable/migrate/migrate-from-postgresql/"
+  to = "/stable/manage/data-migration/bulk-export-ysql/"
+  force = true
+
+# Redirect for YugabyteDB Voyager
+
+[[redirects]]
+  from = "/:version/migrate/yb-voyager/*"
+  to = "/:version/migrate/:splat"
+  force = true
+
+# Redirect older versions of specific sections
+
+[[redirects]]
   from = "/:version/comparisons/*"
-  to = "/latest/comparisons/:splat"
+  to = "/preview/faq/comparisons/:splat"
   force = true
 
 [[redirects]]
   from = "/:version/contribute/*"
-  to = "/latest/contribute/:splat"
+  to = "/preview/contribute/:splat"
   force = true
 
 [[redirects]]
   from = "/:version/faq/*"
-  to = "/latest/faq/:splat"
+  to = "/preview/faq/:splat"
+  force = true
+
+[[redirects]]
+  from = "/:version/integrations/smart-driver/"
+  to = "/preview/reference/drivers/java/yugabyte-jdbc-reference/"
+  force = true
+
+[[redirects]]
+  from = "/:version/integrations/jdbc-driver/"
+  to = "/preview/reference/drivers/java/yugabyte-jdbc-reference/"
+  force = true
+
+[[redirects]]
+  from = "/:version/integrations/*"
+  to = "/preview/integrations/:splat"
+  force = true
+
+# (this is the old version of integrations)
+[[redirects]]
+  from = "/:version/develop/ecosystem-integrations/*"
+  to = "/preview/integrations/"
   force = true
 
 [[redirects]]
   from = "/:version/legal/*"
-  to = "/latest/legal/:splat"
+  to = "/preview/legal/:splat"
   force = true
 
 [[redirects]]
   from = "/:version/releases/*"
-  to = "/latest/releases/:splat"
+  to = "/preview/releases/:splat"
   force = true
-
-# Troubleshooting should point to latest
 
 [[redirects]]
   from = "/:version/troubleshoot/*"
-  to = "/latest/troubleshoot/:splat"
+  to = "/preview/troubleshoot/:splat"
   force = true
 
+[[redirects]]
+  from = "/:version/yedis/*"
+  to = "/preview/yedis/"
+  force = true
+
+# Make sure stable and preview quick-starts don't get redirected.
+# (All other versions get redirected to preview.)
+
+[[redirects]]
+  from = "/stable/quick-start/*"
+  to = "/stable/quick-start/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/preview/quick-start/*"
+  to = "/preview/quick-start/:splat"
+  status = 200
+
 # Stable quick-starts need defaults,
-# since archiving from /latest removes aliases
+# since archiving from /preview removes aliases
 
 [[redirects]]
   from = "/stable/quick-start/install/"
-  to = "/stable/quick-start/install/macos/"
+  to = "/stable/quick-start/#install-yugabytedb"
   force = true
 
 [[redirects]]
   from = "/stable/quick-start/create-local-cluster/"
-  to = "/stable/quick-start/create-local-cluster/macos/"
+  to = "/stable/quick-start/#create-a-local-cluster"
   force = true
 
 [[redirects]]
@@ -93,29 +338,132 @@
   to = "/stable/quick-start/explore/ysql/"
   force = true
 
-# Misc old docs with paths that have changed
-
 [[redirects]]
-  from = "/v1.1/explore/cloud-native/binary/observability/"
-  to = "/latest/explore/observability/"
+  from = ":version/quick-start/*"
+  to = "/preview/quick-start-yugabytedb-managed/"
   force = true
 
-# Docs prior to v1.3 are not online
+# Yugabyte Extensions top hit
 
 [[redirects]]
-  from = "/v1.0/*"
-  to = "/latest/:splat"
-  force = true
-
-[[redirects]]
-  from = "/v1.1/*"
-  to = "/latest/:splat"
+  from = "/preview/api/ysql/extensions/"
+  to = "/preview/explore/ysql-language-features/pg-extensions/"
   force = true
 
 [[redirects]]
-  from = "/v1.2/*"
-  to = "/latest/:splat"
+  from = "/quick-start/install/"
+  to = "/preview/quick-start/#install-yugabytedb"
   force = true
+
+[[redirects]]
+  from = "/:version/quick-start/install/linux/"
+  to = "/preview/quick-start/linux/#install-yugabytedb"
+  force = true
+
+[[redirects]]
+  from = "/:version/quick-start/install/docker/"
+  to = "/preview/quick-start/docker/#install-yugabytedb"
+  force = true
+
+[[redirects]]
+  from = "/:version/quick-start/install/kubernetes/"
+  to = "/preview/quick-start/kubernetes/#install-yugabytedb"
+  force = true
+
+[[redirects]]
+  from = "/:version/quick-start/install/*"
+  to = "/preview/quick-start/#install-yugabytedb"
+  force = true
+
+[[redirects]]
+  from = "/quick-start/create-local-cluster/"
+  to = "/preview/quick-start/#create-a-local-cluster"
+  force = true
+
+[[redirects]]
+  from = "/:version/quick-start/create-local-cluster/linux/"
+  to = "/preview/quick-start/linux/#create-a-local-cluster"
+  force = true
+
+[[redirects]]
+  from = "/:version/quick-start/create-local-cluster/docker/"
+  to = "/preview/quick-start/docker/#create-a-local-cluster"
+  force = true
+
+[[redirects]]
+  from = "/:version/quick-start/create-local-cluster/kubernetes/"
+  to = "/preview/quick-start/kubernetes/#create-a-local-cluster"
+  force = true
+
+[[redirects]]
+  from = "/:version/quick-start/create-local-cluster/*"
+  to = "/preview/quick-start/#create-a-local-cluster"
+  force = true
+
+[[redirects]]
+  from = "/:version/quick-start/create-local-cluster/*"
+  to = "/preview/quick-start/#create-a-local-cluster"
+  force = true
+
+# Build an application redirects to Drivers and ORMs
+
+[[redirects]]
+   from = "/preview/develop/build-apps/java/ysql-yb-jdbc/"
+   to = "/preview/drivers-orms/java/yugabyte-jdbc/"
+
+[[redirects]]
+   from = "/preview/develop/build-apps/java/ysql-jdbc/"
+   to = "/preview/drivers-orms/java/postgres-jdbc/"
+
+[[redirects]]
+   from = "/preview/develop/build-apps/ruby/ysql-rails-activerecord/"
+   to = "/preview/drivers-orms/ruby/activerecord/"
+
+[[redirects]]
+   from = "/preview/develop/build-apps/python/ysql-psycopg2/"
+   to = "/preview/drivers-orms/python/postgres-psycopg2/"
+
+[[redirects]]
+   from = "/preview/develop/build-apps/nodejs/ysql-pg/"
+   to = "/preview/drivers-orms/nodejs/yugabyte-node-driver/"
+
+[[redirects]]
+   from = "/preview/develop/build-apps/csharp/ysql/"
+   to = "/preview/drivers-orms/csharp/postgres-npgsql/"
+
+[[redirects]]
+   from = "/preview/develop/build-apps/go/ysql-yb-pgx/"
+   to = "/preview/drivers-orms/go/yb-pgx/"
+
+[[redirects]]
+   from = "/preview/develop/build-apps/go/ysql-pgx/"
+   to = "/preview/drivers-orms/go/pgx/"
+
+[[redirects]]
+   from = "/preview/develop/build-apps/go/ysql-pq/"
+   to = "/preview/drivers-orms/go/pq/"
+
+[[redirects]]
+   from = "/preview/develop/build-apps/:lang/:driver/"
+   to = "/preview/drivers-orms/:lang/:driver/"
+
+# Foreign data wrappers from SQL features to Advanced features
+
+[[redirects]]
+   from = "/preview/explore/ysql-language-features/foreign-data-wrappers/"
+   to = "/preview/explore/ysql-language-features/advanced-features/foreign-data-wrappers/"
+
+# Fault tolerance redirects
+
+[[redirects]]
+   from = "/preview/explore/fault-tolerance/*"
+   to = "/preview/explore/fault-tolerance/macos/"
+
+# Prometheus integration redirects
+
+[[redirects]]
+   from = "/preview/explore/observability/prometheus-integration/*"
+   to = "/preview/explore/observability/prometheus-integration/macos/"
 
 # Hugo resource caching plugin configuration
 # https://github.com/cdeleeuwe/netlify-plugin-hugo-cache-resources#readme
@@ -128,3 +476,17 @@
     debug = true
     # Relative path to source directory in case you use Hugo's "--s" option
     srcdir = "docs"
+
+[[headers]]
+  #
+  # https://docs.netlify.com/configure-builds/file-based-configuration/#headers
+  #
+  for = "/*"
+  [headers.values]
+    Strict-Transport-Security = "max-age=31536000; includeSubDomains"
+    Content-Security-Policy = "default-src 'self' 'unsafe-inline'; connect-src 'self' https://ka-f.fontawesome.com/releases/ https://www.google-analytics.com/ https://stats.g.doubleclick.net/ https://umbcujcbe8-dsn.algolia.net/ https://umbcujcbe8-1.algolianet.com/ https://umbcujcbe8-2.algolianet.com/ https://umbcujcbe8-3.algolianet.com/ https://raw.githubusercontent.com/; script-src 'self' 'unsafe-eval' 'unsafe-inline' https://cdnjs.cloudflare.com https://maxcdn.bootstrapcdn.com https://cdn.jsdelivr.net https://www.googletagmanager.com/ https://kit.fontawesome.com/ https://www.google-analytics.com/ https://umbcujcbe8-dsn.algolia.net/ https://umbcujcbe8-1.algolianet.com/ https://umbcujcbe8-2.algolianet.com/ https://umbcujcbe8-3.algolianet.com/ https://code.jquery.com/jquery-3.6.0.min.js https://netlify-cdp-loader.netlify.app/; style-src 'self' 'unsafe-inline' https://maxcdn.bootstrapcdn.com https://cdnjs.cloudflare.com https://fonts.googleapis.com https://use.fontawesome.com https://docs.yugabyte.com https://ka-f.fontawesome.com/releases/ https://cdn.jsdelivr.net/gh/rastikerdar/vazir-font@v27.0.1/dist/font-face.css https://cdn.jsdelivr.net/npm/docsearch.js@2/dist/cdn/docsearch.min.css; font-src 'self' https://docs.yugabyte.com/fonts/ https://cdnjs.cloudflare.com/ https://cdn.jsdelivr.net/ https://use.fontawesome.com https://fonts.gstatic.com https://ka-f.fontawesome.com/releases/; object-src 'none'; img-src 'self' https://docs.yugabyte.com/images/favicon.ico https://www.google-analytics.com/ https://raw.githubusercontent.com/ https://portal.azure.com/ https://docs.camunda.org/; child-src 'self' 'unsafe-inline' https://www.youtube.com/ https://app.netlify.com/; frame-ancestors 'self' https://deploy-preview-12849--infallible-bardeen-164bc9.netlify.app/ https://yugabyte.thinkific.com/ https://*.yugabyte.com/;"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin"
+    Permissions-Policy = "disabled"
+    X-XSS-Protection = "1"
+#    X-Frame-Options = "SAMEORIGIN"

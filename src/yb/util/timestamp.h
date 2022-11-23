@@ -11,12 +11,11 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_TIMESTAMP_H_
-#define YB_UTIL_TIMESTAMP_H_
+#pragma once
 
 #include <inttypes.h>
 #include <string>
-#include "yb/util/status.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 
@@ -26,7 +25,7 @@ class Timestamp {
   explicit Timestamp(int64_t value) : value_(value) {}
   Timestamp() : value_(0) {}
   int64_t ToInt64() const;
-  CHECKED_STATUS FromInt64(int64_t value);
+  Status FromInt64(int64_t value);
 
   std::string ToString() const;
 
@@ -82,5 +81,3 @@ inline std::ostream &operator <<(std::ostream &o, const Timestamp &timestamp) {
 }
 
 } // namespace yb
-
-#endif // YB_UTIL_TIMESTAMP_H_

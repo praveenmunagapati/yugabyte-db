@@ -37,13 +37,14 @@
 #include <mutex>
 #include <string>
 
-#include <gflags/gflags.h>
-#include "yb/gutil/strings/substitute.h"
+#include "yb/util/flags.h"
+
 #include "yb/tablet/maintenance_manager.h"
 #include "yb/tablet/tablet.h"
-#include "yb/tablet/tablet_metrics.h"
-#include "yb/util/flag_tags.h"
+#include "yb/tablet/tablet_peer.h"
+
 #include "yb/util/metrics.h"
+#include "yb/util/logging.h"
 
 METRIC_DEFINE_gauge_uint32(table, log_gc_running,
                            "Log GCs Running",
@@ -64,21 +65,26 @@ using strings::Substitute;
 // LogGCOp.
 //
 
-LogGCOp::LogGCOp(TabletPeer* tablet_peer)
+LogGCOp::LogGCOp(TabletPeer* tablet_peer, const TabletPtr& tablet)
     : MaintenanceOp(
-          StringPrintf("LogGCOp(%s)", tablet_peer->tablet()->tablet_id().c_str()),
+          StringPrintf("LogGCOp(%s)", tablet->tablet_id().c_str()),
           MaintenanceOp::LOW_IO_USAGE),
+      tablet_(tablet),
       tablet_peer_(tablet_peer),
       log_gc_duration_(
-          METRIC_log_gc_duration.Instantiate(tablet_peer->tablet()->GetTableMetricsEntity())),
+          METRIC_log_gc_duration.Instantiate(tablet->GetTableMetricsEntity())),
       log_gc_running_(
-          METRIC_log_gc_running.Instantiate(tablet_peer->tablet()->GetTableMetricsEntity(), 0)),
+          METRIC_log_gc_running.Instantiate(tablet->GetTableMetricsEntity(), 0)),
       sem_(1) {}
 
 void LogGCOp::UpdateStats(MaintenanceOpStats* stats) {
-  int64_t retention_size;
+  int64_t retention_size = 0;
 
-  if (!tablet_peer_->GetGCableDataSize(&retention_size).ok()) {
+  auto status = tablet_peer_->GetGCableDataSize(&retention_size);
+  if (!status.ok()) {
+    YB_LOG_EVERY_N_SECS(WARNING, 1)
+        << tablet_peer_->LogPrefix()
+        << "failed to get GC-able data size: " << status;
     return;
   }
   stats->set_logs_retained_bytes(retention_size);

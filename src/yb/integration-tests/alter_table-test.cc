@@ -33,12 +33,12 @@
 #include <map>
 #include <string>
 #include <utility>
-#include <boost/assign.hpp>
-#include <gflags/gflags.h>
+
+#include "yb/util/flags.h"
 #include <gtest/gtest.h>
 
-#include "yb/client/client.h"
 #include "yb/client/client-test-util.h"
+#include "yb/client/client.h"
 #include "yb/client/error.h"
 #include "yb/client/schema.h"
 #include "yb/client/session.h"
@@ -49,35 +49,42 @@
 #include "yb/client/yb_op.h"
 
 #include "yb/common/ql_value.h"
+#include "yb/common/schema.h"
+
+#include "yb/consensus/log.h"
 
 #include "yb/gutil/stl_util.h"
 #include "yb/gutil/strings/join.h"
 #include "yb/gutil/strings/substitute.h"
+
 #include "yb/integration-tests/mini_cluster.h"
 #include "yb/integration-tests/yb_mini_cluster_test_base.h"
+
 #include "yb/master/mini_master.h"
-#include "yb/master/master.h"
-#include "yb/master/master.pb.h"
-#include "yb/master/master-test-util.h"
 #include "yb/master/sys_catalog.h"
-#include "yb/server/hybrid_clock.h"
+
 #include "yb/tablet/tablet.h"
+#include "yb/tablet/tablet_metadata.h"
 #include "yb/tablet/tablet_peer.h"
+
 #include "yb/tserver/mini_tablet_server.h"
 #include "yb/tserver/tablet_server.h"
 #include "yb/tserver/ts_tablet_manager.h"
+
 #include "yb/util/atomic.h"
 #include "yb/util/faststring.h"
 #include "yb/util/metrics.h"
 #include "yb/util/random.h"
 #include "yb/util/random_util.h"
-#include "yb/util/stopwatch.h"
+#include "yb/util/status_log.h"
 #include "yb/util/test_util.h"
+#include "yb/util/thread.h"
 
 using namespace std::literals;
 
 DECLARE_bool(enable_data_block_fsync);
 DECLARE_bool(enable_maintenance_manager);
+DECLARE_bool(enable_ysql);
 DECLARE_bool(flush_rocksdb_on_shutdown);
 DECLARE_int32(heartbeat_interval_ms);
 DECLARE_bool(use_hybrid_clock);
@@ -110,6 +117,8 @@ using master::MiniMaster;
 using std::map;
 using std::pair;
 using std::vector;
+using std::string;
+using std::max;
 using tablet::TabletPeer;
 using tserver::MiniTabletServer;
 
@@ -264,10 +273,9 @@ class AlterTableTest : public YBMiniClusterTestBase<MiniCluster>,
         .Create();
   }
 
-  int GetSysCatalogWrites() {
+  int64_t GetSysCatalogWrites() {
     auto GetSysCatalogMetric = [&](CounterPrototype& prototype) -> int64_t {
-      auto metrics = cluster_->mini_master()->master()->catalog_manager()->sys_catalog()
-          ->GetMetricEntity();
+      auto metrics = cluster_->mini_master()->sys_catalog().GetMetricEntity();
       return prototype.Instantiate(metrics)->value();
     };
     return GetSysCatalogMetric(METRIC_sys_catalog_peer_write_count);
@@ -301,6 +309,7 @@ class ReplicatedAlterTableTest : public AlterTableTest {
 const YBTableName AlterTableTest::kTableName(YQL_DATABASE_CQL, "my_keyspace", "fake-table");
 
 INSTANTIATE_TEST_CASE_P(BatchSize, AlterTableTest, ::testing::Values(1, 10));
+INSTANTIATE_TEST_CASE_P(BatchSize, ReplicatedAlterTableTest, ::testing::Values(1, 10));
 
 // Simple test to verify that the "alter table" command sent and executed
 // on the TS handling the tablet of the altered table.
@@ -357,13 +366,16 @@ TEST_P(AlterTableTest, TestAlterOnTSRestart) {
     ASSERT_TRUE(s.IsTimedOut());
   }
 
-  // Verify that the Schema is the old one
+  LOG(INFO) << "Original " << schema_.ToString();
+  // Verify that the Schema is the new one.
   YBSchema schema;
   PartitionSchema partition_schema;
   bool alter_in_progress = false;
   string table_id;
   ASSERT_OK(client_->GetTableSchema(kTableName, &schema, &partition_schema));
-  ASSERT_TRUE(schema_.Equals(schema));
+  LOG(INFO) << "Got " << schema.ToString();
+  ASSERT_EQ(3, schema.num_columns()); // New schema.
+
   ASSERT_OK(client_->IsAlterTableInProgress(kTableName, table_id, &alter_in_progress));
   ASSERT_TRUE(alter_in_progress);
 
@@ -444,7 +456,7 @@ void AlterTableTest::InsertRows(int start_row, int num_rows) {
     }
 
     ops.push_back(op);
-    ASSERT_OK(session->Apply(op));
+    session->Apply(op);
 
     if (ops.size() >= 50) {
       FlushSessionOrDie(session, ops);
@@ -469,16 +481,12 @@ void AlterTableTest::UpdateRow(int32_t row_key,
   for (const auto& e : updates) {
     table.AddInt32ColumnValue(update->mutable_request(), e.first, e.second);
   }
-  CHECK_OK(session->Apply(update));
+  session->Apply(update);
   FlushSessionOrDie(session);
 }
 
 std::vector<string> AlterTableTest::ScanToStrings() {
-  client::TableHandle table;
-  EXPECT_OK(table.Open(kTableName, client_.get()));
-  auto result = ScanTableToStrings(table);
-  std::sort(result.begin(), result.end());
-  return result;
+  return ScanTableToStrings(kTableName, client_.get());
 }
 
 // Verify that the 'num_rows' starting with 'start_row' fit the given pattern.
@@ -552,7 +560,7 @@ TEST_P(AlterTableTest, DISABLED_TestCompactionAfterDrop) {
   ASSERT_OK(table_alterer->DropColumn("c1")->Alter());
 
   LOG(INFO) << "Forcing compaction";
-  tablet_peer_->tablet()->ForceRocksDBCompactInTest();
+  tablet_peer_->tablet()->TEST_ForceRocksDBCompact();
 
   docdb_dump = tablet_peer_->tablet()->TEST_DocDBDumpStr();
 
@@ -770,11 +778,11 @@ void AlterTableTest::WriteThread(QLWriteRequestPB::QLStmtType type) {
       }
 
       ops.push_back(op);
-      ASSERT_OK(session->Apply(op));
+      session->Apply(op);
     }
 
     if (should_stop || ops.size() >= 10) {
-      Status s = session->Flush();
+      Status s = session->TEST_Flush();
       ASSERT_TRUE(s.ok() || s.IsBusy() || s.IsIOError());
       auto result = AnalyzeResponse(ops);
       ops.clear();
@@ -884,8 +892,8 @@ TEST_P(AlterTableTest, TestInsertAfterAlterTable) {
   table.AddInt32ColumnValue(req, "new-i32", 1);
   shared_ptr<YBSession> session = client_->NewSession();
   session->SetTimeout(15s);
-  ASSERT_OK(session->Apply(insert));
-  auto flush_status = session->FlushAndGetOpsErrors();
+  session->Apply(insert);
+  auto flush_status = session->TEST_FlushAndGetOpsErrors();
   const auto& s = flush_status.status;
   if (!s.ok()) {
     ASSERT_EQ(1, flush_status.errors.size());
@@ -905,7 +913,7 @@ TEST_P(AlterTableTest, TestMultipleAlters) {
   ASSERT_OK(CreateTable(kSplitTableName));
 
   // Issue a bunch of new alters without waiting for them to finish.
-  for (int i = 0; i < kNumNewCols; i++) {
+  for (size_t i = 0; i < kNumNewCols; i++) {
     std::unique_ptr<YBTableAlterer> table_alterer(client_->NewTableAlterer(kSplitTableName));
     table_alterer->AddColumn(strings::Substitute("new_col$0", i))
                  ->Type(INT32)->NotNull();
@@ -913,7 +921,7 @@ TEST_P(AlterTableTest, TestMultipleAlters) {
   }
 
   // Now wait. This should block on all of them.
-  WaitAlterTableCompletion(kSplitTableName, 50);
+  ASSERT_OK(WaitAlterTableCompletion(kSplitTableName, 50));
 
   // All new columns should be present.
   YBSchema new_schema;

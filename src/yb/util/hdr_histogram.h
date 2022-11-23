@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_HDR_HISTOGRAM_H
-#define YB_UTIL_HDR_HISTOGRAM_H
+#pragma once
 
 // C++ (TR1) port of HdrHistogram.
 // Original java implementation: http://giltene.github.io/HdrHistogram/
@@ -56,11 +55,13 @@
 // tracked value (1 hour), it would still maintain a resolution of 3.6 seconds
 // (or better).
 
-#include <cstdint>
 #include <iosfwd>
+#include <memory>
 
 #include "yb/gutil/atomicops.h"
-#include "yb/util/status.h"
+#include "yb/gutil/macros.h"
+
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 
@@ -72,9 +73,9 @@ class RecordedValuesIterator;
 // digits) to support in an instance of a histogram. The class takes care of
 // the rest. At this time, only uint64_t values are supported.
 //
-// An HdrHistogram consists of a set of buckets, which bucket the magnitude of
-// a value stored, and a set of sub-buckets, which implement the tunable
-// precision of the storage. So if you specify 3 significant digits of
+// An HdrHistogram consists of a set of buckets (which bucket the magnitude of
+// a value stored), and a set of sub-buckets (which implement the tunable
+// precision of the storage). So if you specify 3 significant digits of
 // precision, then you will get about 10^3 sub-buckets (as a power of 2) for
 // each level of magnitude. Magnitude buckets are tracked in powers of 2.
 //
@@ -282,7 +283,7 @@ class AbstractHistogramIterator {
   virtual bool HasNext() const;
 
   // Returns the next element in the iteration.
-  CHECKED_STATUS Next(HistogramIterationValue* value);
+  Status Next(HistogramIterationValue* value);
 
   virtual double PercentileIteratedTo() const;
   virtual double PercentileIteratedFrom() const;
@@ -379,5 +380,3 @@ class PercentileIterator : public AbstractHistogramIterator {
 };
 
 } // namespace yb
-
-#endif // YB_UTIL_HDR_HISTOGRAM_H

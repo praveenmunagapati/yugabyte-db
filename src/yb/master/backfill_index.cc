@@ -10,9 +10,12 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
+
 #include "yb/master/backfill_index.h"
 
+#include <pthread.h>
 #include <stdlib.h>
+#include <sys/types.h>
 
 #include <algorithm>
 #include <bitset>
@@ -20,133 +23,97 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
-#include <glog/logging.h>
 #include <boost/optional.hpp>
-#include <boost/thread/shared_mutex.hpp>
-#include "yb/common/common_flags.h"
+#include <boost/preprocessor/cat.hpp>
+#include <glog/logging.h>
+
 #include "yb/common/partial_row.h"
 #include "yb/common/partition.h"
-#include "yb/common/roles_permissions.h"
 #include "yb/common/wire_protocol.h"
-#include "yb/consensus/consensus.h"
-#include "yb/consensus/consensus.proxy.h"
-#include "yb/consensus/consensus_peers.h"
-#include "yb/consensus/quorum_util.h"
+
+#include "yb/docdb/doc_rowwise_iterator.h"
+
 #include "yb/gutil/atomicops.h"
+#include "yb/gutil/callback.h"
+#include "yb/gutil/casts.h"
 #include "yb/gutil/map-util.h"
 #include "yb/gutil/mathlimits.h"
+#include "yb/gutil/ref_counted.h"
 #include "yb/gutil/stl_util.h"
 #include "yb/gutil/strings/escaping.h"
 #include "yb/gutil/strings/join.h"
 #include "yb/gutil/strings/substitute.h"
 #include "yb/gutil/sysinfo.h"
-#include "yb/gutil/walltime.h"
+
+#include "yb/master/master_fwd.h"
 #include "yb/master/async_rpc_tasks.h"
-#include "yb/master/catalog_loaders.h"
-#include "yb/master/catalog_manager_bg_tasks.h"
-#include "yb/master/catalog_manager_util.h"
-#include "yb/master/cluster_balance.h"
+#include "yb/master/catalog_manager.h"
 #include "yb/master/master.h"
-#include "yb/master/master.pb.h"
-#include "yb/master/master.proxy.h"
-#include "yb/master/master_util.h"
+#include "yb/master/master_error.h"
+#include "yb/master/master_ddl.pb.h"
 #include "yb/master/sys_catalog.h"
-#include "yb/master/system_tablet.h"
-#include "yb/master/tasks_tracker.h"
-#include "yb/master/ts_descriptor.h"
-#include "yb/master/ts_manager.h"
-#include "yb/master/yql_aggregates_vtable.h"
-#include "yb/master/yql_auth_resource_role_permissions_index.h"
-#include "yb/master/yql_auth_role_permissions_vtable.h"
-#include "yb/master/yql_auth_roles_vtable.h"
-#include "yb/master/yql_columns_vtable.h"
-#include "yb/master/yql_empty_vtable.h"
-#include "yb/master/yql_functions_vtable.h"
-#include "yb/master/yql_indexes_vtable.h"
-#include "yb/master/yql_keyspaces_vtable.h"
-#include "yb/master/yql_local_vtable.h"
-#include "yb/master/yql_partitions_vtable.h"
-#include "yb/master/yql_peers_vtable.h"
-#include "yb/master/yql_size_estimates_vtable.h"
-#include "yb/master/yql_tables_vtable.h"
-#include "yb/master/yql_triggers_vtable.h"
-#include "yb/master/yql_types_vtable.h"
-#include "yb/master/yql_views_vtable.h"
 
-#include "yb/docdb/doc_rowwise_iterator.h"
-
-#include "yb/rpc/messenger.h"
-#include "yb/tserver/ts_tablet_manager.h"
-
-#include "yb/tablet/operations/change_metadata_operation.h"
 #include "yb/tablet/tablet.h"
 #include "yb/tablet/tablet_metadata.h"
+#include "yb/tablet/tablet_peer.h"
 
 #include "yb/tserver/tserver_admin.proxy.h"
-#include "yb/yql/redis/redisserver/redis_constants.h"
 
-#include "yb/util/crypt.h"
-#include "yb/util/debug-util.h"
-#include "yb/util/debug/trace_event.h"
-#include "yb/util/flag_tags.h"
-#include "yb/util/logging.h"
+#include "yb/util/flags.h"
+#include "yb/util/format.h"
 #include "yb/util/math_util.h"
 #include "yb/util/monotime.h"
 #include "yb/util/random_util.h"
-#include "yb/util/rw_mutex.h"
-#include "yb/util/stopwatch.h"
-#include "yb/util/thread.h"
-#include "yb/util/thread_restrictions.h"
+#include "yb/util/result.h"
+#include "yb/util/scope_exit.h"
+#include "yb/util/status_format.h"
+#include "yb/util/status_log.h"
 #include "yb/util/threadpool.h"
 #include "yb/util/trace.h"
 #include "yb/util/tsan_util.h"
 #include "yb/util/uuid.h"
 
-#include "yb/client/client.h"
-#include "yb/client/meta_cache.h"
-#include "yb/client/table_creator.h"
-#include "yb/client/table_handle.h"
-#include "yb/client/yb_table_name.h"
+using std::vector;
+using std::string;
 
-#include "yb/tserver/remote_bootstrap_client.h"
-
-DEFINE_int32(ysql_index_backfill_rpc_timeout_ms, 60 * 1000, // 1 min.
-             "Timeout used by the master when attempting to backfill a YSQL tablet during index "
-             "creation.");
+DEFINE_RUNTIME_int32(ysql_index_backfill_rpc_timeout_ms, 60 * 1000, // 1 min.
+    "Timeout used by the master when attempting to backfill a YSQL tablet during index creation.");
 TAG_FLAG(ysql_index_backfill_rpc_timeout_ms, advanced);
-TAG_FLAG(ysql_index_backfill_rpc_timeout_ms, runtime);
 
-DEFINE_int32(index_backfill_rpc_timeout_ms, 1 * 30 * 1000, // 30 sec.
-             "Timeout used by the master when attempting to backfill a tablet "
-             "during index creation.");
+DEFINE_RUNTIME_int32(index_backfill_rpc_timeout_ms, 1 * 30 * 1000, // 30 sec.
+    "Timeout used by the master when attempting to backfill a tablet during index creation.");
 TAG_FLAG(index_backfill_rpc_timeout_ms, advanced);
-TAG_FLAG(index_backfill_rpc_timeout_ms, runtime);
 
-DEFINE_int32(index_backfill_rpc_max_retries, 150,
-             "Number of times to retry backfilling a tablet chunk "
-             "during index creation.");
+DEFINE_RUNTIME_int32(index_backfill_rpc_max_retries, 150,
+    "Number of times to retry backfilling a tablet chunk during index creation.");
 TAG_FLAG(index_backfill_rpc_max_retries, advanced);
-TAG_FLAG(index_backfill_rpc_max_retries, runtime);
 
-DEFINE_int32(index_backfill_rpc_max_delay_ms, 10 * 60 * 1000, // 10 min.
-             "Maximum delay before retrying a backfill tablet chunk request "
-             "during index creation.");
+DEFINE_RUNTIME_int32(index_backfill_rpc_max_delay_ms, 10 * 60 * 1000, // 10 min.
+    "Maximum delay before retrying a backfill tablet chunk request during index creation.");
 TAG_FLAG(index_backfill_rpc_max_delay_ms, advanced);
-TAG_FLAG(index_backfill_rpc_max_delay_ms, runtime);
 
-DEFINE_int32(index_backfill_wait_for_alter_table_completion_ms, 100,
-             "Delay before retrying to see if an in-progress alter table has "
-             "completed, during index backfill.");
+DEFINE_RUNTIME_int32(index_backfill_wait_for_alter_table_completion_ms, 100,
+    "Delay before retrying to see if an in-progress alter table has "
+    "completed, during index backfill.");
 TAG_FLAG(index_backfill_wait_for_alter_table_completion_ms, advanced);
-TAG_FLAG(index_backfill_wait_for_alter_table_completion_ms, runtime);
 
-DEFINE_bool(defer_index_backfill, false,
-            "Defer index backfill so that backfills can be performed as a batch later on.");
+DEFINE_RUNTIME_int32(index_backfill_tablet_split_completion_timeout_sec, 30,
+    "Total time to wait for tablet splitting to complete on a table from which we are "
+    "running a backfill before aborting the backfill and marking it as failed.");
+TAG_FLAG(index_backfill_tablet_split_completion_timeout_sec, advanced);
+
+DEFINE_RUNTIME_int32(index_backfill_tablet_split_completion_poll_freq_ms, 2000,
+    "Delay before retrying to see if tablet splitting has completed on the table from "
+    "which we are running a backfill.");
+TAG_FLAG(index_backfill_tablet_split_completion_poll_freq_ms, advanced);
+
+DEFINE_RUNTIME_bool(defer_index_backfill, false,
+    "Defer index backfill so that backfills can be performed as a batch later on.");
 TAG_FLAG(defer_index_backfill, advanced);
-TAG_FLAG(defer_index_backfill, runtime);
 
 DEFINE_test_flag(int32, slowdown_backfill_alter_table_rpcs_ms, 0,
     "Slows down the send alter table rpc's so that the master may be stopped between "
@@ -156,10 +123,19 @@ DEFINE_test_flag(
     int32, slowdown_backfill_job_deletion_ms, 0,
     "Slows down backfill job deletion so that backfill job can be read by test.");
 
+DEFINE_test_flag(
+    bool, skip_index_backfill, false,
+    "Skips backfilling the data on tservers and leaves the index in inconsistent state.");
+
+DEFINE_test_flag(
+    bool, block_do_backfill, false,
+    "Block DoBackfill from proceeding.");
+
 namespace yb {
 namespace master {
 
 using namespace std::literals;
+using server::MonitoredTaskState;
 using strings::Substitute;
 using tserver::TabletServerErrorPB;
 
@@ -173,10 +149,10 @@ Result<bool> GetPgIndexStatus(
   const auto pg_index_id =
       GetPgsqlTableId(VERIFY_RESULT(GetPgsqlDatabaseOid(idx_id)), kPgIndexTableOid);
 
-  const tablet::Tablet* catalog_tablet =
-      catalog_manager->sys_catalog()->tablet_peer()->tablet();
+  const auto catalog_tablet =
+      VERIFY_RESULT(catalog_manager->tablet_peer()->shared_tablet_safe());
   const Schema& pg_index_schema =
-      VERIFY_RESULT(catalog_tablet->metadata()->GetTableInfo(pg_index_id))->schema;
+      VERIFY_RESULT(catalog_tablet->metadata()->GetTableInfo(pg_index_id))->schema();
 
   Schema projection;
   RETURN_NOT_OK(pg_index_schema.CreateProjectionByNames({"indexrelid", status_col_name},
@@ -199,7 +175,7 @@ Result<bool> GetPgIndexStatus(
     cond.add_operands()->set_column_id(indexrelid_col_id);
     cond.set_op(QL_OP_EQUAL);
     cond.add_operands()->mutable_value()->set_uint32_value(idx_oid);
-    const std::vector<docdb::PrimitiveValue> empty_key_components;
+    const std::vector<docdb::KeyEntryValue> empty_key_components;
     docdb::DocPgsqlScanSpec spec(projection,
                                  rocksdb::kDefaultQueryId,
                                  empty_key_components,
@@ -298,6 +274,7 @@ Result<bool> MultiStageAlterTable::UpdateIndexPermission(
     const scoped_refptr<TableInfo>& indexed_table,
     const std::unordered_map<TableId, IndexPermissions>& perm_mapping,
     boost::optional<uint32_t> current_version) {
+  TRACE(__func__);
   DVLOG(3) << __PRETTY_FUNCTION__ << " " << yb::ToString(*indexed_table);
   if (FLAGS_TEST_slowdown_backfill_alter_table_rpcs_ms > 0) {
     TRACE("Sleeping for $0 ms", FLAGS_TEST_slowdown_backfill_alter_table_rpcs_ms);
@@ -331,6 +308,13 @@ Result<bool> MultiStageAlterTable::UpdateIndexPermission(
       auto& idx_table_id = idx_pb->table_id();
       if (perm_mapping.find(idx_table_id) != perm_mapping.end()) {
         const auto new_perm = perm_mapping.at(idx_table_id);
+        if (idx_pb->index_permissions() >= new_perm) {
+          LOG(WARNING) << "Index " << idx_pb->table_id() << " on table "
+                       << indexed_table->ToString() << " has index_permission "
+                       << IndexPermissions_Name(idx_pb->index_permissions()) << " already past "
+                       << IndexPermissions_Name(new_perm) << ". Will not update it";
+          continue;
+        }
         // TODO(alex, amit): Non-OK status here should be converted to TryAgain,
         //                   which should be handled on an upper level.
         if (is_pgsql && !VERIFY_RESULT(ShouldProceedWithPgsqlIndexPermissionUpdate(catalog_manager,
@@ -386,20 +370,28 @@ Status MultiStageAlterTable::StartBackfillingData(
   RETURN_NOT_OK(ClearFullyAppliedAndUpdateState(
       catalog_manager, indexed_table, current_version, /* change_state to RUNNING */ false));
 
-  RETURN_NOT_OK(indexed_table->SetIsBackfilling());
+  auto ns_info = catalog_manager->FindNamespaceById(indexed_table->namespace_id());
+  RETURN_NOT_OK_PREPEND(ns_info, "Unable to get namespace info for backfill");
 
+  RETURN_NOT_OK(indexed_table->SetIsBackfilling());
   TRACE("Starting backfill process");
   VLOG(0) << __func__ << " starting backfill on " << indexed_table->ToString() << " for "
           << yb::ToString(idx_infos);
 
-  auto ns_info = catalog_manager->FindNamespaceById(indexed_table->namespace_id());
-  RETURN_NOT_OK_PREPEND(ns_info, "Unable to get namespace info for backfill");
+  if (FLAGS_TEST_skip_index_backfill) {
+    TRACE("Skipping backfill of data on tservers");
+    LOG(INFO) << "Skipping backfill of data on tservers";
+    return Status::OK();
+  }
 
   auto backfill_table = std::make_shared<BackfillTable>(
       catalog_manager->master_, catalog_manager->AsyncTaskPool(), indexed_table, idx_infos,
       *ns_info);
-  backfill_table->Launch();
-  return Status::OK();
+  Status s = backfill_table->Launch();
+  if (!s.ok()) {
+    indexed_table->ClearIsBackfilling();
+  }
+  return s;
 }
 
 // Returns true, if the said IndexPermissions is a transient state.
@@ -532,7 +524,8 @@ Status MultiStageAlterTable::LaunchNextTableInfoVersionIfNecessary(
   // TODO(jason): when using INDEX_PERM_DO_BACKFILL, update this comment (issue #6218).
 
   if (!indexes_to_update.empty()) {
-    VLOG(1) << "Updating index permissions for " << yb::ToString(indexes_to_update);
+    VLOG(1) << "Updating index permissions for " << yb::ToString(indexes_to_update) << " on "
+            << indexed_table->ToString();
     Result<bool> permissions_updated =
         VERIFY_RESULT(UpdateIndexPermission(catalog_manager, indexed_table, indexes_to_update,
                                             current_version));
@@ -665,7 +658,8 @@ BackfillTable::BackfillTable(
       indexed_table_(indexed_table),
       index_infos_(indexes),
       requested_index_ids_(IndexIdsFromInfos(indexes)),
-      requested_index_names_(RetrieveIndexNames(master->catalog_manager(), requested_index_ids_)),
+      requested_index_names_(RetrieveIndexNames(
+          master->catalog_manager_impl(), requested_index_ids_)),
       ns_info_(ns_info) {
   auto l = indexed_table_->LockForRead();
   schema_version_ = indexed_table_->metadata().state().pb.version();
@@ -680,7 +674,7 @@ BackfillTable::BackfillTable(
   if (pb.backfill_jobs_size() > 0 && pb.backfill_jobs(0).has_backfilling_timestamp() &&
       read_time_for_backfill_.FromUint64(pb.backfill_jobs(0).backfilling_timestamp()).ok()) {
     DCHECK(pb.backfill_jobs_size() == 1) << "Expect only 1 outstanding backfill job";
-    DCHECK(pb.backfill_jobs(0).indexes_size() == index_infos_.size())
+    DCHECK(implicit_cast<size_t>(pb.backfill_jobs(0).indexes_size()) == index_infos_.size())
         << "Expect to use the same set of indexes.";
     timestamp_chosen_.store(true, std::memory_order_release);
     VLOG_WITH_PREFIX(1) << "Will be using " << read_time_for_backfill_
@@ -712,10 +706,10 @@ const std::unordered_set<TableId> BackfillTable::indexes_to_build() const {
   return indexes_to_build;
 }
 
-void BackfillTable::Launch() {
+Status BackfillTable::Launch() {
   backfill_job_ = std::make_shared<BackfillTableJob>(shared_from_this());
   backfill_job_->SetState(MonitoredTaskState::kRunning);
-  master_->catalog_manager()->jobs_tracker_->AddTask(backfill_job_);
+  master_->catalog_manager_impl()->jobs_tracker_->AddTask(backfill_job_);
 
   {
     auto l = indexed_table_->LockForWrite();
@@ -726,23 +720,41 @@ void BackfillTable::Launch() {
         backfill_job->mutable_backfill_state()->insert(
             {idx_info.table_id(), BackfillJobPB::IN_PROGRESS});
       }
-      auto s = master_->catalog_manager()->sys_catalog_->Upsert(
-              leader_term(), indexed_table_);
-      if (!s.ok()) {
-        LOG(WARNING) << "Failed to persist backfill jobs. Abandoning launch. " << s;
-        return;
-      }
+      RETURN_NOT_OK_PREPEND(
+          master_->catalog_manager_impl()->sys_catalog_->Upsert(leader_term(), indexed_table_),
+          "Failed to persist backfill jobs. Abandoning launch.");
       l.Commit();
     }
   }
-  if (!timestamp_chosen_.load(std::memory_order_acquire)) {
-    LaunchComputeSafeTimeForRead();
-  } else {
-    LaunchBackfill();
+
+  // This must be a shared pointer and not just 'this' so we do not accidentally clean up
+  // BackfillTable when the last shared pointer to BackfillTable is deleted in Abort() (when the
+  // backfill job is deleted).
+  Status status = threadpool()->SubmitFunc(
+      std::bind(&BackfillTable::LaunchBackfillOrAbort, this->shared_from_this()));
+  if (!status.ok()) {
+    RETURN_NOT_OK_PREPEND(Abort(), "Failed to run LaunchBackfill.");
+    return status;
+  }
+  return Status::OK();
+}
+
+void BackfillTable::LaunchBackfillOrAbort() {
+  Status status = WaitForTabletSplitting();
+  if (!status.ok()) {
+    LOG(WARNING) << status;
+    WARN_NOT_OK(Abort(), "Failed to abort backfill after backfill failed.");
+    return;
+  }
+
+  status = DoLaunchBackfill();
+  if (!status.ok()) {
+    LOG(WARNING) << status;
+    WARN_NOT_OK(Abort(), "Failed to abort backfill after backfill failed.");
   }
 }
 
-void BackfillTable::LaunchComputeSafeTimeForRead() {
+Status BackfillTable::LaunchComputeSafeTimeForRead() {
   auto tablets = indexed_table_->GetTablets();
 
   num_tablets_.store(tablets.size(), std::memory_order_release);
@@ -751,8 +763,9 @@ void BackfillTable::LaunchComputeSafeTimeForRead() {
   for (const scoped_refptr<TabletInfo>& tablet : tablets) {
     auto get_safetime = std::make_shared<GetSafeTimeForTablet>(
         shared_from_this(), tablet, min_cutoff);
-    get_safetime->Launch();
+    RETURN_NOT_OK(get_safetime->Launch());
   }
+  return Status::OK();
 }
 
 std::string BackfillTable::LogPrefix() const {
@@ -776,7 +789,7 @@ const std::string BackfillTable::GetNamespaceName() const {
   return ns_info_->name();
 }
 
-Status BackfillTable::UpdateRowsProcessedForIndexTable(const int number_rows_processed) {
+Status BackfillTable::UpdateRowsProcessedForIndexTable(const uint64_t number_rows_processed) {
   auto l = indexed_table_->LockForWrite();
 
   if (l.data().pb.backfill_jobs_size() == 0) {
@@ -793,7 +806,7 @@ Status BackfillTable::UpdateRowsProcessedForIndexTable(const int number_rows_pro
           << " more rows. Total rows processed is: " << number_rows_processed_;
 
   RETURN_NOT_OK(
-      master_->catalog_manager()->sys_catalog_->Upsert(leader_term(), indexed_table_));
+      master_->catalog_manager_impl()->sys_catalog_->Upsert(leader_term(), indexed_table_));
   l.Commit();
   return Status::OK();
 }
@@ -805,8 +818,7 @@ Status BackfillTable::UpdateSafeTime(const Status& s, HybridTime ht) {
         << "Failed backfill. Could not compute safe time for "
         << yb::ToString(indexed_table_) << " " << s;
     if (!timestamp_chosen_.exchange(true)) {
-      RETURN_NOT_OK_PREPEND(
-          MarkAllIndexesAsFailed(), "Failed to mark backfill as failed. Abandoning.");
+      RETURN_NOT_OK(Abort());
     }
     return Status::OK();
   }
@@ -833,7 +845,7 @@ Status BackfillTable::UpdateSafeTime(const Status& s, HybridTime ht) {
       auto* backfill_job = l.mutable_data()->pb.mutable_backfill_jobs(0);
       backfill_job->set_backfilling_timestamp(read_timestamp.ToUint64());
       RETURN_NOT_OK_PREPEND(
-          master_->catalog_manager()->sys_catalog_->Upsert(
+          master_->catalog_manager_impl()->sys_catalog_->Upsert(
               leader_term(), indexed_table_),
           "Failed to persist backfilling timestamp. Abandoning.");
       l.Commit();
@@ -841,13 +853,50 @@ Status BackfillTable::UpdateSafeTime(const Status& s, HybridTime ht) {
     VLOG_WITH_PREFIX(2) << "Saved " << read_timestamp
                         << " as backfilling_timestamp";
     timestamp_chosen_.store(true, std::memory_order_release);
-    LaunchBackfill();
+    Status backfill_status = DoBackfill();
+    if (!backfill_status.ok()) {
+      // Mark indexes as failed so CREATE INDEX will stop waiting and return.
+      RETURN_NOT_OK(Abort());
+      return backfill_status;
+    }
   }
   return Status::OK();
 }
 
-void BackfillTable::LaunchBackfill() {
-  VLOG_WITH_PREFIX(1) << "launching backfill with timestamp: "
+Status BackfillTable::WaitForTabletSplitting() {
+  auto* tablet_split_manager = master_->catalog_manager()->tablet_split_manager();
+  tablet_split_manager->DisableSplittingForBackfillingTable(indexed_table_->id());
+  CoarseTimePoint deadline = CoarseMonoClock::Now() +
+                             FLAGS_index_backfill_tablet_split_completion_timeout_sec * 1s;
+  while (!tablet_split_manager->IsTabletSplittingComplete(*indexed_table_,
+                                                          false /* wait_for_parent_deletion */)) {
+    if (CoarseMonoClock::Now() > deadline) {
+      return STATUS(TimedOut, "Tablet splitting did not complete after being disabled; cannot "
+                              "safely backfill the index.");
+    }
+    SleepFor(FLAGS_index_backfill_tablet_split_completion_poll_freq_ms * 1ms * kTimeMultiplier);
+  }
+
+  RETURN_NOT_OK(indexed_table_->CheckAllActiveTabletsRunning());
+  return Status::OK();
+}
+
+Status BackfillTable::DoLaunchBackfill() {
+  if (!timestamp_chosen_.load(std::memory_order_acquire)) {
+    RETURN_NOT_OK(LaunchComputeSafeTimeForRead());
+  } else {
+    RETURN_NOT_OK(DoBackfill());
+  }
+  return Status::OK();
+}
+
+Status BackfillTable::DoBackfill() {
+  while (FLAGS_TEST_block_do_backfill) {
+    constexpr auto kSpinWait = 100ms;
+    LOG(INFO) << Format("Blocking $0 for $1", __func__, kSpinWait);
+    SleepFor(kSpinWait);
+  }
+  VLOG_WITH_PREFIX(1) << "starting backfill with timestamp: "
                       << read_time_for_backfill_;
   auto tablets = indexed_table_->GetTablets();
 
@@ -855,39 +904,45 @@ void BackfillTable::LaunchBackfill() {
   tablets_pending_.store(tablets.size(), std::memory_order_release);
   for (const scoped_refptr<TabletInfo>& tablet : tablets) {
     auto backfill_tablet = std::make_shared<BackfillTablet>(shared_from_this(), tablet);
-    backfill_tablet->Launch();
+    RETURN_NOT_OK(backfill_tablet->Launch());
   }
+  return Status::OK();
 }
 
-void BackfillTable::Done(const Status& s, const std::unordered_set<TableId>& failed_indexes) {
+Status BackfillTable::Done(const Status& s, const std::unordered_set<TableId>& failed_indexes) {
   if (!s.ok()) {
     LOG_WITH_PREFIX(ERROR) << "failed to backfill the index: " << yb::ToString(failed_indexes)
                            << " due to " << s;
-    WARN_NOT_OK(
+    RETURN_NOT_OK_PREPEND(
         MarkIndexesAsFailed(failed_indexes, s.message().ToBuffer()),
-        "Couldn't to mark Indexes as failed");
-    CheckIfDone();
-    return;
+        "Couldn't mark indexes as failed");
+    return CheckIfDone();
   }
 
   // If OK then move on to READ permissions.
   if (!done() && --tablets_pending_ == 0) {
     LOG_WITH_PREFIX(INFO) << "Completed backfilling the index table.";
     done_.store(true, std::memory_order_release);
-    WARN_NOT_OK(MarkAllIndexesAsSuccess(), "Failed to complete backfill.");
-    WARN_NOT_OK(UpdateIndexPermissionsForIndexes(), "Failed to complete backfill.");
+    RETURN_NOT_OK_PREPEND(
+        MarkAllIndexesAsSuccess(), "Failed to mark indexes as successfully backfilled.");
+    RETURN_NOT_OK_PREPEND(UpdateIndexPermissionsForIndexes(), "Failed to complete backfill.");
   } else {
     VLOG_WITH_PREFIX(1) << "Still backfilling " << tablets_pending_ << " more tablets.";
   }
+  return Status::OK();
 }
 
 Status BackfillTable::MarkIndexesAsFailed(
     const std::unordered_set<TableId>& failed_indexes, const string& message) {
+  if (indexes_to_build() == failed_indexes) {
+    done_.store(true, std::memory_order_release);
+    backfill_job_->SetState(MonitoredTaskState::kFailed);
+  }
   return MarkIndexesAsDesired(failed_indexes, BackfillJobPB::FAILED, message);
 }
 
 Status BackfillTable::MarkAllIndexesAsFailed() {
-  return MarkIndexesAsDesired(indexes_to_build(), BackfillJobPB::FAILED, "failed");
+  return MarkIndexesAsFailed(indexes_to_build(), "failed");
 }
 
 Status BackfillTable::MarkAllIndexesAsSuccess() {
@@ -927,18 +982,25 @@ Status BackfillTable::MarkIndexesAsDesired(
       }
     }
     RETURN_NOT_OK(
-        master_->catalog_manager()->sys_catalog_->Upsert(leader_term(), indexed_table_));
+        master_->catalog_manager_impl()->sys_catalog_->Upsert(leader_term(), indexed_table_));
     l.Commit();
   }
   return Status::OK();
 }
 
-void BackfillTable::CheckIfDone() {
+Status BackfillTable::Abort() {
+  LOG(WARNING) << "Backfill failed/aborted.";
+  RETURN_NOT_OK(MarkAllIndexesAsFailed());
+  return CheckIfDone();
+}
+
+Status BackfillTable::CheckIfDone() {
   if (indexes_to_build().empty()) {
     done_.store(true, std::memory_order_release);
-    WARN_NOT_OK(
+    RETURN_NOT_OK_PREPEND(
         UpdateIndexPermissionsForIndexes(), "Could not update index permissions after backfill");
   }
+  return Status::OK();
 }
 
 Status BackfillTable::UpdateIndexPermissionsForIndexes() {
@@ -974,16 +1036,18 @@ Status BackfillTable::UpdateIndexPermissionsForIndexes() {
 
   RETURN_NOT_OK_PREPEND(
       MultiStageAlterTable::UpdateIndexPermission(
-          master_->catalog_manager(), indexed_table_, permissions_to_set, boost::none),
+          master_->catalog_manager_impl(), indexed_table_, permissions_to_set, boost::none),
       "Could not update permissions after backfill. "
       "Possible that the master-leader has changed.");
   backfill_job_->SetState(
       all_success ? MonitoredTaskState::kComplete : MonitoredTaskState::kFailed);
   RETURN_NOT_OK(ClearCheckpointStateInTablets());
   indexed_table_->ClearIsBackfilling();
+  master_->catalog_manager()->tablet_split_manager()
+      ->ReenableSplittingForBackfillingTable(indexed_table_->id());
 
   VLOG(1) << "Sending alter table requests to the Indexed table";
-  RETURN_NOT_OK(master_->catalog_manager()->SendAlterTableRequest(indexed_table_));
+  RETURN_NOT_OK(master_->catalog_manager_impl()->SendAlterTableRequest(indexed_table_));
   VLOG(1) << "DONE Sending alter table requests to the Indexed table";
 
   LOG(INFO) << "Done backfill on " << indexed_table_->ToString() << " setting permissions to "
@@ -1020,7 +1084,7 @@ Status BackfillTable::ClearCheckpointStateInTablets() {
     DCHECK_LE(l.data().pb.backfill_jobs_size(), 1) << "For now we only expect to have up to 1 "
                                                        "outstanding backfill job.";
     l.mutable_data()->pb.clear_backfill_jobs();
-    RETURN_NOT_OK_PREPEND(master_->catalog_manager()->sys_catalog_->Upsert(
+    RETURN_NOT_OK_PREPEND(master_->catalog_manager_impl()->sys_catalog_->Upsert(
                               leader_term(), indexed_table_),
                           "Could not clear backfilling timestamp.");
     l.Commit();
@@ -1032,9 +1096,14 @@ Status BackfillTable::ClearCheckpointStateInTablets() {
 Status BackfillTable::AllowCompactionsToGCDeleteMarkers(
     const TableId &index_table_id) {
   DVLOG(3) << __PRETTY_FUNCTION__;
-  scoped_refptr<TableInfo> index_table_info = VERIFY_RESULT_PREPEND(
-      master_->catalog_manager()->FindTableById(index_table_id),
-      "This is ok in case somebody issued a delete index.");
+  auto res = master_->catalog_manager()->FindTableById(index_table_id);
+  if (!res && res.status().IsNotFound()) {
+    LOG(ERROR) << "Index " << index_table_id << " was not found."
+               << " This is ok in case somebody issued a delete index. : " << res.ToString();
+    return Status::OK();
+  }
+  scoped_refptr<TableInfo> index_table_info = VERIFY_RESULT_PREPEND(std::move(res),
+      Format("Could not find the index table $0", index_table_id));
 
   // Add a sleep here to wait until the Table is fully created.
   bool is_ready = false;
@@ -1051,7 +1120,14 @@ Status BackfillTable::AllowCompactionsToGCDeleteMarkers(
     {
       VLOG(2) << __func__ << ": Trying to lock index table for Read";
       auto l = index_table_info->LockForRead();
-      is_ready = l->pb.state() == SysTablesEntryPB::RUNNING;
+      auto state = l->pb.state();
+      if (state != SysTablesEntryPB::RUNNING && state != SysTablesEntryPB::ALTERING) {
+        LOG(ERROR) << "Index " << index_table_id << " is in state "
+                   << SysTablesEntryPB_State_Name(state) << " : cannot enable compactions on it";
+        // Treating it as success so that we can proceed with updating other indexes.
+        return Status::OK();
+      }
+      is_ready = state == SysTablesEntryPB::RUNNING;
     }
     VLOG(2) << __func__ << ": Unlocked index table for Read";
   } while (!is_ready);
@@ -1066,7 +1142,7 @@ Status BackfillTable::AllowCompactionsToGCDeleteMarkers(
     // Update sys-catalog with the new indexed table info.
     TRACE("Updating index table metadata on disk");
     RETURN_NOT_OK_PREPEND(
-        master_->catalog_manager()->sys_catalog_->Upsert(
+        master_->catalog_manager_impl()->sys_catalog_->Upsert(
             leader_term(), index_table_info),
         yb::Format(
             "Could not update index_table_info for $0 to enable compactions.",
@@ -1143,40 +1219,39 @@ std::string BackfillTablet::LogPrefix() const {
                 tablet_->id());
 }
 
-void BackfillTablet::LaunchNextChunkOrDone() {
+Status BackfillTablet::LaunchNextChunkOrDone() {
   if (done()) {
     VLOG_WITH_PREFIX(1) << "is done";
-    backfill_table_->Done(Status::OK(), /* failed_indexes */ {});
+    return backfill_table_->Done(Status::OK(), /* failed_indexes */ {});
   } else if (!backfill_table_->done()) {
     VLOG_WITH_PREFIX(2) << "Launching next chunk from " << backfilled_until_;
     auto chunk = std::make_shared<BackfillChunk>(shared_from_this(),
                                                  backfilled_until_);
-    chunk->Launch();
+    return chunk->Launch();
   }
+  return Status::OK();
 }
 
-void BackfillTablet::Done(
+Status BackfillTablet::Done(
     const Status& status, const boost::optional<string>& backfilled_until,
-    const int number_rows_processed, const std::unordered_set<TableId>& failed_indexes) {
+    const uint64_t number_rows_processed, const std::unordered_set<TableId>& failed_indexes) {
   if (!status.ok()) {
     LOG(INFO) << "Failed to backfill the tablet " << yb::ToString(tablet_) << ": " << status
               << "\nFailed_indexes are " << yb::ToString(failed_indexes);
-    backfill_table_->Done(status, failed_indexes);
+    RETURN_NOT_OK(backfill_table_->Done(status, failed_indexes));
   }
 
   if (backfilled_until) {
-    auto s = UpdateBackfilledUntil(*backfilled_until, number_rows_processed);
-    if (!s.ok()) {
-      LOG(WARNING) << "Could not persist how far the tablet is done backfilling. " << s.ToString();
-      return;
-    }
+    RETURN_NOT_OK_PREPEND(
+        UpdateBackfilledUntil(*backfilled_until, number_rows_processed),
+        "Could not persist how far the tablet is done backfilling.");
   }
 
-  LaunchNextChunkOrDone();
+  return LaunchNextChunkOrDone();
 }
 
 Status BackfillTablet::UpdateBackfilledUntil(
-    const string& backfilled_until, const int number_rows_processed) {
+    const string& backfilled_until, const uint64_t number_rows_processed) {
   backfilled_until_ = backfilled_until;
   VLOG_WITH_PREFIX(2) << "Done backfilling the tablet " << yb::ToString(tablet_) << " until "
                       << yb::ToString(backfilled_until_);
@@ -1202,18 +1277,14 @@ Status BackfillTablet::UpdateBackfilledUntil(
 // GetSafeTimeForTablet
 // -----------------------------------------------------------------------------------------------
 
-void GetSafeTimeForTablet::Launch() {
+Status GetSafeTimeForTablet::Launch() {
   tablet_->table()->AddTask(shared_from_this());
-  Status status = Run();
+  RETURN_NOT_OK_PREPEND(Run(), Substitute("Failed to send GetSafeTime request for $0. ",
+                                            tablet_->ToString()));
   // Need to print this after Run() because that's where it picks the TS which description()
   // needs.
-  if (status.ok()) {
-    VLOG(3) << "Started GetSafeTimeForTablet : " << this->description();
-  } else {
-    LOG(WARNING) << Substitute("Failed to send GetSafeTime request for $0. ",
-                               tablet_->ToString())
-                 << status;
-  }
+  VLOG(3) << "Started GetSafeTimeForTablet : " << this->description();
+  return Status::OK();
 }
 
 bool GetSafeTimeForTablet::SendRequest(int attempt) {
@@ -1263,6 +1334,11 @@ void GetSafeTimeForTablet::HandleResponse(int attempt) {
 }
 
 void GetSafeTimeForTablet::UnregisterAsyncTaskCallback() {
+  if (state() == MonitoredTaskState::kAborted) {
+    VLOG(1) << " was aborted";
+    return;
+  }
+
   Status status;
   HybridTime safe_time;
   if (resp_.has_error()) {
@@ -1283,16 +1359,21 @@ void GetSafeTimeForTablet::UnregisterAsyncTaskCallback() {
     "Could not UpdateSafeTime");
 }
 
+TabletServerId GetSafeTimeForTablet::permanent_uuid() {
+  return target_ts_desc_ != nullptr ? target_ts_desc_->permanent_uuid() : "";
+}
+
 BackfillChunk::BackfillChunk(std::shared_ptr<BackfillTablet> backfill_tablet,
                              const std::string& start_key)
     : RetryingTSRpcTask(backfill_tablet->master(),
                         backfill_tablet->threadpool(),
                         std::unique_ptr<TSPicker>(new PickLeaderReplica(backfill_tablet->tablet())),
-                        backfill_tablet->tablet()->table().get()),
+                        backfill_tablet->tablet()->table().get(),
+                        /* async_task_throttler */ nullptr),
       indexes_being_backfilled_(backfill_tablet->indexes_to_build()),
       backfill_tablet_(backfill_tablet),
       start_key_(start_key),
-      requested_index_names_(RetrieveIndexNames(backfill_tablet->master()->catalog_manager(),
+      requested_index_names_(RetrieveIndexNames(backfill_tablet->master()->catalog_manager_impl(),
                                                 indexes_being_backfilled_)) {
   deadline_ = MonoTime::Max(); // Never time out.
 }
@@ -1300,10 +1381,10 @@ BackfillChunk::BackfillChunk(std::shared_ptr<BackfillTablet> backfill_tablet,
 // -----------------------------------------------------------------------------------------------
 // BackfillChunk
 // -----------------------------------------------------------------------------------------------
-void BackfillChunk::Launch() {
+Status BackfillChunk::Launch() {
   backfill_tablet_->tablet()->table()->AddTask(shared_from_this());
   Status status = Run();
-  WARN_NOT_OK(
+  RETURN_NOT_OK_PREPEND(
       status, Substitute(
                   "Failed to send backfill Chunk request for $0",
                   backfill_tablet_->tablet().get()->ToString()));
@@ -1313,6 +1394,7 @@ void BackfillChunk::Launch() {
   if (status.ok()) {
     LOG(INFO) << "Started BackfillChunk : " << this->description();
   }
+  return Status::OK();
 }
 
 MonoTime BackfillChunk::ComputeDeadline() {
@@ -1334,6 +1416,12 @@ int BackfillChunk::max_delay_ms() {
   return FLAGS_index_backfill_rpc_max_delay_ms;
 }
 
+std::string BackfillChunk::description() const {
+  return yb::Format("Backfilling indexes $0 for tablet $1 from key '$2'",
+                    requested_index_names_, tablet_id(),
+                    b2a_hex(start_key_));
+}
+
 bool BackfillChunk::SendRequest(int attempt) {
   VLOG(1) << __PRETTY_FUNCTION__;
   if (indexes_being_backfilled_.empty()) {
@@ -1351,7 +1439,7 @@ bool BackfillChunk::SendRequest(int attempt) {
   if (GetTableType() == TableType::PGSQL_TABLE_TYPE) {
     req.set_namespace_name(backfill_tablet_->GetNamespaceName());
   }
-  unordered_set<TableId> found_idxs;
+  std::unordered_set<TableId> found_idxs;
   for (const IndexInfoPB& idx_info : backfill_tablet_->index_infos()) {
     if (indexes_being_backfilled_.find(idx_info.table_id()) != indexes_being_backfilled_.end()) {
       req.add_indexes()->CopyFrom(idx_info);
@@ -1446,11 +1534,19 @@ void BackfillChunk::UnregisterAsyncTaskCallback() {
   }
 
   if (resp_.has_backfilled_until()) {
-    backfill_tablet_->Done(
-        status, resp_.backfilled_until(), resp_.number_rows_processed(), failed_indexes);
+    WARN_NOT_OK(
+        backfill_tablet_->Done(
+            status, resp_.backfilled_until(), resp_.number_rows_processed(), failed_indexes),
+        "Failed marking BackfillTablet as done.");
   } else {
-    backfill_tablet_->Done(status, boost::none, resp_.number_rows_processed(), failed_indexes);
+    WARN_NOT_OK(
+        backfill_tablet_->Done(status, boost::none, resp_.number_rows_processed(), failed_indexes),
+        "Failed marking BackfillTablet as done.");
   }
+}
+
+TabletServerId BackfillChunk::permanent_uuid() {
+  return target_ts_desc_ != nullptr ? target_ts_desc_->permanent_uuid() : "";
 }
 
 }  // namespace master

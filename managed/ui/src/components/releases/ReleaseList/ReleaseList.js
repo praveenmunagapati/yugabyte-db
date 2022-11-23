@@ -1,21 +1,21 @@
 // Copyright (c) YugaByte, Inc.
 
-import React, {Component} from 'react';
-import {BootstrapTable, TableHeaderColumn} from 'react-bootstrap-table';
-import {DropdownButton} from 'react-bootstrap';
+import React, { Component } from 'react';
+import { BootstrapTable, TableHeaderColumn } from 'react-bootstrap-table';
+import { DropdownButton } from 'react-bootstrap';
 
-import {YBPanelItem} from '../../../components/panels';
-import {YBButton, YBTextInput} from '../../../components/common/forms/fields';
-import {TableAction} from '../../../components/tables';
-import {YBLoadingCircleIcon} from '../../../components/common/indicators';
-import {getPromiseState} from '../../../utils/PromiseUtils';
-import {isAvailable, showOrRedirect} from '../../../utils/LayoutUtils';
+import { YBPanelItem } from '../../../components/panels';
+import { YBButton, YBTextInput } from '../../../components/common/forms/fields';
+import { TableAction } from '../../../components/tables';
+import { YBLoadingCircleIcon } from '../../../components/common/indicators';
+import { getPromiseState } from '../../../utils/PromiseUtils';
+import { isAvailable, showOrRedirect } from '../../../utils/LayoutUtils';
 
 import './ReleaseList.scss';
 
 const versionReg = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-(\S*)$/;
 // Sort descending
-const sortVersion = (a, b) => {
+export const sortVersion = (a, b) => {
   const matchA = versionReg.exec(a);
   const matchB = versionReg.exec(b);
 
@@ -93,7 +93,7 @@ export default class ReleaseList extends Component {
       default:
         return <div className="state-pill state-pill--secondary">{item}</div>;
     }
-  }
+  };
 
   render() {
     const {
@@ -113,11 +113,13 @@ export default class ReleaseList extends Component {
     } else if (releases.data) {
       releaseStrList = Object.keys(releases.data).sort(sortVersion);
     }
-    const releaseInfos = releaseStrList.map((version) => {
-      const releaseInfo = releases.data[version];
-      releaseInfo.version = version;
-      return releaseInfo;
-    });
+    const releaseInfos = releaseStrList
+      .filter((version) => releases.data && releases.data[version])
+      .map((version) => {
+        const releaseInfo = releases.data[version];
+        releaseInfo.version = version;
+        return releaseInfo;
+      });
 
     const rowClassNameFormat = function (row, rowIdx) {
       return 'td-column-' + row.state.toLowerCase();

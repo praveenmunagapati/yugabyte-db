@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_TOOLS_YB_ADMIN_CLI_H
-#define YB_TOOLS_YB_ADMIN_CLI_H
+#pragma once
 
 #include <functional>
 #include <map>
@@ -39,8 +38,8 @@
 
 #include <rapidjson/document.h>
 
-#include "yb/util/result.h"
-#include "yb/util/status.h"
+#include "yb/util/status_fwd.h"
+#include "yb/tools/tools_fwd.h"
 
 namespace yb {
 namespace client {
@@ -51,7 +50,6 @@ class YBTableName;
 
 namespace tools {
 
-class ClusterAdminClient;
 typedef enterprise::ClusterAdminClient ClusterAdminClientClass;
 
 // Tool to administer a cluster from the CLI.
@@ -82,6 +80,8 @@ class ClusterAdminCli {
   virtual void RegisterCommandHandlers(ClusterAdminClientClass* client);
 
  private:
+  Status RunCommand(
+      const Command& command, const CLIArguments& command_args, const std::string& program_name);
   std::vector<Command> commands_;
   std::map<std::string, size_t> command_indexes_;
 };
@@ -103,9 +103,7 @@ Result<client::YBTableName> ResolveSingleTableName(
     const CLIArgumentsIterator& end,
     TailArgumentsProcessor tail_processor = TailArgumentsProcessor());
 
-CHECKED_STATUS CheckArgumentsCount(int count, int min, int max);
+Status CheckArgumentsCount(size_t count, size_t min, size_t max);
 
 }  // namespace tools
 }  // namespace yb
-
-#endif // YB_TOOLS_YB_ADMIN_CLI_H

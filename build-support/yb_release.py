@@ -20,16 +20,16 @@ import os
 import platform
 import shutil
 import subprocess
-import tempfile
 import traceback
 import uuid
 import ruamel.yaml
 
 from yb.library_packager import LibraryPackager, add_common_arguments
-from yb import library_packager as library_packager_module
 from yb.mac_library_packager import MacLibraryPackager, add_common_arguments
 from yb.release_util import ReleaseUtil, check_for_local_changes
 from yb.common_util import init_env, get_build_type_from_build_root, set_thirdparty_dir
+from yb.linuxbrew import set_build_root
+
 
 YB_SRC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -47,10 +47,13 @@ def main():
                              'false if --build_target is specified, true otherwise.')
     parser.add_argument('--destination', help='Copy release to Destination folder.')
     parser.add_argument('--force', help='Skip prompts', action='store_true')
-    parser.add_argument('--commit', help='Custom specify a git commit.')
+    parser.add_argument('--commit', help='Specifies a custom git commit to use in archive name.')
     parser.add_argument('--skip_build', help='Skip building the code', action='store_true')
+    parser.add_argument('--skip_yugabyted_ui_build',
+                        help='Skip building the yugabyted-ui code',
+                        action='store_true')
     parser.add_argument('--build_target',
-                        help='Target directory to put the YugaByte distribution into. This can '
+                        help='Target directory to put the YugabyteDB distribution into. This can '
                              'be used for debugging this script without having to build the '
                              'tarball. If specified, this directory must either not exist or be '
                              'empty.')
@@ -65,8 +68,8 @@ def main():
                         help='Do not re-create the initial sys catalog snapshot. Useful when '
                              'debugging the release process.')
     parser.add_argument('--package_name',
-                        default='all',
-                        help='Name of package to release (e.g. cli).')
+                        default='yugabyte',
+                        help='Name of package to release ("yugabyte" or "yugabyte-client").')
     add_common_arguments(parser)
     args = parser.parse_args()
 
@@ -150,6 +153,9 @@ def main():
     if args.skip_build:
         build_cmd_list += ["--skip-build"]
 
+    if not args.skip_yugabyted_ui_build:
+        build_cmd_list += ["--build-yugabyted-ui"]
+
     if args.build_args:
         # TODO: run with shell=True and append build_args as is.
         build_cmd_list += args.build_args.strip().split()
@@ -164,9 +170,12 @@ def main():
     if not args.skip_build:
         # TODO: figure out the dependency issues in our CMake build instead.
         # TODO: move this into yb_build.sh itself.
+        # yugabyted-ui build only needs to run once, so avoid wasting time building it in these
+        # preliminary builds.
         for preliminary_target in ['protoc-gen-insertions', 'bfql_codegen']:
             preliminary_step_cmd_list = [
-                    arg for arg in build_cmd_list if arg != 'packaged_targets'
+                    arg for arg in build_cmd_list
+                    if arg not in ('--build-yugabyted-ui', 'packaged_targets',)
                 ] + ['--target', preliminary_target]
 
             # Skipping Java in these "preliminary" builds whether or not we are building YugaWare.
@@ -206,38 +215,41 @@ def main():
             "specified on the command line ('{}')".format(build_root))
 
     # We are guaranteed to have a build_root by now.
-    library_packager_module.set_build_root(build_root)
+    set_build_root(build_root)
 
     thirdparty_dir = build_desc["thirdparty_dir"]
     thirdparty_dir_from_env = os.environ.get("YB_THIRDPARTY_DIR", thirdparty_dir)
     if (thirdparty_dir != thirdparty_dir_from_env and
             thirdparty_dir_from_env != os.path.join(YB_SRC_ROOT, 'thirdparty')):
-        raise RuntimeError(
+        raise ValueError(
             "Mismatch between non-default valueo of env YB_THIRDPARTY_DIR: '{}' and build desc "
             "thirdparty_dir: '{}'".format(thirdparty_dir_from_env, thirdparty_dir))
     # Set the var for in-memory access to it across the other python files.
     set_thirdparty_dir(thirdparty_dir)
 
-    # This points to the release manifest within the release_manager, and we are modifying that
-    # directly.
     release_util = ReleaseUtil(
-        YB_SRC_ROOT, build_type, build_target, args.force, args.commit, build_root,
-        args.package_name)
+        repository=YB_SRC_ROOT,
+        build_type=build_type,
+        distribution_path=build_target,
+        force=args.force,
+        commit=args.commit,
+        build_root=build_root,
+        package_name=args.package_name)
 
     system = platform.system().lower()
-    library_packager_args = dict(
+    packager_args = dict(
         build_dir=build_root,
         seed_executable_patterns=release_util.get_seed_executable_patterns(),
         dest_dir=yb_distribution_dir,
         verbose_mode=args.verbose
     )
     if system == "linux":
-        library_packager = LibraryPackager(**library_packager_args)
+        packager = LibraryPackager(**packager_args)
     elif system == "darwin":
-        library_packager = MacLibraryPackager(**library_packager_args)
+        packager = MacLibraryPackager(**packager_args)
     else:
         raise RuntimeError("System {} not supported".format(system))
-    library_packager.package_binaries()
+    packager.package_binaries()
 
     release_util.update_manifest(yb_distribution_dir)
 
@@ -247,7 +259,7 @@ def main():
         raise RuntimeError("Directory '{}' exists and is non-empty".format(build_target))
     release_util.create_distribution(build_target)
 
-    library_packager.post_process_distribution(build_target)
+    packager.post_process_distribution(build_target)
 
     # ---------------------------------------------------------------------------------------------
     # Invoke YugaWare packaging

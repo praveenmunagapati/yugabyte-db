@@ -35,19 +35,31 @@ cmake_minimum_required(VERSION 3.7.0)
 
 project(YugabyteDB)
 
+if("$CACHE{YB_PCH_ON}" STREQUAL "")
+  if("$ENV{YB_USE_PCH}" STREQUAL "1")
+    set(YB_USE_PCH ON)
+  else()
+    set(YB_USE_PCH OFF)
+  endif()
+  set(YB_PCH_ON ${YB_USE_PCH} CACHE BOOL "Whether to use precompiled headers")
+endif()
+
 message("-- CMAKE_SYSTEM_INFO_FILE: ${CMAKE_SYSTEM_INFO_FILE}")
 message("-- CMAKE_SYSTEM_NAME:      ${CMAKE_SYSTEM_NAME}")
 message("-- CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
 message("-- CMAKE_SYSTEM:           ${CMAKE_SYSTEM}")
+message("-- CMAKE_VERSION:          ${CMAKE_VERSION}")
+message("-- PRECOMPILED HEADERS:    ${YB_PCH_ON}")
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake_modules")
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake_standard_modules")
 include(YugabyteFunctions)
+yb_initialize_constants()
 include(YugabyteTesting)
 
 ADD_CXX_FLAGS("-Werror")
-ADD_CXX_FLAGS("-fno-strict-aliasing -Wall -Wno-sign-compare -Wno-deprecated")
-if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+ADD_CXX_FLAGS("-fno-strict-aliasing -Wall")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
   # Certain platforms such as ARM do not use signed chars by default
   # which causes issues with certain bounds checks.
   ADD_CXX_FLAGS("-fsigned-char")
@@ -58,6 +70,21 @@ elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
 else()
   message(FATAL_ERROR "Unsupported CPU architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
+
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+  # Optimize for Graviton on Linux/aarch64 (not mac/arm64)
+  ADD_CXX_FLAGS("-march=armv8.2-a+fp16+rcpc+dotprod+crypto")
+  ADD_CXX_FLAGS("-mtune=neoverse-n1")
+  ADD_CXX_FLAGS("-mno-outline-atomics")
+endif()
+
+if (NOT "$ENV{YB_TARGET_ARCH}" STREQUAL "" AND
+    NOT "$ENV{YB_TARGET_ARCH}" STREQUAL "${CMAKE_SYSTEM_PROCESSOR}")
+  message(FATAL_ERROR "YB_TARGET_ARCH is set to $ENV{YB_TARGET_ARCH} but CMAKE_SYSTEM_PROCESSOR "
+                      "is ${CMAKE_SYSTEM_PROCESSOR}.")
+endif()
+set(ENV{YB_TARGET_ARCH} "${CMAKE_SYSTEM_PROCESSOR}")
+
 ADD_CXX_FLAGS("-Winvalid-pch")
 ADD_CXX_FLAGS("-pthread -DBOOST_BIND_NO_PLACEHOLDERS")
 ADD_LINKER_FLAGS("-pthread")
@@ -67,27 +94,29 @@ endif()
 ADD_CXX_FLAGS("-DROCKSDB_PLATFORM_POSIX")
 ADD_CXX_FLAGS("-DBOOST_ERROR_CODE_HEADER_ONLY")
 
-set(YB_NUM_TESTS "0" CACHE INTERNAL "Number of tests" FORCE)
-set(YB_NUM_INCLUDED_TESTS "0" CACHE INTERNAL "Number of included tests" FORCE)
-set(YB_NUM_EXECUTABLES "0" CACHE INTERNAL "Number of executables" FORCE)
-set(YB_NUM_INCLUDED_EXECUTABLES "0" CACHE INTERNAL "Number of included executables" FORCE)
-set(YB_ALL_DEPS "" CACHE INTERNAL "All dependencies" FORCE)
+# CMake's INTERNAL type of cache variables implies FORCE, overwriting existing entries.
+# https://cmake.org/cmake/help/latest/command/set.html
+set(YB_NUM_TESTS "0" CACHE INTERNAL "Number of tests")
+set(YB_NUM_INCLUDED_TESTS "0" CACHE INTERNAL "Number of included tests")
+set(YB_NUM_EXECUTABLES "0" CACHE INTERNAL "Number of executables")
+set(YB_NUM_INCLUDED_EXECUTABLES "0" CACHE INTERNAL "Number of included executables")
+set(YB_ALL_DEPS "" CACHE INTERNAL "All dependencies")
 
 # This is used to let the add_executable wrapper know if we're adding a test.
-set(YB_ADDING_TEST_EXECUTABLE "FALSE" CACHE INTERNAL "" FORCE)
+set(YB_ADDING_TEST_EXECUTABLE "FALSE" CACHE INTERNAL "")
 
-if ("$ENV{YB_DO_NOT_BUILD_TESTS}" STREQUAL "1")
-  message("Skipping building tests (YB_DO_NOT_BUILD_TESTS environment variable is set to 1)")
-  set(BUILD_TESTS OFF)
-else()
-  set(BUILD_TESTS ON)
-endif()
+yb_disable_tests_if_necessary()
 
 parse_build_root_basename()
 if("${YB_BUILD_TYPE}" STREQUAL "")
   message(FATAL_ERROR "YB_BUILD_TYPE still not set after parse_build_root_basename")
 endif()
+
 message("YB_BUILD_TYPE: ${YB_BUILD_TYPE}")
+message("YB_LINKING_TYPE: ${YB_LINKING_TYPE}")
+if("${YB_LINKING_TYPE}" STREQUAL "")
+  message(FATAL_ERROR "YB_LINKING_TYPE is not set")
+endif()
 message("CMAKE_MAKE_PROGRAM: ${CMAKE_MAKE_PROGRAM}")
 
 # CMAKE_LINK_DEPENDS_NO_SHARED prevents prevent re-linking dependents of a shared library when it
@@ -126,6 +155,8 @@ set(ENV{YB_BUILD_ROOT} "${YB_BUILD_ROOT}")
 get_filename_component(YB_BUILD_ROOT_PARENT "${YB_BUILD_ROOT}" DIRECTORY)
 message("YB_BUILD_ROOT: ${YB_BUILD_ROOT}")
 
+message("YB_TARGET_ARCH: $ENV{YB_TARGET_ARCH}")
+
 DETECT_NUMBER_OF_PROCESSORS()
 
 # Detect the shared library suffix on this platform
@@ -143,36 +174,7 @@ CHECK_YB_COMPILER_PATH(${CMAKE_C_COMPILER})
 message("CMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}")
 CHECK_YB_COMPILER_PATH(${CMAKE_CXX_COMPILER})
 
-set(BUILD_SUPPORT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/build-support)
-
-# Provide a 'latest' symlink to this build directory if the "blessed" multi-build layout is
-# detected:
-#
-# build/
-# build/<first build directory>
-# build/<second build directory>
-# ...
-set(LATEST_BUILD_SYMLINK_PATH "${YB_BUILD_ROOT_PARENT}/latest")
-if (NOT "$ENV{YB_DISABLE_LATEST_SYMLINK}" STREQUAL "1")
-  message("LATEST SYMLINK PATH: ${LATEST_BUILD_SYMLINK_PATH}")
-  if ("${CMAKE_CURRENT_BINARY_DIR}" STREQUAL "${LATEST_BUILD_SYMLINK_PATH}")
-    message(FATAL_ERROR "Should not run cmake inside the build/latest symlink. "
-            "First change directories into the destination of the symlink.")
-  endif()
-
-  # This option is needed in addition to -sf, while linking, to force the link to occur on
-  # directories. Unfortunately, Linux & MacOS differ on the option name.
-  if (NOT APPLE)
-    set(MORE_ARGS "-T")
-  else()
-    set(MORE_ARGS "-h")
-  endif()
-  add_custom_target(latest_symlink ALL
-    "${BUILD_SUPPORT_DIR}/create_latest_symlink.sh"
-    "${CMAKE_CURRENT_BINARY_DIR}"
-    "${LATEST_BUILD_SYMLINK_PATH}"
-    COMMENT "Recreating the 'latest' symlink at '${LATEST_BUILD_SYMLINK_PATH}'")
-endif()
+add_latest_symlink_target()
 
 add_custom_target(dummy_target ALL
   COMMAND cat /dev/null
@@ -204,39 +206,19 @@ endif()
 
 # -------------------------------------------------------------------------------------------------
 
-INIT_COMPILER_TYPE_FROM_BUILD_ROOT()
-
-# TODO: this is complicated by the fact that we are trying to build third-party dependencies here if
-# necessary, and that the compiler is sometimes part of those third-party dependencies (e.g. Clang 7
-# with the Linuxbrew-based setup). Therefore, we don't yet know the exact compiler version. If we
-# know that we are not using a third-party setup where we build our own Clang, or if we are not
-# planning to invoke the third-party dependency build from here, we include the CompilerInfo module
-# early. We also always do that on macOS where we only use Clang.
-
-set(INCLUDE_COMPILER_INFO_EARLY FALSE)
-if(NOT "${YB_COMPILER_TYPE}" STREQUAL "clang" OR
-   NOT REBUILD_THIRDPARTY OR
-   APPLE)
-  set(INCLUDE_COMPILER_INFO_EARLY TRUE)
-endif()
-if(INCLUDE_COMPILER_INFO_EARLY)
-  message("Including the CompilerInfo module before determining the third-party instrumentation "
-          "type to use. Criteria: "
-          "REBUILD_THIRDPARTY=${REBUILD_THIRDPARTY}, "
-          "YB_COMPILER_TYPE=${YB_COMPILER_TYPE}.")
-  include(CompilerInfo)
-endif()
+include(CompilerInfo)
 
 # This helps find the right third-party build directory.
 if ("${YB_BUILD_TYPE}" MATCHES "^(asan|tsan)$")
   set(THIRDPARTY_INSTRUMENTATION_TYPE "${YB_BUILD_TYPE}")
-elseif ("${COMPILER_FAMILY}" STREQUAL "clang")
+elseif (IS_CLANG)
   set(THIRDPARTY_INSTRUMENTATION_TYPE "uninstrumented")
-elseif ("${COMPILER_FAMILY}" STREQUAL "gcc")
+elseif (IS_GCC)
   set(THIRDPARTY_INSTRUMENTATION_TYPE "uninstrumented")
 else()
-  message(FATAL_ERROR "Unknown or still undetermined compiler family: '${COMPILER_FAMILY}'.")
+  message(FATAL_ERROR "Unknown compiler family: '${COMPILER_FAMILY}'.")
 endif()
+
 message("THIRDPARTY_INSTRUMENTATION_TYPE=${THIRDPARTY_INSTRUMENTATION_TYPE}")
 
 # Make sure third-party dependency is up-to-date.
@@ -260,10 +242,21 @@ if(NOT INCLUDE_COMPILER_INFO_EARLY)
   include(CompilerInfo)
 endif()
 
+if(NOT DEFINED YB_LTO_ENABLED)
+  message(FATAL_ERROR "YB_LTO_ENABLED is not defined")
+endif()
+
+if(YB_LTO_ENABLED)
+  ADD_CXX_FLAGS("-DYB_LTO_ENABLED")
+endif()
+
 # Generate a compile_commands.json "compilation database" file.
 # See http://clang.llvm.org/docs/JSONCompilationDatabase.html
 if (CMAKE_EXPORT_COMPILE_COMMANDS)
   message("CMAKE_EXPORT_COMPILE_COMMANDS is already enabled, will export compile_commands.json.")
+elseif (YB_LTO_ENABLED)
+  message("This is an LTO-enabled build, will export compile_commands.json.")
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 elseif ("$ENV{YB_EXPORT_COMPILE_COMMANDS}" STREQUAL "1")
   message("The YB_EXPORT_COMPILE_COMMANDS environment variable is set to 1, will export "
           "compile_commands.json.")
@@ -294,10 +287,10 @@ endif()
 
 VALIDATE_COMPILER_TYPE()
 DETECT_BREW()
+enable_lto_if_needed()
 
 message("Using COMPILER_FAMILY=${COMPILER_FAMILY}")
 
-# We can only use IS_CLANG after calling VALIDATE_COMPILER_TYPE.
 if (NOT APPLE AND "${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "x86_64")
   # To enable 16-byte atomics support we should specify appropriate architecture.
   ADD_CXX_FLAGS("-march=ivybridge")
@@ -312,9 +305,6 @@ ADD_CXX_FLAGS("-DROCKSDB_LIB_IO_POSIX")
 ADD_CXX_FLAGS("-DSNAPPY")
 ADD_CXX_FLAGS("-DLZ4")
 ADD_CXX_FLAGS("-DZLIB")
-if ($ENV{YB_COMPILER_TYPE} STREQUAL "zapcc")
-  ADD_CXX_FLAGS("-DYB_ZAPCC")
-endif()
 
 ############################################################
 # Compiler flags
@@ -372,12 +362,11 @@ if(IS_CLANG)
     message("YB_ENABLE_STATIC_ANALYZER is not set to 1, not enabling Clang static analyzer")
   endif()
 
-  # The actual static analysis is turned on using the --analyze flag.
+  ADD_CXX_FLAGS("-Wshorten-64-to-32")
 endif()
 
 if(USING_LINUXBREW AND IS_CLANG)
-  # We only need these when building using clang. If we use Linuxbrew's gcc, it should set the
-  # equivalent of these options automatically.
+  # We are only using Clang with Linuxbrew. We never use Linuxbrew GCC 5 anymore, it is too old.
   ADD_LINKER_FLAGS("-Wl,--dynamic-linker=${LINUXBREW_LIB_DIR}/ld.so")
   ADD_LINKER_FLAGS("--gcc-toolchain=${LINUXBREW_DIR}")
 endif()
@@ -388,6 +377,14 @@ if(IS_GCC)
   # TODO: Subtitute it with '-as-needed' instead to avoid linking with unused library (issue #1495)
   # for reducing pocess start time
   ADD_LINKER_FLAGS("-Wl,-no-as-needed")
+  if ("${COMPILER_VERSION}" MATCHES "^11[.].*$")
+    # To silence these spurious warnings:
+    # https://gist.githubusercontent.com/mbautin/60c7fb897a92b998a111ff38429a1158/raw
+    # https://gist.githubusercontent.com/mbautin/56b95b7a6816ccdf77eaa60f53a7d3ef/raw
+    ADD_CXX_FLAGS("-Wno-array-bounds")
+    ADD_CXX_FLAGS("-Wno-stringop-overflow")
+    ADD_CXX_FLAGS("-Wno-stringop-overread")
+  endif()
 endif()
 
 if(USING_LINUXBREW)
@@ -399,16 +396,7 @@ endif()
 # distinguishes further into BSD vs everything else, but we probably do not care further.
 if(APPLE)
   ADD_CXX_FLAGS("-DOS_MACOSX")
-elseif(NOT "${YB_BUILD_TYPE}" MATCHES "^(asan|tsan)$")
-  message("Specifying linker flags to not allow any undefined symbols")
-  ADD_LINKER_FLAGS("-Wl,--no-undefined -Wl,--no-allow-shlib-undefined")
-else()
-  message("Not specifying linker flags to not allow any undefined symbols: this is ASAN/TSAN")
 endif()
-
-# We don't want to use any stubs; that's exclusively for builds using our
-# exported client headers).
-ADD_CXX_FLAGS(-DYB_HEADERS_NO_STUBS=1)
 
 # compiler flags for different build types (run 'cmake -DCMAKE_BUILD_TYPE=<type> .')
 # For all builds:
@@ -430,7 +418,7 @@ ADD_CXX_FLAGS(-DYB_HEADERS_NO_STUBS=1)
 #   3. Build again with CMAKE_BUILD_TYPE_PROFILE_BUILD
 #     -fprofile-use: Compiler will use the profile outputs for optimizations
 set(CXX_FLAGS_DEBUG "-ggdb")
-set(CXX_FLAGS_FASTDEBUG "-ggdb -O1 -fno-omit-frame-pointer")
+set(CXX_FLAGS_FASTDEBUG "-ggdb -O1 -fno-omit-frame-pointer -DFASTDEBUG")
 set(CXX_FLAGS_RELEASE "-O3 -g -DNDEBUG -fno-omit-frame-pointer")
 
 # Nullify CMake's predefined flags since we are handling different build types on our own.
@@ -438,10 +426,6 @@ set(CXX_FLAGS_RELEASE "-O3 -g -DNDEBUG -fno-omit-frame-pointer")
 # optimization level will be changed because in case of multiple -O flags gcc uses the last one.
 set(CMAKE_CXX_FLAGS_DEBUG "")
 set(CMAKE_CXX_FLAGS_RELEASE "")
-
-if (NOT "${YB_USE_LTO}" STREQUAL "")
-  set(CXX_FLAGS_RELEASE "${CXX_FLAGS_RELEASE} flto -fno-use-linker-plugin")
-endif()
 
 set(CXX_FLAGS_PROFILE_GEN "${CXX_FLAGS_RELEASE} -fprofile-generate")
 set(CXX_FLAGS_PROFILE_BUILD "${CXX_FLAGS_RELEASE} -fprofile-use")
@@ -503,7 +487,7 @@ if (IS_CLANG)
   if ("${COMPILER_VERSION}" VERSION_GREATER_EQUAL "12.0.0" AND APPLE)
     ADD_CXX_FLAGS("-Wno-c++17-compat-mangling")
   endif()
-elseif("${COMPILER_FAMILY}" STREQUAL "gcc")
+elseif(IS_GCC)
   if ("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "x86_64")
     ADD_CXX_FLAGS("-mno-abm -mno-movbe")
   endif()
@@ -511,17 +495,19 @@ else()
   message(FATAL_ERROR "Unknown compiler family: ${COMPILER_FAMILY}")
 endif()
 
-set(YB_PREFIX_COMMON "${YB_THIRDPARTY_DIR}/installed/common")
+include(YugabyteFindThirdParty)
+yb_find_third_party_installed_dir()
+set(YB_PREFIX_COMMON "${YB_THIRDPARTY_INSTALLED_DIR}/common")
 
-# Flag to enable thread sanitizer (clang or gcc 4.8)
-if ("${YB_BUILD_TYPE}" MATCHES "^(asan|tsan)$")
-  YB_SETUP_SANITIZER()
-elseif (NOT APPLE AND IS_CLANG)
+if(NOT APPLE AND IS_CLANG)
   YB_SETUP_CLANG()
+  if ("${YB_BUILD_TYPE}" MATCHES "^(asan|tsan)$")
+    YB_SETUP_SANITIZER()
+  endif()
 endif()
 
 if (USING_LINUXBREW)
-  include_directories(SYSTEM ${LINUXBREW_DIR}/include)
+  include_directories(SYSTEM "${LINUXBREW_DIR}/include")
 endif()
 
 if (NOT IS_CLANG)
@@ -534,8 +520,8 @@ endif()
 # - disable 'alignment' because unaligned access is really OK on Nehalem and we do it
 #   all over the place.
 if ("${YB_BUILD_TYPE}" STREQUAL "asan")
-  if(NOT ("${COMPILER_FAMILY}" STREQUAL "clang" OR
-          "${COMPILER_FAMILY}" STREQUAL "gcc" AND "${COMPILER_VERSION}" VERSION_GREATER "4.9"))
+  if(NOT (IS_CLANG OR
+          IS_GCC AND "${COMPILER_VERSION}" VERSION_GREATER "4.9"))
     message(SEND_ERROR "Cannot use UBSAN without clang or gcc >= 4.9")
   endif()
   set(CXX_NO_SANITIZE_FLAG "alignment")
@@ -550,7 +536,7 @@ endif ()
 if ("${YB_BUILD_TYPE}" MATCHES "^(asan|tsan)$")
   # GCC 4.8 and 4.9 (latest as of this writing) don't allow you to specify a
   # sanitizer blacklist.
-  if("${COMPILER_FAMILY}" STREQUAL "clang")
+  if(IS_CLANG)
     # Require clang 3.4 or newer; clang 3.3 has issues with TSAN and pthread
     # symbol interception.
     if("${COMPILER_VERSION}" VERSION_LESS "3.4")
@@ -565,6 +551,23 @@ if ("${YB_BUILD_TYPE}" MATCHES "^(asan|tsan)$")
 endif()
 
 set(BUILD_SHARED_LIBS ON)
+if ("${YB_BUILD_TYPE}" STREQUAL "prof_gen")
+  ADD_CXX_FLAGS("-fprofile-instr-generate -DYB_PROFGEN")
+endif ()
+
+if ("${YB_BUILD_TYPE}" STREQUAL "prof_use")
+  if (NOT YB_PGO_DATA_PATH)
+    message (SEND_ERROR "Pgo data path is not set.")
+  endif()
+  ADD_CXX_FLAGS("-fprofile-instr-use=${YB_PGO_DATA_PATH}")
+  # Even with the fresh profile data we might get warnings like
+  # warning: Function control flow change detected (hash mismatch)
+  #    [-Wbackend-plugin]
+  # Silencing it for now.
+  ADD_CXX_FLAGS("-Wno-backend-plugin")
+  ADD_CXX_FLAGS("-Wno-profile-instr-unprofiled")
+  ADD_CXX_FLAGS("-Wno-profile-instr-out-of-date")
+endif ()
 
 # Position independent code is only necessary when producing shared objects.
 ADD_CXX_FLAGS(-fPIC)
@@ -587,6 +590,11 @@ include_directories(ent/src)
 include_directories(src)
 
 enable_testing()
+
+if (USING_LINUXBREW)
+  ADD_GLOBAL_RPATH_ENTRY_AND_LIB_DIR("${YB_BUILD_ROOT}/postgres/lib")
+  ADD_GLOBAL_RPATH_ENTRY_AND_LIB_DIR("${LINUXBREW_LIB_DIR}")
+endif()
 
 ############################################################
 # Dependencies
@@ -649,7 +657,7 @@ set(CMAKE_PREFIX_PATH ${YB_PREFIX_COMMON} ${CMAKE_PREFIX_PATH})
 ADD_LINKER_FLAGS("-L${YB_PREFIX_COMMON}/lib")
 
 set(YB_THIRDPARTY_INSTALLED_DEPS_DIR
-    "${YB_THIRDPARTY_DIR}/installed/${THIRDPARTY_INSTRUMENTATION_TYPE}")
+  "${YB_THIRDPARTY_INSTALLED_DIR}/${THIRDPARTY_INSTRUMENTATION_TYPE}")
 set(CMAKE_PREFIX_PATH ${YB_THIRDPARTY_INSTALLED_DEPS_DIR} ${CMAKE_PREFIX_PATH})
 ADD_LINKER_FLAGS("-L${YB_THIRDPARTY_INSTALLED_DEPS_DIR}/lib")
 
@@ -671,9 +679,51 @@ if(IS_CLANG AND NOT "$ENV{YB_CLANG_PREFIX}" STREQUAL "")
   ADD_GLOBAL_RPATH_ENTRY("$ENV{YB_CLANG_PREFIX}/lib")
 endif()
 
+configure_macos_sdk()
+
 # -------------------------------------------------------------------------------------------------
 
-include(YugabyteFindThirdParty)
+yb_find_third_party_dependencies()
+
+# Flags to link the tcmalloc static library. Used for each CMake target that is an executable,
+# as well as for executables generated as part of Postgres build.
+set(TCMALLOC_STATIC_LIB_LD_FLAGS "")
+
+# Set flags based on whether we are using tcmalloc.
+if ("${YB_TCMALLOC_ENABLED}" STREQUAL "1" OR
+    "${YB_BUILD_TYPE}" MATCHES "^(asan|tsan)$")
+  message("Allowing undefined symbols "
+          "(YB_TCMALLOC_ENABLED=${YB_TCMALLOC_ENABLED}, build type is ${YB_BUILD_TYPE})")
+  if(IS_GCC)
+    # Without this, yb_util cannot get linked with GCC 11 because it references some undefined
+    # symbols belonging to tcmalloc, e.g. HeapProfilerStart.
+    # https://gist.githubusercontent.com/mbautin/53e72fbc8c45b4b0d759673fba102ddf/raw
+    ADD_LINKER_FLAGS("-Wl,--unresolved-symbols=ignore-all")
+  endif()
+  if(APPLE)
+    # See https://bit.ly/3DrOibC on this Apple Clang specific flag.
+    ADD_LINKER_FLAGS("-undefined dynamic_lookup")
+    # To get rid of the following warning during linking on macOS:
+    #
+    # -undefined dynamic_lookup may not work with chained fixups
+    #
+    # See https://github.com/bazelbuild/bazel/issues/16413 for discussion.
+    ADD_LINKER_FLAGS("-Wl,-no_fixup_chains")
+  else()
+    ADD_LINKER_FLAGS("-Wl,--allow-shlib-undefined")
+  endif()
+
+  if(APPLE)
+    set(TCMALLOC_STATIC_LIB_LD_FLAGS "-force_load ${TCMALLOC_STATIC_LIB}")
+  else()
+    set(TCMALLOC_STATIC_LIB_LD_FLAGS
+        "-Wl,--whole-archive ${TCMALLOC_STATIC_LIB} -Wl,--no-whole-archive")
+  endif()
+else()
+  message("Not allowing any undefined symbols "
+          "(tcmalloc is disabled and build type is ${YB_BUILD_TYPE})")
+  ADD_LINKER_FLAGS("-Wl,--no-undefined -Wl,--no-allow-shlib-undefined")
+endif()
 
 ############################################################
 # Linker setup
@@ -693,10 +743,18 @@ set(YB_CMAKE_CXX_EXTRA_FLAGS "-Wextra -Wno-unused-parameter")
 set(CMAKE_C_FLAGS "${CMAKE_CXX_FLAGS}")
 
 # C++-only flags.
-if (("${COMPILER_FAMILY}" STREQUAL "gcc") AND
+ADD_CXX_FLAGS("-Werror=missing-field-initializers")
+
+if ((IS_GCC) AND
     ("${CMAKE_CXX_COMPILER_VERSION}" VERSION_GREATER_EQUAL "7.0"))
   # Used with GCC 7.
   ADD_CXX_FLAGS("-faligned-new")
+endif()
+
+# -Wsign-compare is enabled for C++ only for GCC with just -Wall, and enabled for both C and C++
+# for GCC and Clang with -Wextra. Remove when -Wextra is enabled for all source code (#9279).
+if (IS_CLANG)
+  ADD_CXX_FLAGS("-Wsign-compare")
 endif()
 
 string (REPLACE "-Werror=non-virtual-dtor" "" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
@@ -704,29 +762,14 @@ string (REPLACE "-Werror=reorder" "" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
 string (REPLACE "-Wnon-virtual-dtor" "" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
 string (REPLACE "-Woverloaded-virtual" "" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
 
+yb_deduplicate_arguments(CMAKE_C_FLAGS)
 
-message("CMAKE_C_FLAGS ${CMAKE_C_FLAGS}")
+set(CMAKE_CXX_STANDARD 20)
 
-set(CMAKE_CXX_STANDARD 14)
-
-if ("${COMPILER_FAMILY}" STREQUAL "gcc" AND
-    "${COMPILER_VERSION}" VERSION_GREATER_EQUAL "8.0.0")
-  # Remove after switching to C++17
-  ADD_CXX_FLAGS("-Wno-aligned-new")
-endif()
-
+yb_deduplicate_arguments(CMAKE_CXX_FLAGS)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if (USING_LINUXBREW)
-  # We need to add the postgres library directory prior to /usr/lib64 specifically in order to avoid
-  # using the system libpq.
-  ADD_GLOBAL_RPATH_ENTRY_AND_LIB_DIR("${YB_BUILD_ROOT}/postgres/lib")
-
-  # Add the Linuxbrew library directory and the system library directory last.
-  ADD_GLOBAL_RPATH_ENTRY_AND_LIB_DIR("${LINUXBREW_LIB_DIR}")
-  ADD_GLOBAL_RPATH_ENTRY_AND_LIB_DIR("/usr/lib64")
-endif()
-
+yb_deduplicate_arguments(CMAKE_EXE_LINKER_FLAGS)
 message("Linker flags for executables: ${CMAKE_EXE_LINKER_FLAGS}")
 
 # Define full paths to libpq and libyb_pgbackend shared libraries. These libraries are built as part
@@ -753,11 +796,13 @@ add_subdirectory(src/yb/rocksdb)
 add_subdirectory(src/yb/gutil)
 add_subdirectory(src/yb/util)
 add_subdirectory(src/yb/common)
+add_subdirectory(src/yb/encryption)
+add_subdirectory(src/yb/gen_yrpc)
 add_subdirectory(src/yb/fs)
 add_subdirectory(src/yb/server)
 add_subdirectory(src/yb/tablet)
-add_subdirectory(src/yb/util/bfql)
-add_subdirectory(src/yb/util/bfpg)
+add_subdirectory(src/yb/bfql)
+add_subdirectory(src/yb/bfpg)
 add_subdirectory(src/yb/rpc)
 add_subdirectory(src/yb/tserver)
 add_subdirectory(src/yb/consensus)
@@ -772,6 +817,16 @@ add_subdirectory(src/yb/cdc)
 
 include("${YB_SRC_ROOT}/ent/CMakeLists.txt")
 
+# Note "yb-server", without the "t" -- this is not a typo. "yb-server" is the unified LTO executable
+# that contains the functionality of both yb-master and yb-tserver, and yb-master/yb-tserver are
+# symlinks to it.  It decides to act as yb-master or yb-tserver based on its argv[0].
+#
+# In the command below, yb-master is the CMake target that we use as a base to determine the set of
+# object files to be linked into the LTO executable, yb-server is the name of the LTO executable,
+# and yb-master/yb-tserver are names of symlinks to create in the "bin" directory, pointing to the
+# LTO executable.
+yb_add_lto_target(yb-master yb-server "yb-master;yb-tserver")
+
 # ------------------------------------------------------------------------------------------------
 # Utilities for collecting the dependency graph
 # ------------------------------------------------------------------------------------------------
@@ -783,6 +838,10 @@ string(REPLACE "\\n" "\n" YB_ALL_DEPS_FINAL "${YB_ALL_DEPS}")
 # target: dep1;dep2;..;depN
 # The same target can appear on the left hand side of multiple such lines.
 file(WRITE "${YB_BUILD_ROOT}/yb_cmake_deps.txt" "${YB_ALL_DEPS_FINAL}")
+
+# ------------------------------------------------------------------------------------------------
+# Final reporting
+# ------------------------------------------------------------------------------------------------
 
 math(EXPR YB_NUM_EXCLUDED_TESTS "${YB_NUM_TESTS} - ${YB_NUM_INCLUDED_TESTS}")
 message("Total tests: ${YB_NUM_TESTS}, "

@@ -18,21 +18,18 @@
 //
 
 // Portions Copyright (c) YugaByte, Inc.
-
 #include "yb/util/status.h"
 
-#include <stdio.h>
-#include <stdint.h>
-
+#include <array>
+#include <atomic>
 #include <regex>
-#include <unordered_map>
+#include <string_view>
 
-#include <boost/optional.hpp>
-
-#include "yb/gutil/strings/fastmem.h"
-#include "yb/util/locks.h"
-#include "yb/util/malloc.h"
+#include "yb/gutil/dynamic_annotations.h"
 #include "yb/util/debug-util.h"
+#include "yb/util/malloc.h"
+#include "yb/util/slice.h"
+#include "yb/util/status_ec.h"
 
 namespace yb {
 
@@ -183,7 +180,46 @@ class ErrorCodesRange {
   const char* start_;
 };
 
+template<class SizeType>
+uint8_t* StoreString(const std::string& str, uint8_t* out) {
+  Store<SizeType, LittleEndian>(out, str.size());
+  out += sizeof(SizeType);
+  memcpy(out, str.data(), str.size());
+  out += str.size();
+  return out;
+}
+
+template<class SizeType>
+size_t StringEncodedSize(const std::string& str) {
+  return sizeof(SizeType) + str.size();
+}
+
+template<class SizeType>
+std::string_view DecodeString(Slice* source) {
+  const auto str_size = Load<SizeType, LittleEndian>(source->cdata());
+  source->remove_prefix(sizeof(SizeType));
+  const std::string_view result(source->cdata(), str_size);
+  source->remove_prefix(str_size);
+  return result;
+}
+
 } // anonymous namespace
+
+StringBackedErrorTag::Value StringBackedErrorTag::Decode(const uint8_t* source) {
+  if (!source) {
+    return Value();
+  }
+  Slice buf(source, DecodeSize(source));
+  return StringBackedErrorTag::Value(DecodeString<SizeType>(&buf));
+}
+
+size_t StringBackedErrorTag::EncodedSize(const StringBackedErrorTag::Value& value) {
+  return StringEncodedSize<SizeType>(value);
+}
+
+uint8_t* StringBackedErrorTag::Encode(const StringBackedErrorTag::Value& value, uint8_t* out) {
+  return StoreString<SizeType>(value, out);
+}
 
 StringVectorBackedErrorTag::Value StringVectorBackedErrorTag::Decode(const uint8_t* source) {
   if (!source) {
@@ -193,10 +229,7 @@ StringVectorBackedErrorTag::Value StringVectorBackedErrorTag::Decode(const uint8
   Slice buf(source, DecodeSize(source));
   buf.remove_prefix(sizeof(SizeType));
   while (buf.size() > 0) {
-    const auto str_size = Load<SizeType, LittleEndian>(buf.data());
-    buf.remove_prefix(sizeof(SizeType));
-    result.emplace_back(buf.cdata(), str_size);
-    buf.remove_prefix(str_size);
+    result.emplace_back(DecodeString<SizeType>(&buf));
   }
   return result;
 }
@@ -204,7 +237,7 @@ StringVectorBackedErrorTag::Value StringVectorBackedErrorTag::Decode(const uint8
 size_t StringVectorBackedErrorTag::EncodedSize(const StringVectorBackedErrorTag::Value& value) {
   size_t size = sizeof(SizeType);
   for (const auto& str : value) {
-    size += sizeof(SizeType) + str.size();
+    size += StringEncodedSize<SizeType>(str);
   }
   return size;
 }
@@ -214,10 +247,7 @@ uint8_t* StringVectorBackedErrorTag::Encode(
   uint8_t* const start = out;
   out += sizeof(SizeType);
   for (const auto& str : value) {
-    Store<SizeType, LittleEndian>(out, str.size());
-    out += sizeof(SizeType);
-    memcpy(out, str.data(), str.size());
-    out += str.size();
+    out = StoreString<SizeType>(str, out);
   }
   Store<SizeType, LittleEndian>(start, out - start);
   return out;
@@ -242,7 +272,7 @@ struct Status::State {
   template <class Errors>
   static StatePtr Create(
       Code code, const char* file_name, int line_number, const Slice& msg, const Slice& msg2,
-      const Errors& errors, DupFileName dup_file_name);
+      const Errors& errors, size_t file_name_len);
 
   ErrorCodesRange error_codes() const {
     return ErrorCodesRange(message + message_len);
@@ -293,7 +323,7 @@ struct Status::State {
 template <class Errors>
 Status::StatePtr Status::State::Create(
     Code code, const char* file_name, int line_number, const Slice& msg, const Slice& msg2,
-    const Errors& errors, DupFileName dup_file_name) {
+    const Errors& errors, size_t file_name_len) {
   static constexpr size_t kHeaderSize = offsetof(State, message);
 
   assert(code != kOk);
@@ -302,8 +332,8 @@ Status::StatePtr Status::State::Create(
   const size_t size = len1 + (len2 ? (2 + len2) : 0);
   const size_t errors_size = ErrorsSize(errors);
   size_t file_name_size = 0;
-  if (dup_file_name) {
-    file_name_size = strlen(file_name) + 1;
+  if (file_name_len) {
+    file_name_size = file_name_len + 1;
   }
   StatePtr result(static_cast<State*>(malloc(size + kHeaderSize + errors_size + file_name_size)));
   result->message_len = static_cast<uint32_t>(size);
@@ -320,9 +350,10 @@ Status::StatePtr Status::State::Create(
   auto errors_start = pointer_cast<uint8_t*>(&result->message[0] + size);
   auto out = StoreErrors(errors, errors_start);
   DCHECK_EQ(out, errors_start + errors_size);
-  if (dup_file_name) {
+  if (file_name_len) {
     auto new_file_name = out;
-    memcpy(new_file_name, file_name, file_name_size);
+    memcpy(new_file_name, file_name, file_name_len);
+    new_file_name[file_name_len] = 0;
     file_name = pointer_cast<char*>(new_file_name);
   }
 
@@ -337,8 +368,8 @@ Status::Status(Code code,
                const Slice& msg,
                const Slice& msg2,
                const StatusErrorCode* error,
-               DupFileName dup_file_name)
-    : state_(State::Create(code, file_name, line_number, msg, msg2, error, dup_file_name)) {
+               size_t file_name_len)
+    : state_(State::Create(code, file_name, line_number, msg, msg2, error, file_name_len)) {
 #ifndef NDEBUG
   static const bool print_stack_trace = getenv("YB_STACK_TRACE_ON_ERROR_STATUS") != nullptr;
   static const boost::optional<std::regex> status_stack_trace_re =
@@ -369,9 +400,9 @@ Status::Status(Code code,
                const char* file_name,
                int line_number,
                const Slice& msg,
-               const Slice& errors,
-               DupFileName dup_file_name)
-    : state_(State::Create(code, file_name, line_number, msg, Slice(), errors, dup_file_name)) {
+               const Slice& error,
+               size_t file_name_len)
+    : state_(State::Create(code, file_name, line_number, msg, Slice(), error, file_name_len)) {
 }
 
 Status::Status(StatePtr state)
@@ -380,6 +411,23 @@ Status::Status(StatePtr state)
 
 Status::Status(YBCStatusStruct* state, AddRef add_ref)
     : state_(pointer_cast<State*>(state), add_ref) {
+}
+
+Status::Status(Code code,
+               const char* file_name,
+               int line_number,
+               const StatusErrorCode& error,
+               size_t file_name_len)
+    : Status(code, file_name, line_number, error.Message(), Slice(), error, file_name_len) {
+}
+
+Status::Status(Code code,
+       const char* file_name,
+       int line_number,
+       const Slice& msg,
+       const StatusErrorCode& error,
+       size_t file_name_len)
+    : Status(code, file_name, line_number, msg, error.Message(), error, file_name_len) {
 }
 
 YBCStatusStruct* Status::RetainStruct() const {
@@ -393,13 +441,13 @@ YBCStatusStruct* Status::DetachStruct() {
   return pointer_cast<YBCStatusStruct*>(state_.detach());
 }
 
-#define YB_STATUS_RETURN_MESSAGE(name, pb_name, value, message) \
-    case Status::BOOST_PP_CAT(k, name): \
-      return message;
-
 const char* Status::CodeAsCString() const {
   switch (code()) {
-    BOOST_PP_SEQ_FOR_EACH(YB_STATUS_FORWARD_MACRO, YB_STATUS_RETURN_MESSAGE, YB_STATUS_CODES)
+  #define YB_STATUS_CODE(name, pb_name, value, message) \
+    case Status::BOOST_PP_CAT(k, name): \
+      return message;
+  #include "yb/util/status_codes.h"
+  #undef YB_STATUS_CODE
   }
   return nullptr;
 }
@@ -482,19 +530,19 @@ Status::Code Status::code() const {
 Status Status::CloneAndPrepend(const Slice& msg) const {
   return Status(State::Create(
       code(), state_->file_name, state_->line_number, msg, message(), state_->ErrorCodesSlice(),
-      DupFileName(file_name_duplicated())));
+      file_name_len_for_copy()));
 }
 
 Status Status::CloneAndReplaceCode(Code code) const {
   return Status(State::Create(
       code, state_->file_name, state_->line_number, message(), Slice(), state_->ErrorCodesSlice(),
-      DupFileName(file_name_duplicated())));
+      file_name_len_for_copy()));
 }
 
 Status Status::CloneAndAppend(const Slice& msg) const {
   return Status(State::Create(
       code(), state_->file_name, state_->line_number, message(), msg, state_->ErrorCodesSlice(),
-      DupFileName(file_name_duplicated())));
+      file_name_len_for_copy()));
 }
 
 Status Status::CloneAndAddErrorCode(const StatusErrorCode& error_code) const {
@@ -538,13 +586,13 @@ Status Status::CloneAndAddErrorCode(const StatusErrorCode& error_code) const {
     out = DoEncode(error_code, out);
     *out++ = 0;
   }
-  auto encoded_size = out - buffer;
+  size_t encoded_size = out - buffer;
   LOG_IF(DFATAL, encoded_size != new_errors_size)
       << "New error codes size is expected to be " << new_errors_size << " but " << encoded_size
       << " bytes were encoded";
   return Status(State::Create(
       code(), state_->file_name, state_->line_number, message(), Slice(),
-      Slice(buffer, new_errors_size), DupFileName(file_name_duplicated())));
+      Slice(buffer, new_errors_size), file_name_len_for_copy()));
 }
 
 size_t Status::memory_footprint_excluding_this() const {
@@ -557,6 +605,10 @@ size_t Status::memory_footprint_including_this() const {
 
 bool Status::file_name_duplicated() const {
   return state_->FileNameDuplicated();
+}
+
+size_t Status::file_name_len_for_copy() const {
+  return file_name_duplicated() ? strlen(state_->file_name) : 0;
 }
 
 const uint8_t* Status::ErrorData(uint8_t category) const {
@@ -601,6 +653,14 @@ const std::string& Status::CategoryName(uint8_t category) {
 
 StatusCategoryRegisterer::StatusCategoryRegisterer(const StatusCategoryDescription& description) {
   Status::RegisterCategory(description);
+}
+
+std::string StringVectorBackedErrorTag::DecodeToString(const uint8_t* source) {
+  return AsString(Decode(source));
+}
+
+void StatusCheck(bool value) {
+  CHECK(value);
 }
 
 }  // namespace yb

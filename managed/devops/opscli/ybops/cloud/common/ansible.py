@@ -13,10 +13,11 @@ import json
 import logging
 import os
 import subprocess
-import sysconfig
+import sys
 
-from ybops.common.exceptions import YBOpsRuntimeError
+from ybops.common.exceptions import YBOpsRuntimeError, YBOpsRecoverableError
 import ybops.utils as ybutils
+from ybops.utils.ssh import SSH, SSH2, parse_private_key, check_ssh2_bin_present
 
 
 class AnsibleProcess(object):
@@ -26,6 +27,7 @@ class AnsibleProcess(object):
     """
     DEFAULT_SSH_USER = "centos"
     DEFAULT_SSH_CONNECTION_TYPE = "ssh"
+    REDACT_STRING = "REDACTED"
 
     def __init__(self):
         self.yb_user_name = "yugabyte"
@@ -38,6 +40,7 @@ class AnsibleProcess(object):
         self.can_ssh = True
         self.connection_type = self.DEFAULT_SSH_CONNECTION_TYPE
         self.connection_target = "localhost"
+        self.sensitive_data_keywords = ["KEY", "SECRET", "CREDENTIALS", "API", "POLICY"]
 
     def set_connection_params(self, conn_type, target):
         self.connection_type = conn_type
@@ -46,13 +49,48 @@ class AnsibleProcess(object):
     def build_connection_target(self, target):
         return target + ","
 
-    def run(self, filename, extra_vars=dict(), host_info={}, print_output=True):
+    def is_sensitive(self, key_string):
+        for word in self.sensitive_data_keywords:
+            if word in key_string:
+                return True
+        return False
+
+    def redact_sensitive_data(self, playbook_args):
+        for key, value in playbook_args.items():
+            if self.is_sensitive(key.upper()):
+                playbook_args[key] = self.REDACT_STRING
+        return playbook_args
+
+    def get_python_executable(self):
+        if "PYTHON_EXECUTABLE" in os.environ:
+            return os.environ["PYTHON_EXECUTABLE"]
+        raise YBOpsRuntimeError("Could not find python path in environment.")
+
+    def get_pex_path(self):
+        """
+        Method used to determine the pex path if script is being called with a PEX environment.
+        Returns path to env if available, False otherwise
+        """
+        if "PEX" in os.environ:
+            return os.environ.get("PEX")
+        return False
+
+    # Finds ansible playbook path. Only necessary in PEX environments.
+    def get_ansible_playbook_path(self):
+        return [x for x in sys.path if x.find('ansible-') >= 0][0]
+
+    def run(self, filename, extra_vars=None, host_info=None, print_output=True):
         """Method used to call out to the respective Ansible playbooks.
         Args:
             filename: The playbook file to execute
             extra_args: A dictionary of KVs to pass as extra-vars to ansible-playbook
             host_info: A dictionary of host level attributes which is empty for localhost.
         """
+
+        if host_info is None:
+            host_info = {}
+        if extra_vars is None:
+            extra_vars = dict()
 
         playbook_args = self.playbook_args
         vars = extra_vars.copy()
@@ -66,20 +104,45 @@ class AnsibleProcess(object):
         ask_sudo_pass = vars.pop("ask_sudo_pass", None)
         sudo_pass_file = vars.pop("sudo_pass_file", None)
         ssh_key_file = vars.pop("private_key_file", None)
+        ssh2_enabled = vars.pop("ssh2_enabled", False) and check_ssh2_bin_present()
+        ssh_key_type = parse_private_key(ssh_key_file)
+        env = os.environ.copy()
+        if env.get('APPLICATION_CONSOLE_LOG_LEVEL') != 'INFO':
+            env['PROFILE_TASKS_TASK_OUTPUT_LIMIT'] = '30'
 
         playbook_args.update(vars)
 
         if self.can_ssh:
             playbook_args.update({
                 "ssh_user": ssh_user,
-                "yb_server_ssh_user": ssh_user
+                "yb_server_ssh_user": ssh_user,
+                "ssh_version": SSH if ssh_key_type == SSH else SSH2
             })
 
-        playbook_args["yb_home_dir"] = ybutils.YB_HOME_DIR
+        process_args = ["ansible-playbook"]
 
-        process_args = [
-            "ansible-playbook", os.path.join(ybutils.YB_DEVOPS_HOME, filename)
-        ]
+        # Determine PEX and override ansible-playbook path.
+        pex_path = self.get_pex_path()
+        if pex_path:
+            python = self.get_python_executable()
+            ansible_playbook = self.get_ansible_playbook_path()
+            process_args = [python, pex_path, ansible_playbook + "/.prefix/bin/ansible-playbook"]
+
+        if ssh2_enabled:
+            # Will be moved as part of task of license upload api.
+            configure_ssh2_args = process_args + [
+                os.path.join(ybutils.YB_DEVOPS_HOME, "configure_ssh2.yml")
+            ]
+            p = subprocess.Popen(configure_ssh2_args,
+                                 stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE,
+                                 env=env)
+            stdout, stderr = p.communicate()
+            if p.returncode != 0:
+                raise YBOpsRuntimeError("Failed to configure ssh2 on the platform")
+
+        process_args.extend([os.path.join(ybutils.YB_DEVOPS_HOME, filename)])
+        playbook_args["yb_home_dir"] = ybutils.YB_HOME_DIR
 
         if vault_password_file is not None:
             process_args.extend(["--vault-password-file", vault_password_file])
@@ -93,14 +156,23 @@ class AnsibleProcess(object):
         elif tags is not None:
             process_args.extend(["--tags", tags])
 
+        process_args.extend([
+            "--user", ssh_user
+        ])
+
         if ssh_port is None or ssh_host is None:
             connection_type = "local"
             inventory_target = "localhost,"
         elif self.can_ssh:
-            process_args.extend([
-                "--private-key", ssh_key_file,
-                "--user", ssh_user
-            ])
+            if ssh2_enabled:
+                process_args.extend([
+                    '--ssh-common-args=\'-K%s\'' % (ssh_key_file),
+                    '--ssh-extra-args=\'-l%s\'' % (ssh_user),
+                ])
+            else:
+                process_args.extend([
+                    "--private-key", ssh_key_file,
+                ])
 
             playbook_args.update({
                 "yb_ansible_host": ssh_host,
@@ -117,25 +189,34 @@ class AnsibleProcess(object):
         # Set inventory, connection type, and pythonpath.
         process_args.extend([
             "-i", inventory_target,
-            "-c", connection_type,
+            "-c", connection_type
         ])
+
+        redacted_process_args = process_args.copy()
 
         # Setup the full list of extra-vars needed for ansible plays.
         process_args.extend(["--extra-vars", json.dumps(playbook_args)])
-        env = os.environ.copy()
-        if env.get('APPLICATION_CONSOLE_LOG_LEVEL') != 'INFO':
-            env['PROFILE_TASKS_TASK_OUTPUT_LIMIT'] = '30'
+        redacted_process_args.extend(
+            ["--extra-vars", json.dumps(self.redact_sensitive_data(playbook_args))])
         logging.info("[app] Running ansible playbook {} against target {}".format(
                         filename, inventory_target))
-        logging.info("Running ansible command {}".format(json.dumps(process_args,
+
+        logging.info("Running ansible command {}".format(json.dumps(redacted_process_args,
                                                                     separators=(' ', ' '))))
         p = subprocess.Popen(process_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         stdout, stderr = p.communicate()
+
         if print_output:
             print(stdout.decode('utf-8'))
-        EXCEPTION_MSG_FORMAT = ("Playbook run of {} against {} with args {} " +
-                                "failed with return code {} and error '{}'")
+
         if p.returncode != 0:
-            raise YBOpsRuntimeError(EXCEPTION_MSG_FORMAT.format(
-                    filename, inventory_target, process_args, p.returncode, stderr))
+            errmsg = f"Playbook run of {filename} against {inventory_target} with args " \
+                     f"{redacted_process_args} failed with return code {p.returncode} " \
+                     f"and error '{stderr}'"
+
+            if p.returncode == 4:  # host unreachable
+                raise YBOpsRecoverableError(errmsg)
+            else:
+                raise YBOpsRuntimeError(errmsg)
+
         return p.returncode

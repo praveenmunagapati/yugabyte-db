@@ -29,15 +29,11 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_COMMON_ID_MAPPING_H
-#define YB_COMMON_ID_MAPPING_H
+#pragma once
 
-#include <utility>
 #include <vector>
 
 #include <glog/logging.h>
-
-#include "yb/gutil/macros.h"
 
 namespace yb {
 
@@ -136,7 +132,7 @@ class IdMapping {
     }
   }
 
-  int capacity() const {
+  size_t capacity() const {
     return mask_ + 1;
   }
 
@@ -148,13 +144,15 @@ class IdMapping {
   // Should be used when allocated on the heap.
   size_t memory_footprint_including_this() const;
 
+  friend bool operator==(const IdMapping& lhs, const IdMapping& rhs);
+
  private:
   int slot(int key) const {
     return key & mask_;
   }
 
   void DoubleCapacity() {
-    int new_capacity = capacity() * 2;
+    auto new_capacity = capacity() * 2;
     std::vector<value_type> entries(new_capacity);
     ClearMap(&entries);
     mask_ = new_capacity - 1;
@@ -178,4 +176,3 @@ class IdMapping {
 };
 
 } // namespace yb
-#endif /* YB_COMMON_ID_MAPPING_H */

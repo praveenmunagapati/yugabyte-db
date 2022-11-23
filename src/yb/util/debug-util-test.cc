@@ -32,22 +32,24 @@
 
 #include <signal.h>
 
-#include <string>
-#include <vector>
 #include <regex>
 #include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include <glog/logging.h>
-#include <glog/stl_logging.h>
 
 #include "yb/gutil/ref_counted.h"
+
 #include "yb/util/countdown_latch.h"
 #include "yb/util/debug-util.h"
+#include "yb/util/debug/long_operation_tracker.h"
 #include "yb/util/scope_exit.h"
+#include "yb/util/test_macros.h"
 #include "yb/util/test_util.h"
 #include "yb/util/thread.h"
-
-#include "yb/util/debug/long_operation_tracker.h"
+#include "yb/util/tsan_util.h"
 
 using std::string;
 using std::vector;
@@ -82,23 +84,29 @@ TEST_F(DebugUtilTest, TestStackTrace) {
 TEST_F(DebugUtilTest, TestGetStackTrace) {
   string stack_trace = GetStackTrace();
 
-  const std::string kExpectedLineFormatNoFileLineReStr = R"#(^\s*@\s+0x[0-9a-f]+\s+.*)#";
+  const std::string kExpectedLineFormatNoFileLineReStr = R"#(\s*@\s+0x[0-9a-f]+\s+.*)#";
   SCOPED_TRACE(Format("Regex with no file/line: $0", kExpectedLineFormatNoFileLineReStr));
-  const std::string kFileLineReStr = R"#( \(\S+:\d+\))#";
+  const std::string kFileLineReStr = R"#(\S+:\d+:)#";
+  const std::string kFileLineInBracesReStr = R"#( \(\S+:\d+\))#";
 
-  const std::regex kExpectedLineFormatNoFileLineRe(kExpectedLineFormatNoFileLineReStr + "$");
+  const std::regex kExpectedLineFormatNoFileLineRe("^" + kExpectedLineFormatNoFileLineReStr + "$");
   const std::regex kExpectedLineFormatWithFileLineRe(
-      kExpectedLineFormatNoFileLineReStr + kFileLineReStr + "$");
+      "^" + kFileLineReStr + kExpectedLineFormatNoFileLineReStr + "$");
+  const std::regex kExpectedLineFormatWithFileLineInBracesRe(
+      "^" + kExpectedLineFormatNoFileLineReStr + kFileLineInBracesReStr + "$");
   const std::regex kNilUnknownRe(R"#(^\s*@\s+\(nil\)\s+\(unknown\)$)#");
 
   // Expected line format:
-  // @ 0x41255d yb::DebugUtilTest_TestGetStackTrace_Test::TestBody() (yb/util/debug-util-test.cc:73)
+  // @ 0x41255d yb::DebugUtilTest_TestGetStackTrace_Test::TestBody() (yb/util/debug-util-test.cc:85)
+  // or
+  // ../../src/yb/util/debug-util-test.cc:85: @ 0x270715
+  // yb::DebugUtilTest_TestGetStackTrace_Test::TestBody()
   SCOPED_TRACE(Format("Stack trace to be checked:\n:$0", stack_trace));
   std::stringstream ss(stack_trace);
   std::smatch match;
 
-  int with_file_line = 0;
-  int without_file_line = 0;
+  int with_file_line __attribute__((unused)) = 0;
+  int without_file_line  __attribute__((unused)) = 0;
   int unmatched = 0;
   int num_lines = 0;
   std::ostringstream debug_info;
@@ -107,7 +115,8 @@ TEST_F(DebugUtilTest, TestGetStackTrace) {
   while (ss) {
     const auto line = next_line;
     std::getline(ss, next_line);
-    if (std::regex_match(line, match, kExpectedLineFormatWithFileLineRe)) {
+    if (std::regex_match(line, match, kExpectedLineFormatWithFileLineRe) ||
+        std::regex_match(line, match, kExpectedLineFormatWithFileLineInBracesRe)) {
       ++with_file_line;
       debug_info << "Line matched regex with file/line number: " << line << std::endl;
     } else if (std::regex_match(line, match, kExpectedLineFormatNoFileLineRe)) {
@@ -377,11 +386,15 @@ TEST_F(DebugUtilTest, LongOperationTracker) {
 
   std::this_thread::sleep_for(kLongDuration);
 
-  ASSERT_EQ(log_sink.MessagesSize(), 4);
-  ASSERT_STR_CONTAINS(log_sink.MessageAt(0), "Op2");
-  ASSERT_STR_CONTAINS(log_sink.MessageAt(1), "Op2");
-  ASSERT_STR_CONTAINS(log_sink.MessageAt(2), "Op4");
-  ASSERT_STR_CONTAINS(log_sink.MessageAt(3), "Op4");
+  if (IsSanitizer()) {
+    ASSERT_EQ(log_sink.MessagesSize(), 0);
+  } else {
+    ASSERT_EQ(log_sink.MessagesSize(), 4);
+    ASSERT_STR_CONTAINS(log_sink.MessageAt(0), "Op2");
+    ASSERT_STR_CONTAINS(log_sink.MessageAt(1), "Op2");
+    ASSERT_STR_CONTAINS(log_sink.MessageAt(2), "Op4");
+    ASSERT_STR_CONTAINS(log_sink.MessageAt(3), "Op4");
+  }
 }
 
 } // namespace yb

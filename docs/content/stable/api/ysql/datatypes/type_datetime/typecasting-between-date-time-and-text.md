@@ -1,32 +1,30 @@
 ---
 title: Typecasting between date-time values and text values [YSQL]
 headerTitle: Typecasting between date-time values and text values
-linkTitle: typecasting between date-time and text-values
-description: Describes how to typecast date-time values to text values, and vice-versa. [YSQL]
+linkTitle: Typecasting between date-time and text-values
+description: Describes how to typecast date-time values to text values, and vice versa. [YSQL]
 menu:
   stable:
     identifier: typecasting-between-date-time-and-text
     parent: api-ysql-datatypes-datetime
-    weight: 30
-isTocNested: true
-showAsideToc: true
+    weight: 50
+type: docs
 ---
 
-This section and its peer, [Timezones and _UTC offsets_](../timezones/), are placed, with respect to the sequential reading order of the overall _date-time_ time data types section that the [table of contents](../../type_datetime/) presents, before the main treatment of the [semantics of the _date-time_ data types](../date-time-data-types-semantics/) because the code examples in those subsequent sections rely on typecasting between _date-time_ values and _text_ values and on setting the timezone, either as a session parameter or as part of a _date-time_ expression with the _at time zone_ operator.
+This section and its peer, [Timezones and _UTC offsets_](../timezones/), are placed, with respect to the sequential reading order of the overall _date-time_ time data types section that the [table of contents](../../type_datetime/toc/) presents, before the main treatment of the [semantics of the _date-time_ data types](../date-time-data-types-semantics/) because the code examples in those subsequent sections rely on typecasting between _date-time_ values and _text_ values and on setting the timezone, either as a session parameter or as part of a _date-time_ expression with the _at time zone_ operator.
 
 ## Introduction
 
 Typecasting between _date-time_ values and _text_ values, rather than using explicit built-in functions like _to_char()_, _to_timestamp()_, or _to_date()_ allows the demonstration code to be uncluttered and easy to understand. However, as this section shows, the typecast semantics is sensitive to the current settings of the _DateStyle_ and _IntervalStyle_ session parameters.
 
 {{< note title="'Date-time' functions and operators in the PostgreSQL documentation." >}}
-PostgreSQL, and therefore YSQL, provide many functions and equivalent syntactical constructs that operate on, or produce, _date-time_ values. These will presently be documented in a dedicated section within the main section [Functions and operators](../../../exprs/). Meanwhile, refer to the PostgreSQL documentation sections:
+PostgreSQL, and therefore YSQL, provide many functions and equivalent syntactical constructs that operate on, or produce, _date-time_ values. These are documented in these dedicated sections within the main section [Built-in functions and operators](../../../exprs/) and its children:
 
-- <a href="https://www.postgresql.org/docs/11/functions-datetime.html" target="_blank">9.9. Date/Time Functions and Operators <i class="fas fa-external-link-alt"></i></a>
-- <a href="https://www.postgresql.org/docs/11/functions-formatting.html" target="_blank">9.8. Data Type Formatting Functions <i class="fas fa-external-link-alt"></i></a>
+- [Date and time operators](../operators/).
+- [General-purpose date and time functions](../functions/).
+- [Date and time formatting functions](../formatting-functions/).
 
-and the other sections that are referenced below.
-
-The following _to_char_demo()_ code example uses the _to_timestamp()_ function to produce a _timestamptz_ value from a _double precision_ value. The input represents the real number of seconds after, or before, the start of the Unix Epoch (a.k.a. the POSIX Epoch). See the Wikipedia article <a href="https://en.wikipedia.org/wiki/Unix_time" target="_blank">Unix time <i class="fas fa-external-link-alt"></i></a>. The Unix Epoch begins at midnight on 1-January-1970 _UTC_. Try this:
+The following _to_char_demo()_ code example uses the _to_timestamp()_ function to produce a _timestamptz_ value from a _double precision_ value. The input represents the real number of seconds after, or before, the start of the Unix Epoch (a.k.a. the POSIX Epoch). See the Wikipedia article [Unix time](https://en.wikipedia.org/wiki/Unix_time). The Unix Epoch begins at midnight on 1-January-1970 _UTC_. Try this:
 
 ```plpgsql
 set datestyle = 'ISO, DMY';
@@ -43,7 +41,7 @@ See the Wikipedia article [ISO 8601](https://en.wikipedia.org/wiki/ISO_8601). Th
 This is the result:
 
 ```output
-        data type         |         value          
+        data type         |         value
 --------------------------+------------------------
  timestamp with time zone | 1970-01-01 00:00:00+00
 ```
@@ -65,12 +63,12 @@ execute stmt(to_timestamp(0::double precision), 'Europe/Paris');
 This is the result:
 
 ```output
-          data type          |        value        
+          data type          |        value
 -----------------------------+---------------------
  timestamp without time zone | 1970-01-01 01:00:00
 ```
 
-The  _at time zone_ clause has _function syntax_ equivalent:
+The _at time zone_ clause has _function syntax_ equivalent:
 
 ```output
 timezone(timestamptz_value=>$1, timezone=>$2)
@@ -112,7 +110,7 @@ $body$;
 select z from to_char_demo();
 ```
 
-Because this uses the _to_char()_ function, and not typecasting, the result is not sensitive to the _DateStyle_ setting. PostgreSQL documents the various components, like _'TMDay'_, _'TMMonth'_, _'yyyy'_, _dd_, and so on that define the format that _to_char()_ produces in <a href="https://www.postgresql.org/docs/11/functions-formatting.html#FUNCTIONS-FORMATTING-DATETIME-TABLE" target="_blank">Table 9.24. Template Patterns for Date/Time Formatting <i class="fas fa-external-link-alt"></i></a>.
+Because this uses the _to_char()_ function, and not typecasting, the result is not sensitive to the _DateStyle_ setting. PostgreSQL documents the various components, like _'TMDay'_, _'TMMonth'_, _'yyyy'_, _dd_, and so on that define the format that _to_char()_ produces in [Table 9.24. Template Patterns for Date/Time Formatting](https://www.postgresql.org/docs/11/functions-formatting.html#FUNCTIONS-FORMATTING-DATETIME-TABLE).
 
 And because _to_char_demo()_ uses the _at time zone_ operator, it is not sensitive to the current _TimeZone_ setting. This is the result:
 
@@ -127,7 +125,7 @@ And because _to_char_demo()_ uses the _at time zone_ operator, it is not sensiti
  Pe 07-Syy-1042 11:59:59.543216 BC
 ```
 
-As you see, the _lc_time_ session parameter determines the national language that is used for the spellings of the short and long day and month names. The PostgreSQL documentation describes this parameter in the section <a href="https://www.postgresql.org/docs/11/locale.html" target="_blank">23.1. Locale Support <i class="fas fa-external-link-alt"></i></a> Notice that this section, in turn, references the section <a href="https://www.postgresql.org/docs/11/runtime-config-client.html#RUNTIME-CONFIG-CLIENT-FORMAT" target="_blank">23.1. 19.11.2. Locale and Formatting <i class="fas fa-external-link-alt"></i></a>.
+As you see, the _lc_time_ session parameter determines the national language that is used for the spellings of the short and long day and month names. The PostgreSQL documentation describes this parameter in the section [23.1. Locale Support](https://www.postgresql.org/docs/11/locale.html). Notice that this section, in turn, references the section [19.11.2. Locale and Formatting](https://www.postgresql.org/docs/11/runtime-config-client.html#RUNTIME-CONFIG-CLIENT-FORMAT).
 
 In short, a setting like _'fi_FI'_ is operating-system-dependent and may, or may not, be available according to what local support files have been installed. You can see what's available on a Unix-like system with this shell command:
 
@@ -148,14 +146,15 @@ select to_timestamp(
 
 This is the result:
 
-```
+```output
  07.09.1042 11:59:59.543216 BC
 ```
+
 {{< /note >}}
 
 ## Two syntaxes for typecasting
 
-**Approach One:** You can write the name of the target data type _after_ the to-be-typecasted value using the notation exemplified by _::timestamptz_. Try these examples:
+**Approach One:** You can write the name of the target data type _after_ the to-be-typecast value using the notation exemplified by _::timestamptz_. Try these examples:
 
 ```postgresql
 drop table if exists t cascade;
@@ -178,7 +177,7 @@ insert into t(c1, c2, c3, c4, c5, c6) values (
 
 The test silently succeeds.
 
-**Approach Two:** You can write the bare name of the target data type _before_ the to-be-typecasted value. Try these examples:
+**Approach Two:** You can write the bare name of the target data type _before_ the to-be-typecast value. Try these examples:
 
 ```plpgsql
 insert into t(c1, c2, c3, c4, c5, c6) values (
@@ -206,7 +205,7 @@ Approach One is used consistently throughout the whole of the [Date and time dat
 
 ## The DateStyle session parameter
 
-See the PostgreSQL documentation section [19.11.2. Locale and Formatting](https://www.postgresql.org/docs/11/runtime-config-client.html#RUNTIME-CONFIG-CLIENT-FORMAT). The _DateStyle_ session parameter determines the format of the _::text_ typecast of a _date-time_ value. It also, but in a subtle fashion, determines how a _text_ value is interpreted when it's typecasted to a _date-time_ value. It has two orthogonal components: the _style_ and the _substyle_. The _style_ has these legal values:
+See the PostgreSQL documentation section [19.11.2. Locale and Formatting](https://www.postgresql.org/docs/11/runtime-config-client.html#RUNTIME-CONFIG-CLIENT-FORMAT). The _DateStyle_ session parameter determines the format of the _::text_ typecast of a _date-time_ value. It also, but in a subtle fashion, determines how a _text_ value is interpreted when it's typecast to a _date-time_ value. It has two orthogonal components: the _style_ and the _substyle_. The _style_ has these legal values:
 
 ```output
 ISO
@@ -229,6 +228,7 @@ The components can be set together, like this:
 set datestyle = 'PostgreSQL, YMD';
 show datestyle;
 ```
+
 This is the result:
 
 ```output
@@ -242,6 +242,7 @@ set datestyle = 'German';
 set datestyle = 'DMY';
 show datestyle;
 ```
+
 This is the result:
 
 ```output
@@ -378,7 +379,7 @@ Yugabyte recommends that application code should convert between _text_ values a
 ```plpgsql
   drop table if exists t cascade;
   create table t(k int primary key, t1 time not null, t2 time not null);
-  insert into t(k, t1, t2) values(1, '00:00:00'::time, '00:00:00'::time); 
+  insert into t(k, t1, t2) values(1, '00:00:00'::time, '00:00:00'::time);
   
   deallocate all;
   prepare s_1(text) as
@@ -472,7 +473,7 @@ order by intervalstyle;
 This is the result:
 
 ```output
-  intervalstyle   |                      i_as_text                      |                  i                   
+  intervalstyle   |                      i_as_text                      |                  i
 ------------------+-----------------------------------------------------+--------------------------------------
  iso_8601         | P1Y2M3DT4H5M6.345678S                               | 1 year 2 mons 3 days 04:05:06.345678
  postgres         | 1 year 2 mons 3 days 04:05:06.345678                | 1 year 2 mons 3 days 04:05:06.345678
@@ -485,7 +486,7 @@ The results are consistent with the fact that the _IntervalStyle_ setting has no
 {{< tip title="Never rely on typecasting from 'interval' values to 'text' values unless you set 'IntervalStyle' explicitly." >}}
 Yugabyte recommends that application code should convert between _text_ values and _interval_ values using explicit conversion functions.
 
-The _make_interval()_ built-in function creates an _interval_ value using explicitly specified values in the units that you prefer—like _years_, _days_, _hours_, or _weeks_. Yugabyte recommends always using this approach and never using the _::interval_ typecast. This advice rests on ideas developed in the section [Interval arithmetic](../date-time-data-types-semantics/type-interval/interval-arithmetic/). The recommended approach is formalized in the section [Defining and using custom domain types to specialize the native _interval_ functionality](../date-time-data-types-semantics/type-interval/custom-interval-domains/).
+The _make_interval()_ built-in function creates an _interval_ value using explicitly specified values in the units that you prefer—like _years_, _days_, _hours_, or _weeks_. Yugabyte recommends always using this approach and never using the _::interval_ typecast. This advice rests on ideas developed in the section [Interval arithmetic](../date-time-data-types-semantics/type-interval/interval-arithmetic/). The recommended approach is formalized in the section [Custom domain types for specializing the native _interval_ functionality](../date-time-data-types-semantics/type-interval/custom-interval-domains/).
 
 The _extract_ SQL functionality lets you assign values like the _years_ or _days_ components of an _interval_ value to dedicated destinations. This approach is used in the definition of [function interval_mm_dd_ss (interval) returns interval_mm_dd_ss_t](../date-time-data-types-semantics/type-interval/interval-utilities/#function-interval-mm-dd-ss-interval-returns-interval-mm-dd-ss-t), described in the [User-defined _interval_ utility functions](../date-time-data-types-semantics/type-interval/interval-utilities/) section.
 

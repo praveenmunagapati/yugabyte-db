@@ -11,15 +11,11 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_TABLET_MEMORY_MANAGER_H_
-#define YB_TSERVER_TABLET_MEMORY_MANAGER_H_
+#pragma once
 
 #include <memory>
-#include <boost/optional.hpp>
 
-#include "yb/docdb/bounded_rocksdb_iterator.h"
-#include "yb/docdb/doc_key.h"
-#include "yb/docdb/value.h"
+#include <boost/optional.hpp>
 
 #include "yb/tablet/tablet_options.h"
 
@@ -56,7 +52,7 @@ class TabletMemoryManager {
   ~TabletMemoryManager() = default;
 
   // Init and Shutdown start/stop the background memstore management task.
-  CHECKED_STATUS Init();
+  Status Init();
   void Shutdown();
 
   // The MemTracker associated with the block cache.
@@ -111,5 +107,3 @@ class TabletMemoryManager {
 
 }  // namespace tserver
 }  // namespace yb
-
-#endif  // YB_TSERVER_TABLET_MEMORY_MANAGER_H_

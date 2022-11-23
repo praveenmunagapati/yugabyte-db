@@ -35,7 +35,6 @@
 #include "yb/rocksdb/db/filename.h"
 #include "yb/rocksdb/db/transaction_log_impl.h"
 #include "yb/rocksdb/db/log_reader.h"
-#include "yb/rocksdb/db/log_writer.h"
 #include "yb/rocksdb/db/write_batch_internal.h"
 #include "yb/rocksdb/port/port.h"
 #include "yb/rocksdb/env.h"
@@ -46,11 +45,14 @@
 #include "yb/rocksdb/util/logging.h"
 #include "yb/rocksdb/util/mutexlock.h"
 #include "yb/rocksdb/util/sync_point.h"
+
+#include "yb/util/status_log.h"
 #include "yb/util/string_util.h"
+
+using std::unique_ptr;
 
 namespace rocksdb {
 
-#ifndef ROCKSDB_LITE
 
 Status WalManager::GetSortedWalFiles(VectorLogPtr* files) {
   // First get sorted files in db dir, then get sorted files from archived
@@ -487,5 +489,4 @@ Status WalManager::ReadFirstLine(const std::string& fname,
   return status;
 }
 
-#endif  // ROCKSDB_LITE
 }  // namespace rocksdb

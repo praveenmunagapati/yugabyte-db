@@ -29,12 +29,11 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_USER_H
-#define YB_UTIL_USER_H
+#pragma once
 
 #include <string>
 
-#include "yb/util/result.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 
@@ -42,5 +41,3 @@ namespace yb {
 Result<std::string> GetLoggedInUser();
 
 } // namespace yb
-
-#endif // YB_UTIL_USER_H

@@ -13,16 +13,14 @@
 //
 //
 
-#ifndef ENT_SRC_YB_CDC_CDC_RPC_H
-#define ENT_SRC_YB_CDC_CDC_RPC_H
+#pragma once
 
 #include <functional>
 
 #include "yb/client/client_fwd.h"
 #include "yb/rpc/rpc.h"
 
-#include "yb/util/result.h"
-#include "yb/util/status.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 
@@ -39,7 +37,7 @@ class CDCRecordPB;
 class GetChangesRequestPB;
 class GetChangesResponsePB;
 
-typedef std::function<void(const Status&, const tserver::WriteResponsePB&)> WriteCDCRecordCallback;
+typedef std::function<void(const Status&, tserver::WriteResponsePB&&)> WriteCDCRecordCallback;
 
 // deadline - operation deadline, i.e. timeout.
 // tablet - tablet to write the CDC record to.
@@ -48,13 +46,14 @@ typedef std::function<void(const Status&, const tserver::WriteResponsePB&)> Writ
 MUST_USE_RESULT rpc::RpcCommandPtr CreateCDCWriteRpc(
     CoarseTimePoint deadline,
     client::internal::RemoteTablet* tablet,
+    const std::shared_ptr<client::YBTable>& table,
     client::YBClient* client,
     tserver::WriteRequestPB* req,
     WriteCDCRecordCallback callback,
     bool use_local_tserver);
 
 
-typedef std::function<void(Status, GetChangesResponsePB&&)> GetChangesCDCRpcCallback;
+typedef std::function<void(const Status&, GetChangesResponsePB&&)> GetChangesCDCRpcCallback;
 
 MUST_USE_RESULT rpc::RpcCommandPtr CreateGetChangesCDCRpc(
     CoarseTimePoint deadline,
@@ -65,5 +64,3 @@ MUST_USE_RESULT rpc::RpcCommandPtr CreateGetChangesCDCRpc(
 
 } // namespace cdc
 } // namespace yb
-
-#endif // ENT_SRC_YB_CDC_CDC_RPC_H

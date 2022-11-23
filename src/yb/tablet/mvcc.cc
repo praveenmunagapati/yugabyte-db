@@ -32,20 +32,20 @@
 
 #include "yb/tablet/mvcc.h"
 
-#include <sstream>
-
 #include <boost/circular_buffer.hpp>
-#include <boost/circular_buffer/space_optimized.hpp>
 #include <boost/variant.hpp>
 
 #include "yb/gutil/macros.h"
 
 #include "yb/util/atomic.h"
+#include "yb/util/compare_util.h"
 #include "yb/util/enums.h"
-#include "yb/util/flag_tags.h"
 #include "yb/util/flags.h"
+#include "yb/util/format.h"
 #include "yb/util/logging.h"
-#include "yb/util/scope_exit.h"
+#include "yb/util/trace.h"
+
+using std::ostream;
 
 using namespace std::literals;
 
@@ -192,6 +192,10 @@ class ItemPrintingVisitor : public boost::static_visitor<>{
 };
 
 }  // namespace
+
+std::string FixedHybridTimeLease::ToString() const {
+  return YB_STRUCT_TO_STRING(time, lease);
+}
 
 class MvccManager::MvccOpTrace {
  public:
@@ -513,6 +517,8 @@ HybridTime MvccManager::SafeTimeForFollower(
       result.safe_time = last_replicated_;
       result.source = SafeTimeSource::kLastReplicated;
     }
+    VTRACE(3, "Current safe time $0. Source $1", yb::ToString(result.safe_time),
+           yb::ToString(result.source));
     return result.safe_time >= min_allowed;
   };
   if (deadline == CoarseTimePoint::max()) {
@@ -527,6 +533,9 @@ HybridTime MvccManager::SafeTimeForFollower(
       << "result: " << result.ToString()
       << ", max_safe_time_returned_for_follower_: "
       << max_safe_time_returned_for_follower_.ToString();
+  VTRACE(2, "Min requested safe time was $0", yb::ToString(min_allowed));
+  VTRACE(2, "Returning safe time $0. Source $1", yb::ToString(result.safe_time),
+         yb::ToString(result.source));
   max_safe_time_returned_for_follower_ = result;
   if (op_trace_) {
     op_trace_->Add(SafeTimeForFollowerTraceItem {
@@ -598,6 +607,8 @@ HybridTime MvccManager::DoGetSafeTime(const HybridTime min_allowed,
     // This function could be invoked at a follower, so it has a very old ht_lease. In this case it
     // is safe to read at least at last_replicated_.
     result = std::max(result, last_replicated_);
+    VTRACE(3, "Current safe time $0. Source $1", yb::ToString(result),
+           yb::ToString(source));
 
     return result >= min_allowed;
   };
@@ -630,6 +641,8 @@ HybridTime MvccManager::DoGetSafeTime(const HybridTime min_allowed,
   } else {
     max_safe_time_returned_without_lease_ = { result, source };
   }
+  VTRACE(2, "Returning safe time $0. Source $1. Min requested safe time was $2",
+         yb::ToString(result), yb::ToString(source), yb::ToString(min_allowed));
   return result;
 }
 
@@ -654,6 +667,15 @@ MvccManager::InvariantViolationLoggingHelper MvccManager::InvariantViolationLogP
 void MvccManager::TEST_DumpTrace(std::ostream* out) NO_THREAD_SAFETY_ANALYSIS {
   if (op_trace_)
     op_trace_->DumpTrace(out);
+}
+
+std::string MvccManager::QueueItem::ToString() const {
+  return YB_STRUCT_TO_STRING(hybrid_time, op_id);
+}
+
+bool MvccManager::QueueItem::Eq(const MvccManager::QueueItem& rhs) const {
+  const auto& lhs = *this;
+  return YB_STRUCT_EQUALS(hybrid_time, op_id);
 }
 
 }  // namespace tablet

@@ -11,27 +11,30 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_TABLET_SERVER_INTERFACE_H
-#define YB_TSERVER_TABLET_SERVER_INTERFACE_H
+#pragma once
+
+#include <future>
 
 #include "yb/client/client_fwd.h"
+#include "yb/common/common_types.pb.h"
+
 #include "yb/rpc/rpc_fwd.h"
+#include "yb/master/master_heartbeat.fwd.h"
 #include "yb/server/clock.h"
+
+#include "yb/tablet/tablet_fwd.h"
 
 #include "yb/tserver/tserver_util_fwd.h"
 #include "yb/tserver/local_tablet_server.h"
 
-#include "yb/util/metrics.h"
-
 namespace yb {
 
-namespace master {
-
-class TSInformationPB;
-
-}
+class MemTracker;
 
 namespace tserver {
+
+using CertificateReloader = std::function<Status(void)>;
+using PgConfigReloader = std::function<Status(void)>;
 
 class TabletServerIf : public LocalTabletServer {
  public:
@@ -45,14 +48,29 @@ class TabletServerIf : public LocalTabletServer {
 
   virtual void get_ysql_catalog_version(uint64_t* current_version,
                                         uint64_t* last_breaking_version) const = 0;
+  virtual void get_ysql_db_catalog_version(uint32_t db_oid,
+                                           uint64_t* current_version,
+                                           uint64_t* last_breaking_version) const = 0;
+
+  virtual Status get_ysql_db_oid_to_cat_version_info_map(
+      tserver::GetTserverCatalogVersionInfoResponsePB *resp) const = 0;
 
   virtual const scoped_refptr<MetricEntity>& MetricEnt() const = 0;
 
-  virtual client::TransactionPool* TransactionPool() = 0;
+  virtual client::TransactionPool& TransactionPool() = 0;
 
   virtual const std::shared_future<client::YBClient*>& client_future() const = 0;
 
   virtual tserver::TServerSharedData& SharedObject() = 0;
+
+  virtual Status GetLiveTServers(
+      std::vector<master::TSInformationPB> *live_tservers) const = 0;
+
+  virtual const std::shared_ptr<MemTracker>& mem_tracker() const = 0;
+
+  virtual void SetPublisher(rpc::Publisher service) = 0;
+
+  virtual void RegisterCertificateReloader(CertificateReloader reloader) = 0;
 
   client::YBClient* client() const {
     return client_future().get();
@@ -61,5 +79,3 @@ class TabletServerIf : public LocalTabletServer {
 
 } // namespace tserver
 } // namespace yb
-
-#endif // YB_TSERVER_TABLET_SERVER_INTERFACE_H

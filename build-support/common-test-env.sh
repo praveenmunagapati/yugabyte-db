@@ -121,7 +121,7 @@ set_common_test_paths() {
   mkdir_safe "$YB_TEST_LOG_ROOT_DIR"
 
   # This is needed for tests to find the lsof program.
-  add_path_entry /usr/sbin
+  add_path_entry_last /usr/sbin
 }
 
 validate_relative_test_binary_path() {
@@ -177,7 +177,7 @@ validate_test_descriptor() {
             "$test_descriptor"
     fi
     # Remove $TEST_DESCRIPTOR_SEPARATOR and all that follows and get a relative binary path.
-    validate_relative_test_binary_path "${test_descriptor%$TEST_DESCRIPTOR_SEPARATOR*}"
+    validate_relative_test_binary_path "${test_descriptor%"$TEST_DESCRIPTOR_SEPARATOR"*}"
   else
     validate_relative_test_binary_path "$test_descriptor"
   fi
@@ -454,8 +454,8 @@ prepare_for_running_cxx_test() {
   fi
 
   if [[ "$test_descriptor" =~ $TEST_DESCRIPTOR_SEPARATOR ]]; then
-    rel_test_binary=${test_descriptor%$TEST_DESCRIPTOR_SEPARATOR*}
-    test_name=${test_descriptor#*$TEST_DESCRIPTOR_SEPARATOR}
+    rel_test_binary=${test_descriptor%"${TEST_DESCRIPTOR_SEPARATOR}"*}
+    test_name=${test_descriptor#*"${TEST_DESCRIPTOR_SEPARATOR}"}
     run_at_once=false
     junit_test_case_id=$test_name
   else
@@ -476,7 +476,7 @@ prepare_for_running_cxx_test() {
   mkdir_safe "$test_dir"
 
   rel_test_log_path_prefix="$test_binary_sanitized"
-  if "$run_at_once"; then
+  if [[ ${run_at_once} == "true" ]]; then
     # Make this similar to the case when we run tests separately. Pretend that the test binary name
     # is the test name.
     rel_test_log_path_prefix+="/${rel_test_binary##*/}"
@@ -802,7 +802,7 @@ handle_cxx_test_xml_output() {
     log "Process tree supervisor reported that the test failed"
     test_failed=true
   fi
-  if "$test_failed"; then
+  if [[ ${test_failed} == "true" ]]; then
     log "Test failed, updating $xml_output_file"
   else
     log "Test succeeded, updating $xml_output_file"
@@ -842,7 +842,8 @@ determine_test_timeout() {
           $rel_test_binary == "tests-pgwrapper/pg_libpq-test" || \
           $rel_test_binary == "tests-pgwrapper/pg_libpq_err-test" || \
           $rel_test_binary == "tests-pgwrapper/pg_mini-test" || \
-          $rel_test_binary == "tests-pgwrapper/pg_wrapper-test" ]]; then
+          $rel_test_binary == "tests-pgwrapper/pg_wrapper-test" || \
+          $rel_test_binary == "tests-tools/yb-admin-snapshot-schedule-test" ]]; then
       timeout_sec=$INCREASED_TEST_TIMEOUT_SEC
     else
       timeout_sec=$DEFAULT_TEST_TIMEOUT_SEC
@@ -908,7 +909,7 @@ run_one_cxx_test() {
       try_set_ulimited_ulimit
 
       if is_ctest_verbose; then
-        ( set -x; "${test_wrapper_cmd_line[@]}" 2>&1 ) | tee "$test_log_path"
+        ( set -x; "${test_wrapper_cmd_line[@]}" 2>&1 ) | tee "${test_log_path}"
         # Propagate the exit code of the test process, not any of the filters. This will only exit
         # this subshell, not the entire script calling this function.
         exit "${PIPESTATUS[0]}"
@@ -920,7 +921,7 @@ run_one_cxx_test() {
     set -e
 
     # Useful for distributed builds in an NFS environment.
-    chmod g+w "$test_log_path"
+    chmod g+w "${test_log_path}"
 
     # Test did not fail, no need to retry.
     if [[ $test_exit_code -eq 0 ]]; then
@@ -961,8 +962,9 @@ handle_cxx_test_failure() {
     test_failed=true
   fi
 
-  if "$test_failed"; then
+  if [[ ${test_failed} == "true" || ${YB_FORCE_REWRITE_TEST_LOGS:-0} == "1" ]]; then
     (
+      rewrite_test_log "${test_log_path}"
       echo
       echo "TEST FAILURE"
       echo "Test command: ${test_cmd_line[*]}"
@@ -1019,8 +1021,32 @@ run_postproces_test_result_script() {
       --fatal-details-path-prefix "$YB_FATAL_DETAILS_PATH_PREFIX"
     )
   fi
-  "$VIRTUAL_ENV/bin/python" "$YB_SRC_ROOT/python/yb/postprocess_test_result.py" \
+  "$VIRTUAL_ENV/bin/python" "${YB_SRC_ROOT}/python/yb/postprocess_test_result.py" \
     "${args[@]}" "$@"
+}
+
+rewrite_test_log() {
+  expect_num_args 1 "$@"
+  if [[ ${YB_SKIP_TEST_LOG_REWRITE:-} == "1" ]]; then
+    return
+  fi
+  local test_log_path=$1
+  set +e
+  (
+    # TODO: we should just set PYTHONPATH globally, e.g. at the time we activate virtualenv.
+    set_pythonpath
+    "${VIRTUAL_ENV}/bin/python" "${YB_SRC_ROOT}/python/yb/rewrite_test_log.py" \
+        --input-log-path "${test_log_path}" \
+        --replace-original \
+        --yb-src-root "${YB_SRC_ROOT}" \
+        --build-root "${BUILD_ROOT}" \
+        --test-tmpdir "${TEST_TMPDIR}"
+  )
+  local exit_code=$?
+  set -e
+  if [[ ${exit_code} -ne 0 ]]; then
+    log "Test log rewrite script failed with exit code ${exit_code}"
+  fi
 }
 
 run_cxx_test_and_process_results() {
@@ -1518,25 +1544,29 @@ run_java_test() {
 
   # We specify tempDir to use a separate temporary directory for each test.
   # http://maven.apache.org/surefire/maven-surefire-plugin/test-mojo.html
-  #
-  # We specify --offline because we don't want any downloads to happen from Maven Central or Nexus.
-  # Everything we need should already be in the local Maven repository.
-  #
-  # Also --legacy-local-repository is really important (could also be specified using
-  # -Dmaven.legacyLocalRepo=true). Without this option, there might be some mysterious
-  # _remote.repositories files somewhere (maybe even embedded in some artifacts?) that may force
-  # Maven to try to check Maven Central for artifacts that it already has in its local repository,
-  # and with --offline that will lead to a runtime error.
-  #
-  # See https://maven.apache.org/ref/3.1.1/maven-embedder/cli.html and https://bit.ly/3xeMFYP
   mvn_opts=(
     -Dtest="$test_class_and_maybe_method"
     --projects "$module_name"
     -DtempDir="$surefire_rel_tmp_dir"
-    --offline
-    --legacy-local-repository
     "${MVN_COMMON_OPTIONS_IN_TESTS[@]}"
   )
+  if [[ ${YB_JAVA_TEST_OFFLINE_MODE:-1} == "1" ]]; then
+    # When running in a CI/CD environment, we specify --offline because we don't want any downloads
+    # to happen from Maven Central or Nexus. Everything we need should already be in the local Maven
+    # repository.
+    #
+    # In yb_build.sh, we set YB_JAVA_TEST_OFFLINE_MODE=0 specifically to disable this behavior,
+    # because downloading extra artifacts is OK when running tests locally.
+    #
+    # Also --legacy-local-repository is really important (could also be specified using
+    # -Dmaven.legacyLocalRepo=true). Without this option, there might be some mysterious
+    # _remote.repositories files somewhere (maybe even embedded in some artifacts?) that may force
+    # Maven to try to check Maven Central for artifacts that it already has in its local repository,
+    # and with --offline that will lead to a runtime error.
+    #
+    # See https://maven.apache.org/ref/3.1.1/maven-embedder/cli.html and https://bit.ly/3xeMFYP
+    mvn_opts+=( --offline --legacy-local-repository )
+  fi
   append_common_mvn_opts
 
   local report_suffix
@@ -1575,6 +1605,18 @@ run_java_test() {
     # When running on Jenkins we would like to see more debug output.
     mvn_opts+=( -X )
   fi
+
+  # YB_EXTRA_MVN_OPTIONS_IN_TESTS is last and takes precedence since it is a user-supplied option.
+  # Example:
+  #   Running
+  #     export YB_EXTRA_MVN_OPTIONS_IN_TESTS='-Dstyle.color=always -Dfoo=bar'
+  #     ./yb_build.sh --java-test ... --java-test-args '-X -Dstyle.color=never'
+  #   adds these as last mvn options: -Dstyle.color=always -Dfoo=bar -X -Dstyle.color=never
+  # Word splitting is intentional here, so YB_EXTRA_MVN_OPTIONS_IN_TESTS is not quoted.
+  # shellcheck disable=SC2206
+  mvn_opts+=(
+    ${YB_EXTRA_MVN_OPTIONS_IN_TESTS:-}
+  )
 
   if ! which mvn >/dev/null; then
     fatal "Maven not found on PATH. PATH: $PATH"
@@ -1699,6 +1741,10 @@ run_java_test() {
     fi
   fi
 
+  if [[ -f ${test_log_path} ]]; then
+    # On Jenkins, this will only happen for failed tests. (See the logic above.)
+    rewrite_test_log "${test_log_path}"
+  fi
   if should_gzip_test_logs; then
     gzip_if_exists "$test_log_path" "$mvn_output_path"
     local per_test_method_log_path
@@ -1856,6 +1902,8 @@ run_python_tests() {
     run_python_doctest
     log "Invoking the codecheck tool"
     python3 -m codecheck
+    log "Running unit tests with pytest"
+    pytest python/
   )
 }
 
@@ -1906,7 +1954,7 @@ resolve_and_run_java_test() {
                     "'$module_name' and '$current_module_name' are valid candidates."
             fi
             module_name=$current_module_name
-            rel_module_dir=${module_dir##$YB_SRC_ROOT/}
+            rel_module_dir=${module_dir##"${YB_SRC_ROOT}"/}
           fi
         done
       fi
@@ -1942,7 +1990,7 @@ resolve_and_run_java_test() {
                       "'$module_name' and '$current_module_name' are valid candidates."
               fi
               module_name=$current_module_name
-              rel_module_dir=${module_dir##$YB_SRC_ROOT/}
+              rel_module_dir=${module_dir##"${YB_SRC_ROOT}"/}
 
               if [[ ${#candidate_files[@]} -gt 1 ]]; then
                 fatal "Ambiguous source files for Java/Scala test '$java_test_name': " \
@@ -2036,7 +2084,7 @@ run_cmake_unit_tests() {
       fi
     done
   done
-  if "$error"; then
+  if [[ ${error} == "true" ]]; then
     fatal "Found some disallowed patterns in CMake files"
   else
     log "Validated ${#cmake_files[@]} CMake files using light-weight grep checks"

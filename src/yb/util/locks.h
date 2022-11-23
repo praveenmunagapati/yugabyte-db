@@ -29,29 +29,25 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_LOCKS_H
-#define YB_UTIL_LOCKS_H
+#pragma once
 
 #include <algorithm>
 #include <mutex>
 
 #include <glog/logging.h>
+
 #include "yb/gutil/atomicops.h"
 #include "yb/gutil/dynamic_annotations.h"
-#include "yb/gutil/thread_annotations.h"
 #include "yb/gutil/macros.h"
 #include "yb/gutil/port.h"
 #include "yb/gutil/spinlock.h"
 #include "yb/gutil/sysinfo.h"
+#include "yb/gutil/thread_annotations.h"
+
 #include "yb/util/errno.h"
 #include "yb/util/rw_semaphore.h"
-#include "yb/util/shared_lock.h"
 
 namespace yb {
-
-using base::subtle::Acquire_CompareAndSwap;
-using base::subtle::NoBarrier_Load;
-using base::subtle::Release_Store;
 
 // Wrapper around the Google SpinLock class to adapt it to the method names
 // expected by Boost.
@@ -96,7 +92,7 @@ struct padded_spinlock : public simple_spinlock {
 
 // Reader-writer lock.
 // This is functionally equivalent to rw_semaphore in rw_semaphore.h, but should be
-// used whenever the lock is expected to only be acquired on a single thread.
+// used whenever the lock is expected to be released on the same thread which acquired it.
 // It adds TSAN annotations which will detect misuse of the lock, but those
 // annotations also assume that the same thread the takes the lock will unlock it.
 //
@@ -255,48 +251,6 @@ class percpu_rwlock {
   padded_lock *locks_;
 };
 
-// Simple implementation of the SharedLock API, which is not available in
-// the standard library until C++14. Defers error checking to the underlying
-// mutex.
-
-template <typename Mutex>
-class shared_lock {
- public:
-  shared_lock()
-      : m_(nullptr) {
-  }
-
-  explicit shared_lock(Mutex& m) // NOLINT
-      : m_(&m) {
-    m_->lock_shared();
-  }
-
-  shared_lock(Mutex& m, std::try_to_lock_t t) // NOLINT
-      : m_(nullptr) {
-    if (m.try_lock_shared()) {
-      m_ = &m;
-    }
-  }
-
-  bool owns_lock() const {
-    return m_;
-  }
-
-  void swap(shared_lock& other) {
-    std::swap(m_, other.m_);
-  }
-
-  ~shared_lock() {
-    if (m_ != nullptr) {
-      m_->unlock_shared();
-    }
-  }
-
- private:
-  Mutex* m_;
-  DISALLOW_COPY_AND_ASSIGN(shared_lock<Mutex>);
-};
-
 template <class Container>
 auto ToVector(const Container& container, std::mutex* mutex) {
   std::vector<typename Container::value_type> result;
@@ -345,5 +299,3 @@ class ReverseLock {
 };
 
 } // namespace yb
-
-#endif // YB_UTIL_LOCKS_H

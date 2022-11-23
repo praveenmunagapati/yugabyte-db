@@ -17,21 +17,18 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_ROCKSDB_DB_MEMTABLE_LIST_H
-#define YB_ROCKSDB_DB_MEMTABLE_LIST_H
 
 #pragma once
 
-#include <string>
-#include <list>
-#include <vector>
-#include <set>
 #include <deque>
+#include <list>
+#include <set>
+#include <string>
+#include <vector>
 
-#include "yb/rocksdb/db/dbformat.h"
-#include "yb/rocksdb/db/filename.h"
-#include "yb/rocksdb/db/memtable.h"
 #include "yb/rocksdb/db.h"
+#include "yb/rocksdb/db/dbformat.h"
+#include "yb/rocksdb/db/memtable.h"
 #include "yb/rocksdb/iterator.h"
 #include "yb/rocksdb/options.h"
 #include "yb/rocksdb/types.h"
@@ -185,6 +182,10 @@ class MemTableList {
   // been flushed and logged.
   int NumNotFlushed() const;
 
+  // Returns accumulated frontier from all tables.
+  // Initial value could be passed as `frontier`.
+  UserFrontierPtr GetFrontier(UserFrontierPtr frontier, UpdateUserValueType type);
+
   // Returns total number of memtables in the list that have been
   // completely flushed and logged.
   int NumFlushed() const;
@@ -258,5 +259,3 @@ class MemTableList {
 };
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_DB_MEMTABLE_LIST_H

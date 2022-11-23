@@ -11,29 +11,53 @@
 // under the License.
 
 #include "yb/cdc/cdc_producer.h"
+#include "yb/cdc/cdc_common_util.h"
 
 #include "yb/cdc/cdc_service.pb.h"
+#include "yb/client/session.h"
+#include "yb/client/yb_op.h"
+#include "yb/client/table_handle.h"
+#include "yb/common/schema.h"
 #include "yb/common/transaction.h"
 #include "yb/common/wire_protocol.h"
 
+#include "yb/consensus/consensus.messages.h"
 #include "yb/consensus/raft_consensus.h"
 #include "yb/consensus/replicate_msgs_holder.h"
 
+#include "yb/docdb/doc_key.h"
 #include "yb/docdb/docdb.pb.h"
 #include "yb/docdb/primitive_value.h"
+#include "yb/docdb/value.h"
 #include "yb/docdb/value_type.h"
+
+#include "yb/master/master_defaults.h"
+
 #include "yb/tablet/tablet.h"
+#include "yb/tablet/tablet_metadata.h"
 #include "yb/tablet/tablet_peer.h"
 #include "yb/tablet/transaction_participant.h"
+
 #include "yb/tserver/tablet_server.h"
 #include "yb/tserver/ts_tablet_manager.h"
 
-DEFINE_int32(cdc_transaction_timeout_ms, 0,
+#include "yb/util/flags.h"
+#include "yb/util/logging.h"
+
+#include "yb/yql/cql/ql/util/statement_result.h"
+
+DEFINE_UNKNOWN_int32(cdc_transaction_timeout_ms, 0,
   "Don't check for an aborted transaction unless its original write is lagging by this duration.");
 
-// Todo(Rahul): Enable this by default (https://github.com/yugabyte/yugabyte-db/issues/6128)
-DEFINE_bool(cdc_enable_replicate_intents, true,
+DEFINE_UNKNOWN_bool(cdc_enable_replicate_intents, true,
             "Enable replication of intents before they've been committed.");
+
+DEFINE_test_flag(bool, xcluster_simulate_have_more_records, false,
+                 "Whether GetChanges should indicate that it has more records for safe time "
+                 "calculation.");
+
+DEFINE_test_flag(bool, xcluster_skip_meta_ops, false,
+                 "Whether GetChanges should skip processing meta operations ");
 
 namespace yb {
 namespace cdc {
@@ -43,22 +67,11 @@ using consensus::ReplicateMsgs;
 using docdb::PrimitiveValue;
 using tablet::TransactionParticipant;
 
-YB_STRONGLY_TYPED_BOOL(ReplicateIntents);
-
-namespace {
-
-// Use boost::unordered_map instead of std::unordered_map because gcc release build
-// fails to compile correctly when TxnStatusMap is used with Result<> (due to what seems like
-// a bug in gcc where it tries to incorrectly destroy Status part of Result).
-typedef boost::unordered_map<
-    TransactionId, TransactionStatusResult, TransactionIdHash> TxnStatusMap;
-typedef std::pair<uint64_t, size_t> RecordTimeIndex;
-
 void AddColumnToMap(const ColumnSchema& col_schema,
-                    const docdb::PrimitiveValue& col,
+                    const docdb::KeyEntryValue& col,
                     cdc::KeyValuePairPB* kv_pair) {
   kv_pair->set_key(col_schema.name());
-  PrimitiveValue::ToQLValuePB(col, col_schema.type(), kv_pair->mutable_value());
+  col.ToQLValuePB(col_schema.type(), kv_pair->mutable_value());
 }
 
 void AddPrimaryKey(const docdb::SubDocKey& decoded_key,
@@ -97,9 +110,9 @@ Result<bool> SetCommittedRecordIndexForReplicateMsg(
     }
 
     case consensus::OperationType::WRITE_OP: {
-      if (msg->write_request().write_batch().has_transaction()) {
+      if (msg->write().write_batch().has_transaction()) {
         auto txn_id = VERIFY_RESULT(FullyDecodeTransactionId(
-            msg->write_request().write_batch().transaction().transaction_id()));
+            msg->write().write_batch().transaction().transaction_id()));
         const auto txn_status = txn_map.find(txn_id);
         if (txn_status == txn_map.end()) {
           return STATUS(IllegalState, "Unexpected transaction ID", txn_id.ToString());
@@ -124,10 +137,19 @@ Result<bool> SetCommittedRecordIndexForReplicateMsg(
       }
       return false;
     }
-
+    case consensus::OperationType::SPLIT_OP: {
+      records->emplace_back(msg->hybrid_time(), index);
+      return true;  // Don't need to process any records after a SPLIT_OP.
+    }
+    case consensus::OperationType::CHANGE_METADATA_OP: {
+      if (FLAGS_TEST_xcluster_skip_meta_ops) {
+        FALLTHROUGH_INTENDED;
+      } else {
+        records->emplace_back(msg->hybrid_time(), index);
+        return true;  // Stop processing records after a CHANGE_METADATA_OP, wait for the Consumer.
+      }
+    }
     case consensus::OperationType::CHANGE_CONFIG_OP:
-      FALLTHROUGH_INTENDED;
-    case consensus::OperationType::CHANGE_METADATA_OP:
       FALLTHROUGH_INTENDED;
     case consensus::OperationType::HISTORY_CUTOFF_OP:
       FALLTHROUGH_INTENDED;
@@ -135,9 +157,9 @@ Result<bool> SetCommittedRecordIndexForReplicateMsg(
       FALLTHROUGH_INTENDED;
     case consensus::OperationType::SNAPSHOT_OP:
       FALLTHROUGH_INTENDED;
-    case consensus::OperationType::SPLIT_OP:
-      FALLTHROUGH_INTENDED;
     case consensus::OperationType::TRUNCATE_OP:
+      FALLTHROUGH_INTENDED;
+    case consensus::OperationType::CHANGE_AUTO_FLAGS_CONFIG_OP:
       FALLTHROUGH_INTENDED;
     case consensus::OperationType::UNKNOWN_OP:
       return false;
@@ -153,7 +175,7 @@ Result<std::vector<RecordTimeIndex>> GetCommittedRecordIndexes(
 
   // Order ReplicateMsgs based on commit time.
   for (const auto &msg : msgs) {
-    if (!msg->write_request().has_external_hybrid_time()) {
+    if (!msg->write().has_external_hybrid_time()) {
       // If the message came from an external source, ignore it when producing change list.
       // Note that checkpoint, however, will be updated and will account for external message too.
       bool stop = VERIFY_RESULT(SetCommittedRecordIndexForReplicateMsg(
@@ -241,9 +263,9 @@ Result<TxnStatusMap> BuildTxnStatusMap(const ReplicateMsgs& messages,
   // corresponding APPLYING record does not exist in WAL as yet.
   for (const auto& msg : messages) {
     if (msg->op_type() == consensus::OperationType::WRITE_OP
-        && msg->write_request().write_batch().has_transaction()) {
+        && msg->write().write_batch().has_transaction()) {
       auto txn_id = VERIFY_RESULT(FullyDecodeTransactionId(
-          msg->write_request().write_batch().transaction().transaction_id()));
+          msg->write().write_batch().transaction().transaction_id()));
 
       if (!txn_map.count(txn_id)) {
         TransactionStatusResult txn_status(TransactionStatus::PENDING, HybridTime::kMin);
@@ -277,9 +299,9 @@ Result<TxnStatusMap> BuildTxnStatusMap(const ReplicateMsgs& messages,
   return txn_map;
 }
 
-CHECKED_STATUS SetRecordTime(const TransactionId& txn_id,
-                             const TxnStatusMap& txn_map,
-                             CDCRecordPB* record) {
+Status SetRecordTime(const TransactionId& txn_id,
+                     const TxnStatusMap& txn_map,
+                     CDCRecordPB* record) {
   auto txn_status = txn_map.find(txn_id);
   if (txn_status == txn_map.end()) {
     return STATUS(IllegalState, "Unexpected transaction ID", txn_id.ToString());
@@ -289,14 +311,15 @@ CHECKED_STATUS SetRecordTime(const TransactionId& txn_id,
 }
 
 // Populate CDC record corresponding to WAL batch in ReplicateMsg.
-CHECKED_STATUS PopulateWriteRecord(const ReplicateMsgPtr& msg,
-                                   const TxnStatusMap& txn_map,
-                                   const StreamMetadata& metadata,
-                                   const std::shared_ptr<tablet::TabletPeer>& tablet_peer,
-                                   ReplicateIntents replicate_intents,
-                                   GetChangesResponsePB* resp) {
-  const auto& batch = msg->write_request().write_batch();
-  const auto& schema = *tablet_peer->tablet()->schema();
+Status PopulateWriteRecord(const ReplicateMsgPtr& msg,
+                           const TxnStatusMap& txn_map,
+                           const StreamMetadata& metadata,
+                           const std::shared_ptr<tablet::TabletPeer>& tablet_peer,
+                           ReplicateIntents replicate_intents,
+                           GetChangesResponsePB* resp) {
+  const auto& batch = msg->write().write_batch();
+  auto shared_tablet = VERIFY_RESULT(tablet_peer->shared_tablet_safe());
+  const auto& schema = *shared_tablet->schema();
   // Write batch may contain records from different rows.
   // For CDC, we need to split the batch into 1 CDC record per row of the table.
   // We'll use DocDB key hash to identify the records that belong to the same row.
@@ -307,9 +330,9 @@ CHECKED_STATUS PopulateWriteRecord(const ReplicateMsgPtr& msg,
     const auto key_size = VERIFY_RESULT(
         docdb::DocKey::EncodedSize(key, docdb::DocKeyPart::kWholeDocKey));
 
-    Slice value = write_pair.value();
-    docdb::Value decoded_value;
-    RETURN_NOT_OK(decoded_value.Decode(value));
+    Slice value_slice = write_pair.value();
+    RETURN_NOT_OK(docdb::ValueControlFields::Decode(&value_slice));
+    auto value_type = docdb::DecodeValueEntryType(value_slice);
 
     // Compare key hash with previously seen key hash to determine whether the write pair
     // is part of the same row or not.
@@ -326,14 +349,13 @@ CHECKED_STATUS PopulateWriteRecord(const ReplicateMsgPtr& msg,
         // producer and re-serializing on consumer.
         auto kv_pair = record->add_key();
         kv_pair->set_key(std::to_string(decoded_key.doc_key().hash()));
-        kv_pair->mutable_value()->set_binary_value(write_pair.key());
+        kv_pair->mutable_value()->set_binary_value(write_pair.key().ToBuffer());
       } else {
         AddPrimaryKey(decoded_key, schema, record);
       }
 
       // Check whether operation is WRITE or DELETE.
-      if (decoded_value.value_type() == docdb::ValueType::kTombstone &&
-          decoded_key.num_subkeys() == 0) {
+      if (value_type == docdb::ValueEntryType::kTombstone && decoded_key.num_subkeys() == 0) {
         record->set_operation(CDCRecordPB::DELETE);
       } else {
         record->set_operation(CDCRecordPB::WRITE);
@@ -348,9 +370,11 @@ CHECKED_STATUS PopulateWriteRecord(const ReplicateMsgPtr& msg,
           // If we're not replicating intents, set record time using the transaction map.
           RETURN_NOT_OK(SetRecordTime(txn_id, txn_map, record));
         } else {
-          record->mutable_transaction_state()->set_transaction_id(
-              batch.transaction().transaction_id());
-          record->mutable_transaction_state()->add_tablets(tablet_peer->tablet_id());
+          auto* transaction_state = record->mutable_transaction_state();
+          transaction_state->set_transaction_id(batch.transaction().transaction_id().ToBuffer());
+          transaction_state->add_tablets(tablet_peer->tablet_id());
+          transaction_state->set_external_status_tablet_id(
+              batch.transaction().status_tablet().ToBuffer());
         }
       }
     }
@@ -359,17 +383,20 @@ CHECKED_STATUS PopulateWriteRecord(const ReplicateMsgPtr& msg,
 
     if (metadata.record_format == CDCRecordFormat::WAL) {
       auto kv_pair = record->add_changes();
-      kv_pair->set_key(write_pair.key());
-      kv_pair->mutable_value()->set_binary_value(write_pair.value());
+      kv_pair->set_key(write_pair.key().ToBuffer());
+      kv_pair->mutable_value()->set_binary_value(write_pair.value().ToBuffer());
     } else if (record->operation() == CDCRecordPB_OperationType_WRITE) {
-      PrimitiveValue column_id;
-      Slice key_column = write_pair.key().data() + key_size;
-      RETURN_NOT_OK(PrimitiveValue::DecodeKey(&key_column, &column_id));
-      if (column_id.value_type() == docdb::ValueType::kColumnId) {
+      docdb::KeyEntryValue column_id;
+      Slice key_column = write_pair.key().WithoutPrefix(key_size);
+      RETURN_NOT_OK(column_id.DecodeFromKey(&key_column));
+      if (column_id.type() == docdb::KeyEntryType::kColumnId) {
+        docdb::Value decoded_value;
+        RETURN_NOT_OK(decoded_value.Decode(write_pair.value()));
+
         const ColumnSchema& col = VERIFY_RESULT(schema.column_by_id(column_id.GetColumnId()));
         AddColumnToMap(col, decoded_value.primitive_value(), record->add_changes());
-      } else if (column_id.value_type() != docdb::ValueType::kSystemColumnId) {
-        LOG(DFATAL) << "Unexpected value type in key: " << column_id.value_type();
+      } else if (column_id.type() != docdb::KeyEntryType::kSystemColumnId) {
+        LOG(DFATAL) << "Unexpected value type in key: " << column_id.type();
       }
     }
   }
@@ -377,43 +404,114 @@ CHECKED_STATUS PopulateWriteRecord(const ReplicateMsgPtr& msg,
 }
 
 // Populate CDC record corresponding to WAL UPDATE_TRANSACTION_OP entry.
-CHECKED_STATUS PopulateTransactionRecord(const ReplicateMsgPtr& msg,
-                                         const std::shared_ptr<tablet::TabletPeer>& tablet_peer,
-                                         ReplicateIntents replicate_intents,
-                                         CDCRecordPB* record) {
+Status PopulateTransactionRecord(const ReplicateMsgPtr& msg,
+                                 const std::shared_ptr<tablet::TabletPeer>& tablet_peer,
+                                 ReplicateIntents replicate_intents,
+                                 GetChangesResponsePB* resp) {
   SCHECK(msg->has_transaction_state(), InvalidArgument,
-         Format("Update transaction message requires transaction_state: $0",
-                msg->ShortDebugString()));
-  record->set_operation(CDCRecordPB_OperationType_WRITE);
-  record->set_time(replicate_intents ?
-      msg->hybrid_time() : msg->transaction_state().commit_hybrid_time());
-  record->mutable_transaction_state()->CopyFrom(msg->transaction_state());
-  if (replicate_intents && msg->transaction_state().status() == TransactionStatus::APPLYING) {
-    // Add the partition metadata so the consumer knows which tablets to apply the transaction
-    // to.
-    tablet_peer->tablet()->metadata()->partition()->ToPB(record->mutable_partition());
+      Format("Update transaction message requires transaction_state: $0",
+            msg->ShortDebugString()));
+  if (!replicate_intents) {
+    auto* record = resp->add_records();
+    record->set_operation(CDCRecordPB_OperationType_WRITE);
+    record->set_time(msg->transaction_state().commit_hybrid_time());
+    msg->transaction_state().ToGoogleProtobuf(record->mutable_transaction_state());
+    return Status::OK();
+  }
+
+  const auto& transaction_state = msg->transaction_state();
+  const auto& transaction_status = transaction_state.status();
+  if (transaction_status != TransactionStatus::APPLYING &&
+      transaction_status != TransactionStatus::COMMITTED &&
+      transaction_status != TransactionStatus::CREATED) {
+    // This is an unsupported transaction status.
+    return Status::OK();
+  }
+
+  auto* record = resp->add_records();
+  record->set_time(msg->hybrid_time());
+  auto* txn_state = record->mutable_transaction_state();
+  txn_state->set_transaction_id(transaction_state.transaction_id().ToBuffer());
+
+  switch (transaction_status) {
+    case TransactionStatus::APPLYING: {
+      record->set_operation(CDCRecordPB::APPLY);
+      txn_state->set_commit_hybrid_time(transaction_state.commit_hybrid_time());
+      auto shared_tablet = VERIFY_RESULT(tablet_peer->shared_tablet_safe());
+      shared_tablet->metadata()->partition()->ToPB(record->mutable_partition());
+      break;
+    }
+    case TransactionStatus::COMMITTED: {
+      record->set_operation(CDCRecordPB::TRANSACTION_COMMITTED);
+      for (const auto& tablet : msg->transaction_state().tablets()) {
+        txn_state->mutable_tablets()->Add(tablet.ToBuffer());
+      }
+      break;
+    }
+    case TransactionStatus::CREATED: {
+      record->set_operation(CDCRecordPB::TRANSACTION_CREATED);
+      break;
+    }
+    default: {
+      return STATUS(IllegalState, Format("Processing unexpected op type $0",
+                                          msg->transaction_state().status()));
+    }
   }
   return Status::OK();
 }
 
-} // namespace
+Status PopulateSplitOpRecord(const ReplicateMsgPtr& msg, CDCRecordPB* record) {
+  record->set_operation(CDCRecordPB::SPLIT_OP);
+  record->set_time(msg->hybrid_time());
+  msg->split_request().ToGoogleProtobuf(record->mutable_split_tablet_request());
+  return Status::OK();
+}
 
-Status GetChanges(const std::string& stream_id,
-                  const std::string& tablet_id,
-                  const OpId& from_op_id,
-                  const StreamMetadata& stream_metadata,
-                  const std::shared_ptr<tablet::TabletPeer>& tablet_peer,
-                  const MemTrackerPtr& mem_tracker,
-                  consensus::ReplicateMsgsHolder* msgs_holder,
-                  GetChangesResponsePB* resp,
-                  int64_t* last_readable_opid_index) {
+Status PopulateChangeMetadataRecord(const ReplicateMsgPtr& msg, CDCRecordPB* record) {
+  SCHECK(msg->has_change_metadata_request(), InvalidArgument,
+      Format("METADATA message requires change_metadata_request: $0", msg->ShortDebugString()));
+  record->set_operation(CDCRecordPB::CHANGE_METADATA);
+  record->set_time(msg->hybrid_time());
+  msg->change_metadata_request().ToGoogleProtobuf(record->mutable_change_metadata_request());
+  return Status::OK();
+}
+
+HybridTime GetSafeTimeForTarget(
+    const HybridTime leader_safe_time,
+    HybridTime ht_of_last_returned_message,
+    HaveMoreMessages have_more_messages) {
+  if (have_more_messages) {
+    return ht_of_last_returned_message;
+  }
+
+  if (ht_of_last_returned_message.is_valid()) {
+    if (!leader_safe_time.is_valid() || ht_of_last_returned_message > leader_safe_time) {
+      return ht_of_last_returned_message;
+    }
+  }
+
+  return leader_safe_time;
+}
+
+Status GetChangesForXCluster(const std::string& stream_id,
+                             const std::string& tablet_id,
+                             const OpId& from_op_id,
+                             const StreamMetadata& stream_metadata,
+                             const std::shared_ptr<tablet::TabletPeer>& tablet_peer,
+                             const client::YBSessionPtr& session,
+                             UpdateOnSplitOpFunc update_on_split_op_func,
+                             const MemTrackerPtr& mem_tracker,
+                             consensus::ReplicateMsgsHolder* msgs_holder,
+                             GetChangesResponsePB* resp,
+                             int64_t* last_readable_opid_index,
+                             const CoarseTimePoint deadline) {
   auto replicate_intents = ReplicateIntents(GetAtomicFlag(&FLAGS_cdc_enable_replicate_intents));
   // Request scope on transaction participant so that transactions are not removed from participant
   // while RequestScope is active.
   RequestScope request_scope;
 
   auto read_ops = VERIFY_RESULT(tablet_peer->consensus()->
-    ReadReplicatedMessagesForCDC(from_op_id, last_readable_opid_index));
+    ReadReplicatedMessagesForCDC(from_op_id, last_readable_opid_index, deadline));
   ScopedTrackedConsumption consumption;
   if (read_ops.read_from_disk_size && mem_tracker) {
     consumption = ScopedTrackedConsumption(mem_tracker, read_ops.read_from_disk_size);
@@ -422,46 +520,96 @@ Status GetChanges(const std::string& stream_id,
   OpId checkpoint;
   TxnStatusMap txn_map;
   if (!replicate_intents) {
-    auto txn_participant = tablet_peer->tablet()->transaction_participant();
+    auto shared_tablet = VERIFY_RESULT(tablet_peer->shared_tablet_safe());
+    auto txn_participant = shared_tablet->transaction_participant();
     if (txn_participant) {
-      request_scope = RequestScope(txn_participant);
+      request_scope = VERIFY_RESULT(RequestScope::Create(txn_participant));
     }
     txn_map = TxnStatusMap(VERIFY_RESULT(BuildTxnStatusMap(
       read_ops.messages, read_ops.have_more_messages, tablet_peer->Now(), txn_participant)));
   }
+  auto leader_safe_time = tablet_peer->LeaderSafeTime();
+  if (!leader_safe_time.ok()) {
+    YB_LOG_EVERY_N_SECS(WARNING, 10)
+        << "Could not compute safe time: " << leader_safe_time.status();
+    leader_safe_time = HybridTime::kInvalid;
+  }
+
   ReplicateMsgs messages = VERIFY_RESULT(FilterAndSortWrites(
       read_ops.messages, txn_map, replicate_intents, &checkpoint));
 
-  for (const auto& msg : messages) {
+  HaveMoreMessages have_more_messages =
+      PREDICT_FALSE(FLAGS_TEST_xcluster_simulate_have_more_records) ? HaveMoreMessages::kTrue
+                                                                    : read_ops.have_more_messages;
+  auto ht_of_last_returned_message = HybridTime::kInvalid;
+
+  for (size_t i = 0; i < messages.size(); ++i) {
+    bool exit_early = false;
+    const auto msg = messages[i];
     switch (msg->op_type()) {
       case consensus::OperationType::UPDATE_TRANSACTION_OP:
-        if (!replicate_intents) {
-          RETURN_NOT_OK(PopulateTransactionRecord(
-              msg, tablet_peer, replicate_intents, resp->add_records()));
-        } else if (msg->transaction_state().status() == TransactionStatus::APPLYING) {
-          auto record = resp->add_records();
-          record->set_operation(CDCRecordPB::APPLY);
-          record->set_time(msg->hybrid_time());
-          auto* txn_state = record->mutable_transaction_state();
-          txn_state->set_transaction_id(msg->transaction_state().transaction_id());
-          txn_state->set_commit_hybrid_time(msg->transaction_state().commit_hybrid_time());
-          tablet_peer->tablet()->metadata()->partition()->ToPB(record->mutable_partition());
-        }
+        RETURN_NOT_OK(PopulateTransactionRecord(msg, tablet_peer, replicate_intents, resp));
         break;
       case consensus::OperationType::WRITE_OP:
         RETURN_NOT_OK(PopulateWriteRecord(msg, txn_map, stream_metadata, tablet_peer,
                                           replicate_intents, resp));
         break;
-
+      case consensus::OperationType::SPLIT_OP:
+        SCHECK(msg->has_split_request(), InvalidArgument,
+            Format("Split op message requires split_request: $0", msg->ShortDebugString()));
+        if (msg->split_request().tablet_id() == tablet_id) {
+          // Only send split if it is our split, and if we can update the children tablet entries
+          // in cdc_state table correctly (the reason for this check is that it is possible to
+          // read our parent tablet splits).
+          auto s = update_on_split_op_func(msg->ToGoogleProtobuf());
+          if (s.ok()) {
+            RETURN_NOT_OK(PopulateSplitOpRecord(msg, resp->add_records()));
+          } else {
+            LOG(INFO) << "Not replicating SPLIT_OP yet for tablet: " << tablet_id << ", stream: "
+                      << stream_id << " : " << s;
+            // Can still process all previous records, but stop processing anything from here on.
+            if (i > 0) {
+              checkpoint = OpId::FromPB(messages[i-1]->id());
+            } else {
+              checkpoint = from_op_id;
+            }
+            exit_early = true;
+          }
+        }
+        break;
+      case consensus::OperationType::CHANGE_METADATA_OP:
+        if (FLAGS_TEST_xcluster_skip_meta_ops) {
+          break;
+        }
+        SCHECK(msg->has_change_metadata_request(), InvalidArgument,
+               Format("Change Meta op message requires payload $0", msg->ShortDebugString()));
+        if (msg->change_metadata_request().tablet_id() == tablet_id) {
+          RETURN_NOT_OK(PopulateChangeMetadataRecord(msg, resp->add_records()));
+          // This should be the last record we send to the Consumer.
+          checkpoint = OpId::FromPB(msg->id());
+          exit_early = true;
+        }
+        break;
       default:
         // Nothing to do for other operation types.
         break;
     }
+    if (exit_early) {
+      have_more_messages = HaveMoreMessages::kTrue;
+      break;
+    }
+
+    ht_of_last_returned_message = HybridTime(msg->hybrid_time());
   }
 
   if (consumption) {
     consumption.Add(resp->SpaceUsedLong());
   }
+
+  auto safe_time =
+      GetSafeTimeForTarget(leader_safe_time.get(), ht_of_last_returned_message, have_more_messages);
+  resp->set_safe_hybrid_time(safe_time.ToUint64());
+
   *msgs_holder = consensus::ReplicateMsgsHolder(
       nullptr, std::move(messages), std::move(consumption));
   (checkpoint.index > 0 ? checkpoint : from_op_id).ToPB(

@@ -15,12 +15,18 @@
 
 #include <boost/algorithm/string.hpp>
 
-#include "yb/master/catalog_manager.h"
-#include "yb/master/master.h"
+#include "yb/common/ql_value.h"
+#include "yb/common/transaction.h"
+
+#include "yb/master/catalog_manager_if.h"
+#include "yb/master/master_ddl.pb.h"
 #include "yb/master/master_defaults.h"
+
+#include "yb/util/status_log.h"
+
 #include "yb/yql/cql/ql/test/ql-test-base.h"
 
-#include "yb/common/ql_value.h"
+using std::string;
 
 DECLARE_int32(TEST_simulate_slow_table_create_secs);
 DECLARE_bool(master_enable_metrics_snapshotter);
@@ -245,8 +251,7 @@ TEST_F(TestQLCreateTable, TestQLCreateTableWithTTL) {
                       "default_time_to_live = 1;");
 
   // Query the table schema.
-  master::Master *master = cluster_->mini_master()->master();
-  master::CatalogManager *catalog_manager = master->catalog_manager();
+  auto *catalog_manager = &cluster_->mini_master()->catalog_manager();
   master::GetTableSchemaRequestPB request_pb;
   master::GetTableSchemaResponsePB response_pb;
   request_pb.mutable_table()->mutable_namespace_()->set_name(kDefaultKeyspaceName);
@@ -399,6 +404,8 @@ TEST_F(TestQLCreateTable, TestQLCreateTableWithPartitionScemeOf) {
 
 // Check for presence of rows in system.metrics table.
 TEST_F(TestQLCreateTable, TestMetrics) {
+  FLAGS_metrics_snapshotter_interval_ms = 1000 * kTimeMultiplier;
+
   FLAGS_master_enable_metrics_snapshotter = true;
   FLAGS_tserver_enable_metrics_snapshotter = true;
 
@@ -445,7 +452,7 @@ TEST_F(TestQLCreateTable, TestMetrics) {
     auto row_block = processor->row_block();
 
     std::unordered_set<std::string> t;
-    for (int i = 0; i < row_block->row_count(); i++) {
+    for (size_t i = 0; i < row_block->row_count(); i++) {
       QLRow &row = row_block->row(i);
       t.insert(row.column(0).string_value());
     }
@@ -464,7 +471,7 @@ TEST_F(TestQLCreateTable, TestMetrics) {
     auto row_block = processor->row_block();
 
     std::unordered_set<std::string> t;
-    for (int i = 0; i < row_block->row_count(); i++) {
+    for (size_t i = 0; i < row_block->row_count(); i++) {
       QLRow &row = row_block->row(i);
       t.insert(row.column(0).string_value());
     }

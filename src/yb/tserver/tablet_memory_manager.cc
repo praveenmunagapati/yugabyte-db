@@ -16,6 +16,7 @@
 #include "yb/consensus/log_cache.h"
 #include "yb/consensus/raft_consensus.h"
 
+#include "yb/gutil/casts.h"
 #include "yb/gutil/strings/human_readable.h"
 
 #include "yb/rocksdb/cache.h"
@@ -26,24 +27,26 @@
 #include "yb/tablet/tablet_peer.h"
 
 #include "yb/util/background_task.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
+#include "yb/util/logging.h"
 #include "yb/util/mem_tracker.h"
+#include "yb/util/status_log.h"
 
 using namespace std::literals;
 using namespace std::placeholders;
 
-DEFINE_bool(enable_log_cache_gc, true,
+DEFINE_UNKNOWN_bool(enable_log_cache_gc, true,
             "Set to true to enable log cache garbage collector.");
 
-DEFINE_bool(log_cache_gc_evict_only_over_allocated, true,
+DEFINE_UNKNOWN_bool(log_cache_gc_evict_only_over_allocated, true,
             "If set to true, log cache garbage collection would evict only memory that was "
             "allocated over limit for log cache. Otherwise it will try to evict requested number "
             "of bytes.");
-DEFINE_int64(global_memstore_size_percentage, 10,
+DEFINE_UNKNOWN_int64(global_memstore_size_percentage, 10,
              "Percentage of total available memory to use for the global memstore. "
              "Default is 10. See also memstore_size_mb and "
              "global_memstore_size_mb_max.");
-DEFINE_int64(global_memstore_size_mb_max, 2048,
+DEFINE_UNKNOWN_int64(global_memstore_size_mb_max, 2048,
              "Global memstore size is determined as a percentage of the available "
              "memory. However, this flag limits it in absolute size. Value of 0 "
              "means no limit on the value obtained by the percentage. Default is 2048.");
@@ -54,22 +57,22 @@ namespace {
   constexpr int kDbCacheSizeUseDefault = -3;
 }
 
-DEFINE_bool(enable_block_based_table_cache_gc, false,
+DEFINE_UNKNOWN_bool(enable_block_based_table_cache_gc, false,
             "Set to true to enable block based table garbage collector.");
 
-DEFINE_int64(db_block_cache_size_bytes, kDbCacheSizeUsePercentage,
+DEFINE_UNKNOWN_int64(db_block_cache_size_bytes, kDbCacheSizeUsePercentage,
              "Size of RocksDB block cache (in bytes). "
              "This defaults to -1 for system auto-generated default, which would use "
              "FLAGS_db_block_cache_size_percentage to select a percentage of the total "
              "memory as the default size for the shared block cache. Value of -2 disables "
              "block cache.");
 
-DEFINE_int32(db_block_cache_size_percentage, kDbCacheSizeUseDefault,
+DEFINE_UNKNOWN_int32(db_block_cache_size_percentage, kDbCacheSizeUseDefault,
              "Default percentage of total available memory to use as block cache size, if not "
              "asking for a raw number, through FLAGS_db_block_cache_size_bytes. "
              "Defaults to -3 (use default percentage as defined by master or tserver).");
 
-DEFINE_int32(db_block_cache_num_shard_bits, 4,
+DEFINE_UNKNOWN_int32(db_block_cache_num_shard_bits, 4,
              "Number of bits to use for sharding the block cache (defaults to 4 bits)");
 TAG_FLAG(db_block_cache_num_shard_bits, advanced);
 
@@ -164,7 +167,7 @@ TabletMemoryManager::TabletMemoryManager(
   ConfigureBackgroundTask(options);
 }
 
-CHECKED_STATUS TabletMemoryManager::Init() {
+Status TabletMemoryManager::Init() {
   if (background_task_) {
     RETURN_NOT_OK(background_task_->Init());
   }
@@ -210,7 +213,6 @@ void TabletMemoryManager::InitLogCacheGC() {
 
 void TabletMemoryManager::ConfigureBackgroundTask(tablet::TabletOptions* options) {
   // Calculate memstore_size_bytes based on total RAM available and global percentage.
-  bool should_count_memory = FLAGS_global_memstore_size_percentage > 0;
   CHECK(FLAGS_global_memstore_size_percentage > 0 && FLAGS_global_memstore_size_percentage <= 100)
     << Substitute(
         "Flag tablet_block_cache_size_percentage must be between 0 and 100. Current value: "
@@ -226,16 +228,15 @@ void TabletMemoryManager::ConfigureBackgroundTask(tablet::TabletOptions* options
 
   // Add memory monitor and background thread for flushing.
   // TODO(zhaoalex): replace task with Poller
-  if (should_count_memory) {
-    background_task_.reset(new BackgroundTask(
-      std::function<void()>([this]() { FlushTabletIfLimitExceeded(); }),
-      "tablet manager",
-      "flush scheduler bgtask"));
-    options->memory_monitor = std::make_shared<rocksdb::MemoryMonitor>(
-        memstore_size_bytes,
-        std::function<void()>([this](){
-                                YB_WARN_NOT_OK(background_task_->Wake(), "Wakeup error"); }));
-  }
+  background_task_.reset(new BackgroundTask(
+    std::function<void()>([this]() { FlushTabletIfLimitExceeded(); }),
+    "tablet manager",
+    "flush scheduler bgtask"));
+  options->memory_monitor = std::make_shared<rocksdb::MemoryMonitor>(
+      memstore_size_bytes,
+      std::function<void()>([this](){
+                              YB_WARN_NOT_OK(background_task_->Wake(), "Wakeup error"); }));
+
   // Must assign memory_monitor_ after configuring the background task.
   memory_monitor_ = options->memory_monitor;
 }
@@ -301,7 +302,7 @@ void TabletMemoryManager::FlushTabletIfLimitExceeded() {
             << tablet_to_flush->OldestMutableMemtableWriteHybridTime();
         WARN_NOT_OK(
             tablet_to_flush->Flush(
-                tablet::FlushMode::kAsync, tablet::FlushFlags::kAll, flush_tick),
+                tablet::FlushMode::kAsync, tablet::FlushFlags::kAllDbs, flush_tick),
             Substitute("Flush failed on $0", peer_to_flush->tablet_id()));
         for (auto listener : TEST_listeners) {
           listener->StartedFlush(peer_to_flush->tablet_id());

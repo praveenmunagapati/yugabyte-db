@@ -3,23 +3,23 @@
 package com.yugabyte.yw.commissioner.tasks.upgrade;
 
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
-import com.yugabyte.yw.commissioner.SubTaskGroup;
+import com.yugabyte.yw.commissioner.TaskExecutor.SubTaskGroup;
 import com.yugabyte.yw.commissioner.UpgradeTaskBase;
 import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskGroupType;
-import com.yugabyte.yw.commissioner.tasks.UniverseDefinitionTaskBase;
+import com.yugabyte.yw.commissioner.tasks.UniverseTaskBase;
 import com.yugabyte.yw.commissioner.tasks.subtasks.CreateRootVolumes;
 import com.yugabyte.yw.commissioner.tasks.subtasks.ReplaceRootVolume;
-import com.yugabyte.yw.commissioner.tasks.subtasks.UpdateNodeDetails;
-import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.Cluster;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.UserIntent;
 import com.yugabyte.yw.forms.VMImageUpgradeParams;
+import com.yugabyte.yw.forms.VMImageUpgradeParams.VmUpgradeTaskType;
 import com.yugabyte.yw.models.helpers.NodeDetails;
 import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -28,7 +28,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.tuple.Pair;
 
 @Slf4j
 public class VMImageUpgrade extends UpgradeTaskBase {
@@ -59,20 +58,25 @@ public class VMImageUpgrade extends UpgradeTaskBase {
   public void run() {
     runUpgrade(
         () -> {
-          Pair<List<NodeDetails>, List<NodeDetails>> nodes = fetchNodes(taskParams().upgradeOption);
-          Set<NodeDetails> nodeSet = new LinkedHashSet<>();
-          nodeSet.addAll(nodes.getLeft());
-          nodeSet.addAll(nodes.getRight());
+          Set<NodeDetails> nodeSet = fetchAllNodes(taskParams().upgradeOption);
           // Verify the request params and fail if invalid
           taskParams().verifyParams(getUniverse());
           // Create task sequence for VM Image upgrade
           createVMImageUpgradeTasks(nodeSet);
+
+          if (taskParams().isSoftwareUpdateViaVm) {
+            // Update software version in the universe metadata.
+            createUpdateSoftwareVersionTask(
+                    taskParams().ybSoftwareVersion, true /*isSoftwareUpdateViaVm*/)
+                .setSubTaskGroupType(getTaskSubGroupType());
+          }
+
+          createMarkUniverseForHealthScriptReUploadTask();
         });
   }
 
   private void createVMImageUpgradeTasks(Set<NodeDetails> nodes) {
-    createRootVolumeCreationTasks(new ArrayList<>(nodes))
-        .setSubTaskGroupType(getTaskSubGroupType());
+    createRootVolumeCreationTasks(nodes).setSubTaskGroupType(getTaskSubGroupType());
 
     for (NodeDetails node : nodes) {
       UUID region = taskParams().nodeToRegion.get(node.nodeUuid);
@@ -86,9 +90,10 @@ public class VMImageUpgrade extends UpgradeTaskBase {
         continue;
       }
 
-      List<UniverseDefinitionTaskBase.ServerType> processTypes = new ArrayList<>();
+      List<UniverseTaskBase.ServerType> processTypes = new ArrayList<>();
       if (node.isMaster) processTypes.add(ServerType.MASTER);
       if (node.isTserver) processTypes.add(ServerType.TSERVER);
+      if (getUniverse().isYbcEnabled()) processTypes.add(ServerType.CONTROLLER);
 
       processTypes.forEach(
           processType ->
@@ -98,38 +103,49 @@ public class VMImageUpgrade extends UpgradeTaskBase {
       createRootVolumeReplacementTask(node).setSubTaskGroupType(getTaskSubGroupType());
 
       List<NodeDetails> nodeList = Collections.singletonList(node);
-      createSetupServerTasks(nodeList).setSubTaskGroupType(SubTaskGroupType.InstallingSoftware);
-
-      UniverseDefinitionTaskParams universeDetails = getUniverse().getUniverseDetails();
-      taskParams().rootCA = universeDetails.rootCA;
-      taskParams().clientRootCA = universeDetails.clientRootCA;
-      taskParams().rootAndClientRootCASame = universeDetails.rootAndClientRootCASame;
-      taskParams().allowInsecure = universeDetails.allowInsecure;
-      taskParams().setTxnTableWaitCountFlag = universeDetails.setTxnTableWaitCountFlag;
-      createConfigureServerTasks(nodeList, false, false, false)
+      createSetupServerTasks(nodeList, p -> p.vmUpgradeTaskType = taskParams().vmUpgradeTaskType)
+          .setSubTaskGroupType(SubTaskGroupType.InstallingSoftware);
+      createConfigureServerTasks(
+              nodeList, params -> params.vmUpgradeTaskType = taskParams().vmUpgradeTaskType)
           .setSubTaskGroupType(SubTaskGroupType.InstallingSoftware);
 
       processTypes.forEach(
           processType -> {
-            createGFlagsOverrideTasks(nodeList, processType);
-            createServerControlTask(node, processType, "start")
-                .setSubTaskGroupType(getTaskSubGroupType());
-            createWaitForServersTasks(new HashSet<>(nodeList), processType);
-            createWaitForServerReady(node, processType, getSleepTimeForProcess(processType))
-                .setSubTaskGroupType(getTaskSubGroupType());
+            if (processType.equals(ServerType.CONTROLLER)) {
+              createStartYbcTasks(Arrays.asList(node)).setSubTaskGroupType(getTaskSubGroupType());
+
+              // Wait for yb-controller to be responsive on each node.
+              createWaitForYbcServerTask(new HashSet<>(Arrays.asList(node)))
+                  .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
+            } else {
+              createGFlagsOverrideTasks(
+                  nodeList,
+                  processType,
+                  false /*isMasterInShellMode*/,
+                  taskParams().vmUpgradeTaskType,
+                  false /*ignoreUseCustomImageConfig*/);
+              createServerControlTask(node, processType, "start")
+                  .setSubTaskGroupType(getTaskSubGroupType());
+              createWaitForServersTasks(new HashSet<>(nodeList), processType);
+              createWaitForServerReady(node, processType, getSleepTimeForProcess(processType))
+                  .setSubTaskGroupType(getTaskSubGroupType());
+            }
           });
 
       createWaitForKeyInMemoryTask(node);
 
       node.machineImage = machineImage;
-      createNodeDetailsUpdateTask(node).setSubTaskGroupType(getTaskSubGroupType());
+      node.ybPrebuiltAmi =
+          taskParams().vmUpgradeTaskType == VmUpgradeTaskType.VmUpgradeWithCustomImages;
+      createNodeDetailsUpdateTask(node, !taskParams().isSoftwareUpdateViaVm)
+          .setSubTaskGroupType(getTaskSubGroupType());
     }
   }
 
-  private SubTaskGroup createRootVolumeCreationTasks(List<NodeDetails> nodes) {
+  private SubTaskGroup createRootVolumeCreationTasks(Collection<NodeDetails> nodes) {
     Map<UUID, List<NodeDetails>> rootVolumesPerAZ =
         nodes.stream().collect(Collectors.groupingBy(n -> n.azUuid));
-    SubTaskGroup subTaskGroup = new SubTaskGroup("CreateRootVolumes", executor);
+    SubTaskGroup subTaskGroup = getTaskExecutor().createSubTaskGroup("CreateRootVolumes", executor);
 
     rootVolumesPerAZ.forEach(
         (key, value) -> {
@@ -168,15 +184,15 @@ public class VMImageUpgrade extends UpgradeTaskBase {
 
           CreateRootVolumes task = createTask(CreateRootVolumes.class);
           task.initialize(params);
-          subTaskGroup.addTask(task);
+          subTaskGroup.addSubTask(task);
         });
 
-    subTaskGroupQueue.add(subTaskGroup);
+    getRunnableTask().addSubTaskGroup(subTaskGroup);
     return subTaskGroup;
   }
 
   private SubTaskGroup createRootVolumeReplacementTask(NodeDetails node) {
-    SubTaskGroup subTaskGroup = new SubTaskGroup("ReplaceRootVolume", executor);
+    SubTaskGroup subTaskGroup = getTaskExecutor().createSubTaskGroup("ReplaceRootVolume", executor);
     ReplaceRootVolume.Params replaceParams = new ReplaceRootVolume.Params();
     replaceParams.nodeName = node.nodeName;
     replaceParams.azUuid = node.azUuid;
@@ -185,26 +201,9 @@ public class VMImageUpgrade extends UpgradeTaskBase {
 
     ReplaceRootVolume replaceDiskTask = createTask(ReplaceRootVolume.class);
     replaceDiskTask.initialize(replaceParams);
-    subTaskGroup.addTask(replaceDiskTask);
+    subTaskGroup.addSubTask(replaceDiskTask);
 
-    subTaskGroupQueue.add(subTaskGroup);
-    return subTaskGroup;
-  }
-
-  private SubTaskGroup createNodeDetailsUpdateTask(NodeDetails node) {
-    SubTaskGroup subTaskGroup = new SubTaskGroup("UpdateNodeDetails", executor);
-    UpdateNodeDetails.Params updateNodeDetailsParams = new UpdateNodeDetails.Params();
-    updateNodeDetailsParams.universeUUID = taskParams().universeUUID;
-    updateNodeDetailsParams.azUuid = node.azUuid;
-    updateNodeDetailsParams.nodeName = node.nodeName;
-    updateNodeDetailsParams.details = node;
-
-    UpdateNodeDetails updateNodeTask = createTask(UpdateNodeDetails.class);
-    updateNodeTask.initialize(updateNodeDetailsParams);
-    updateNodeTask.setUserTaskUUID(userTaskUUID);
-    subTaskGroup.addTask(updateNodeTask);
-
-    subTaskGroupQueue.add(subTaskGroup);
+    getRunnableTask().addSubTaskGroup(subTaskGroup);
     return subTaskGroup;
   }
 }

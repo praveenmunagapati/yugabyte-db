@@ -13,6 +13,8 @@
 #include "yb/yql/pgwrapper/libpq_test_base.h"
 #include "yb/yql/pgwrapper/libpq_utils.h"
 
+using std::string;
+
 namespace yb {
 namespace pgwrapper {
 
@@ -66,7 +68,6 @@ TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(BeginWithoutCommit)) {
 }
 
 TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(InsertWithoutCommit)) {
-  static const std::string kTryAgain = "Try again.";
   constexpr auto kRetryCount = 3;
   constexpr auto kIterations = 10;
   constexpr auto kRowPerSeed = 100;
@@ -100,7 +101,7 @@ TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(InsertWithoutCommit)) {
               return;
             }
             // Run the statement again as "Try again" was reported.
-            ASSERT_STR_CONTAINS(serr, kTryAgain);
+            ASSERT_TRUE(HasTryAgain(status)) << status;
             continue;
           }
 
@@ -114,7 +115,7 @@ TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(InsertWithoutCommit)) {
       for (int rt = 0; rt < kRetryCount; rt++) {
         auto res = connection.Fetch("SELECT * FROM terr");
         if (!res.ok()) {
-          ASSERT_STR_CONTAINS(res.status().ToString(), kTryAgain);
+          ASSERT_TRUE(HasTryAgain(res.status())) << res.status();
           continue;
         }
 
@@ -149,7 +150,6 @@ TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(InsertWithoutCommit)) {
 }
 
 TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(InsertDuplicateWithoutCommit)) {
-  static const std::string kTryAgain = "Try again.";
   constexpr auto kRetryCount = 3;
   constexpr auto kIterations = 10;
   constexpr auto kRowPerSeed = 100;
@@ -182,7 +182,7 @@ TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(InsertDuplicateWithoutCommit)) {
               return;
             }
             // Run the statement again as "Try again" was reported.
-            ASSERT_STR_CONTAINS(serr, kTryAgain);
+            ASSERT_TRUE(HasTryAgain(status)) << status;
             continue;
           }
 
@@ -196,7 +196,7 @@ TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(InsertDuplicateWithoutCommit)) {
       for (int rt = 0; rt < kRetryCount; rt++) {
         auto res = connection.Fetch("SELECT * FROM terr");
         if (!res.ok()) {
-          ASSERT_STR_CONTAINS(res.status().ToString(), kTryAgain);
+          ASSERT_TRUE(HasTryAgain(res.status())) << res.status();
           continue;
         }
 
@@ -231,7 +231,6 @@ TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(InsertDuplicateWithoutCommit)) {
 }
 
 TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(UpdateWithoutCommit)) {
-  static const std::string kTryAgain = "Try again.";
   constexpr auto kRetryCount = 3;
   constexpr auto kIterations = 10;
   constexpr auto kRowCount = 100;
@@ -267,7 +266,7 @@ TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(UpdateWithoutCommit)) {
               return;
             }
             // Run the statement again as "Try again" was reported.
-            ASSERT_STR_CONTAINS(serr, kTryAgain);
+            ASSERT_TRUE(HasTryAgain(status)) << status;
             continue;
           }
         }
@@ -277,7 +276,7 @@ TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(UpdateWithoutCommit)) {
       for (int rt = 0; rt < kRetryCount; rt++) {
         auto res = connection.Fetch("SELECT * FROM terr");
         if (!res.ok()) {
-          ASSERT_STR_CONTAINS(res.status().ToString(), kTryAgain);
+          ASSERT_TRUE(HasTryAgain(res.status())) << res.status();
           continue;
         }
 
@@ -324,7 +323,6 @@ TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(UpdateWithoutCommit)) {
 }
 
 TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(DeleteWithoutCommit)) {
-  static const std::string kTryAgain = "Try again.";
   constexpr auto kRetryCount = 3;
   constexpr auto kIterations = 10;
   constexpr auto kRowCount = 100;
@@ -360,7 +358,7 @@ TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(DeleteWithoutCommit)) {
               return;
             }
             // Run the statement again as "Try again" was reported.
-            ASSERT_STR_CONTAINS(serr, kTryAgain);
+            ASSERT_TRUE(HasTryAgain(status)) << status;
             continue;
           }
 
@@ -374,7 +372,7 @@ TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(DeleteWithoutCommit)) {
       for (int rt = 0; rt < kRetryCount; rt++) {
         auto res = connection.Fetch("SELECT * FROM terr");
         if (!res.ok()) {
-          ASSERT_STR_CONTAINS(res.status().ToString(), kTryAgain);
+          ASSERT_TRUE(HasTryAgain(res.status())) << res.status();
           continue;
         }
 
@@ -410,7 +408,6 @@ TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(DeleteWithoutCommit)) {
 }
 
 TEST_F(PgLibPqErrTest, YB_DISABLE_TEST_IN_TSAN(InsertTransactionAborted)) {
-  static const std::string kDuplicate = "Try again.";
   constexpr auto kIterations = 10;
   constexpr auto kRowPerSeed = 100;
 

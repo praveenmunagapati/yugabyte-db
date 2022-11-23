@@ -21,14 +21,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#ifndef YB_ROCKSDB_UTIL_TESTUTIL_H
-#define YB_ROCKSDB_UTIL_TESTUTIL_H
 
 #pragma once
 #include <algorithm>
 #include <deque>
+#include <mutex>
 #include <string>
 #include <vector>
+
+#include <gtest/gtest.h>
+
+#include "yb/gutil/casts.h"
 
 #include "yb/rocksdb/compaction_filter.h"
 #include "yb/rocksdb/env.h"
@@ -45,8 +48,16 @@
 
 #include "yb/util/slice.h"
 
+DECLARE_bool(never_fsync);
 namespace rocksdb {
 class SequentialFileReader;
+
+class RocksDBTest : public ::testing::Test {
+ public:
+  RocksDBTest() {
+    FLAGS_never_fsync = true;
+  }
+};
 
 namespace test {
 
@@ -69,7 +80,7 @@ class ErrorEnv : public EnvWrapper {
                num_writable_file_errors_(0) { }
 
   virtual Status NewWritableFile(const std::string& fname,
-                                 unique_ptr<WritableFile>* result,
+                                 std::unique_ptr<WritableFile>* result,
                                  const EnvOptions& soptions) override {
     result->reset();
     if (writable_file_error_) {
@@ -244,7 +255,7 @@ class StringSource: public RandomAccessFile {
 
   yb::Result<uint64_t> Size() const override { return contents_.size(); }
 
-  CHECKED_STATUS Read(uint64_t offset, size_t n, Slice* result, uint8_t* scratch) const override {
+  Status Read(uint64_t offset, size_t n, Slice* result, uint8_t* scratch) const override {
     total_reads_++;
     if (offset > contents_.size()) {
       return STATUS(InvalidArgument, "invalid Read offset");
@@ -470,7 +481,7 @@ class StringEnv : public EnvWrapper {
 
   const Status WriteToNewFile(const std::string& file_name,
                               const std::string& content) {
-    unique_ptr<WritableFile> r;
+    std::unique_ptr<WritableFile> r;
     auto s = NewWritableFile(file_name, &r, EnvOptions());
     if (!s.ok()) {
       return s;
@@ -483,7 +494,7 @@ class StringEnv : public EnvWrapper {
   }
 
   // The following text is boilerplate that forwards all methods to target()
-  Status NewSequentialFile(const std::string& f, unique_ptr<SequentialFile>* r,
+  Status NewSequentialFile(const std::string& f, std::unique_ptr<SequentialFile>* r,
                            const EnvOptions& options) override {
     auto iter = files_.find(f);
     if (iter == files_.end()) {
@@ -493,11 +504,11 @@ class StringEnv : public EnvWrapper {
     return Status::OK();
   }
   Status NewRandomAccessFile(const std::string& f,
-                             unique_ptr<RandomAccessFile>* r,
+                             std::unique_ptr<RandomAccessFile>* r,
                              const EnvOptions& options) override {
     return STATUS(NotSupported, "");
   }
-  Status NewWritableFile(const std::string& f, unique_ptr<WritableFile>* r,
+  Status NewWritableFile(const std::string& f, std::unique_ptr<WritableFile>* r,
                          const EnvOptions& options) override {
     auto iter = files_.find(f);
     if (iter != files_.end()) {
@@ -507,7 +518,7 @@ class StringEnv : public EnvWrapper {
     return Status::OK();
   }
   virtual Status NewDirectory(const std::string& name,
-                              unique_ptr<Directory>* result) override {
+                              std::unique_ptr<Directory>* result) override {
     return STATUS(NotSupported, "");
   }
   Status FileExists(const std::string& f) override {
@@ -663,20 +674,20 @@ TableFactory* RandomTableFactory(Random* rnd, int pre_defined = -1);
 std::string RandomName(Random* rnd, const size_t len);
 
 std::shared_ptr<BoundaryValuesExtractor> MakeBoundaryValuesExtractor();
-UserBoundaryValuePtr MakeIntBoundaryValue(int64_t value);
-UserBoundaryValuePtr MakeStringBoundaryValue(std::string value);
-int64_t GetBoundaryInt(const UserBoundaryValues& values);
-std::string GetBoundaryString(const UserBoundaryValues& values);
+UserBoundaryValue MakeLeftBoundaryValue(const Slice& value);
+UserBoundaryValue MakeRightBoundaryValue(const Slice& value);
+Slice GetBoundaryLeft(const UserBoundaryValues& values);
+Slice GetBoundaryRight(const UserBoundaryValues& values);
 
 struct BoundaryTestValues {
   void Feed(Slice key);
   void Check(const FileBoundaryValues<InternalKey>& smallest,
              const FileBoundaryValues<InternalKey>& largest);
 
-  int64_t min_int = std::numeric_limits<int64_t>::max();
-  int64_t max_int = std::numeric_limits<int64_t>::min();
-  std::string min_string;
-  std::string max_string;
+  UserBoundaryValue::Value min_left;
+  UserBoundaryValue::Value max_left;
+  UserBoundaryValue::Value min_right;
+  UserBoundaryValue::Value max_right;
 };
 
 // A test implementation of UserFrontier, wrapper over simple int64_t value.
@@ -697,9 +708,7 @@ class TestUserFrontier : public UserFrontier {
     return value_;
   }
 
-  std::string ToString() const override {
-    return yb::Format("{ value: $0 }", value_);
-  }
+  std::string ToString() const override;
 
   void ToPB(google::protobuf::Any* pb) const override {
     UserBoundaryValuePB value;
@@ -737,10 +746,11 @@ class TestUserFrontier : public UserFrontier {
 
   void FromOpIdPBDeprecated(const yb::OpIdPB& op_id) override {}
 
-  void FromPB(const google::protobuf::Any& pb) override {
+  Status FromPB(const google::protobuf::Any& pb) override {
     UserBoundaryValuePB value;
     pb.UnpackTo(&value);
     value_ = value.tag();
+    return Status::OK();
   }
 
   Slice Filter() const override {
@@ -807,5 +817,3 @@ class FlushedFileCollector : public EventListener {
 
 }  // namespace test
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_UTIL_TESTUTIL_H

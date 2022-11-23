@@ -9,8 +9,7 @@ menu:
     identifier: primitive-and-compound-data-types
     parent: api-ysql-datatypes-json
     weight: 20
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 JSON can represent (sub)values of four primitive data types and of two compound data types.
@@ -135,7 +134,7 @@ The values in an array are indexed from `0`. See the account of the [`->`](../fu
 {
   "given_name"         : "Fred",
   "family_name"        : "Smith",
-  "email_address"      : "fred@yb.com",
+  "email_address"      : "fred@example.com",
   "hire_date"          : "17-Jan-2015",
   "job"                : "sales",
   "base_annual_salary" : 50000,

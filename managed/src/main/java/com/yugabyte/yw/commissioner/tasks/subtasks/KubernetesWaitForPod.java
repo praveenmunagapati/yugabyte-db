@@ -10,23 +10,26 @@
 
 package com.yugabyte.yw.commissioner.tasks.subtasks;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.google.inject.Inject;
 import com.yugabyte.yw.commissioner.AbstractTaskBase;
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
 import com.yugabyte.yw.commissioner.UserTaskDetails;
-import com.yugabyte.yw.common.KubernetesManager;
-import com.yugabyte.yw.common.ShellResponse;
+import com.yugabyte.yw.common.KubernetesManagerFactory;
 import com.yugabyte.yw.forms.AbstractTaskParams;
 import com.yugabyte.yw.models.Provider;
-import java.util.ArrayList;
-import java.util.Iterator;
+import io.fabric8.kubernetes.api.model.PodCondition;
+import io.fabric8.kubernetes.api.model.PodStatus;
+import io.fabric8.kubernetes.api.model.Pod;
+import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
-import play.libs.Json;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class KubernetesWaitForPod extends AbstractTaskBase {
+  public static final Logger LOG = LoggerFactory.getLogger(KubernetesWaitForPod.class);
+
   public enum CommandType {
     WAIT_FOR_POD;
 
@@ -39,13 +42,14 @@ public class KubernetesWaitForPod extends AbstractTaskBase {
     }
   }
 
-  private final KubernetesManager kubernetesManager;
+  private final KubernetesManagerFactory kubernetesManagerFactory;
 
   @Inject
   protected KubernetesWaitForPod(
-      BaseTaskDependencies baseTaskDependencies, KubernetesManager kubernetesManager) {
+      BaseTaskDependencies baseTaskDependencies,
+      KubernetesManagerFactory kubernetesManagerFactory) {
     super(baseTaskDependencies);
-    this.kubernetesManager = kubernetesManager;
+    this.kubernetesManagerFactory = kubernetesManagerFactory;
   }
 
   // Number of iterations to wait for the pod to come up.
@@ -58,13 +62,10 @@ public class KubernetesWaitForPod extends AbstractTaskBase {
     public UUID providerUUID;
     public CommandType commandType;
     public UUID universeUUID;
-    // TODO(bhavin192): nodePrefix can be removed as we are not doing
-    // any sort of Helm operation here. Or we might want to use it for
-    // some sort of label based selection.
-
-    // We use the nodePrefix as Helm Chart's release name,
-    // so we would need that for any sort helm operations.
-    public String nodePrefix;
+    // TODO(bhavin192): helmReleaseName can be removed as we are not
+    // doing any sort of Helm operation here. Or we might want to use
+    // it for some sort of label based selection.
+    public String helmReleaseName;
     public String namespace;
     public String podName = null;
     public Map<String, String> config = null;
@@ -80,19 +81,16 @@ public class KubernetesWaitForPod extends AbstractTaskBase {
     switch (taskParams().commandType) {
       case WAIT_FOR_POD:
         int iters = 0;
-        String status;
+        boolean podReady;
         do {
-          status = waitForPod();
+          podReady = isPodReady();
           iters++;
-          if (status.equals("Running")) {
+          if (podReady) {
             break;
           }
-          try {
-            TimeUnit.SECONDS.sleep(SLEEP_TIME);
-          } catch (InterruptedException ex) {
-            // Do nothing
-          }
-        } while (!status.equals("Running") && iters < MAX_ITERS);
+
+          waitFor(Duration.ofSeconds(getSleepMultiplier() * SLEEP_TIME));
+        } while ((!podReady) && (iters < MAX_ITERS));
         if (iters > MAX_ITERS) {
           throw new RuntimeException("Pod " + taskParams().podName + " creation taking too long.");
         }
@@ -101,26 +99,39 @@ public class KubernetesWaitForPod extends AbstractTaskBase {
   }
 
   // Waits for pods as well as the containers inside the pod.
-  private String waitForPod() {
+  private boolean isPodReady() {
     Map<String, String> config = taskParams().config;
     if (taskParams().config == null) {
-      config = Provider.get(taskParams().providerUUID).getConfig();
+      config = Provider.get(taskParams().providerUUID).getUnmaskedConfig();
     }
-    ShellResponse podResponse =
-        kubernetesManager.getPodStatus(config, taskParams().namespace, taskParams().podName);
-    JsonNode podInfo = parseShellResponseAsJson(podResponse);
-    JsonNode statusNode = podInfo.path("status");
-    String status = statusNode.get("phase").asText();
-    JsonNode podConditions = statusNode.path("conditions");
-    ArrayList conditions = Json.fromJson(podConditions, ArrayList.class);
-    Iterator iter = conditions.iterator();
-    while (iter.hasNext()) {
-      JsonNode info = Json.toJson(iter.next());
-      String statusContainer = info.path("status").asText();
-      if (statusContainer.equals("False")) {
-        status = "Not Ready";
+
+    Pod podObject =
+        kubernetesManagerFactory
+            .getManager()
+            .getPodObject(config, taskParams().namespace, taskParams().podName);
+    if (podObject == null) {
+      return false;
+    }
+    PodStatus podStatus = podObject.getStatus();
+
+    // This is to verify that we are not getting pods that are already
+    // marked for deletion but in Running state.
+    if (podObject.getMetadata().getDeletionTimestamp() != null) {
+      // Relevant post: https://issue.k8s.io/61376#issuecomment-374437926
+      LOG.info("Pod has valid deletion timestamp");
+      return false;
+    }
+    String status = podStatus.getPhase();
+    if (!("Running".equalsIgnoreCase(status))) {
+      return false;
+    }
+
+    for (PodCondition condition : podStatus.getConditions()) {
+      if (condition.getStatus().equals("False")) {
+        return false;
       }
     }
-    return status;
+
+    return true;
   }
 }

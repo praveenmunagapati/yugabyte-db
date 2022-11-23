@@ -11,12 +11,11 @@
 // under the License.
 //
 
-#include <string>
-#include <gflags/gflags.h>
-
 #include "yb/docdb/deadline_info.h"
 
-#include "yb/util/flag_tags.h"
+#include <string>
+
+#include "yb/util/flags.h"
 #include "yb/util/format.h"
 
 using namespace std::literals;

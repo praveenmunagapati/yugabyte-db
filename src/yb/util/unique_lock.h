@@ -10,9 +10,9 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 
-#ifndef YB_UTIL_UNIQUE_LOCK_H
-#define YB_UTIL_UNIQUE_LOCK_H
+#pragma once
 
+#include <condition_variable>
 #include <mutex>
 
 #include "yb/gutil/thread_annotations.h"
@@ -34,6 +34,7 @@ class SCOPED_CAPABILITY UniqueLock {
   explicit UniqueLock(Mutex &mutex) ACQUIRE(mutex) : unique_lock_(mutex) {}
 
   explicit UniqueLock(Mutex &mutex, std::defer_lock_t defer) : unique_lock_(mutex, defer) {}
+  UniqueLock(UniqueLock&& rhs) = default;
 
   ~UniqueLock() RELEASE() = default;
 
@@ -95,5 +96,3 @@ std::unique_lock<Mutex>& GetLockForCondition(UniqueLock<Mutex>* lock) {
 #endif
 
 } // namespace yb
-
-#endif  // YB_UTIL_UNIQUE_LOCK_H

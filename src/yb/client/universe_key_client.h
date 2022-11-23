@@ -11,23 +11,24 @@
 // under the License.
 //
 
-#ifndef YB_CLIENT_UNIVERSE_KEY_CLIENT_H
-#define YB_CLIENT_UNIVERSE_KEY_CLIENT_H
+#pragma once
 
+#include <condition_variable>
+#include <mutex>
 #include <unordered_set>
 
-#include "yb/util/status.h"
-#include "yb/util/net/net_util.h"
-#include "yb/util/locks.h"
+#include "yb/encryption/encryption.fwd.h"
 
+#include "yb/master/master_encryption.fwd.h"
 #include "yb/master/master_fwd.h"
 
 #include "yb/rpc/rpc_fwd.h"
-#include "yb/rpc/poller.h"
+
+#include "yb/util/backoff_waiter.h"
+#include "yb/util/status_fwd.h"
+#include "yb/util/net/net_util.h"
 
 namespace yb {
-
-class UniverseKeysPB;
 
 namespace client {
 
@@ -35,7 +36,7 @@ class UniverseKeyClient {
  public:
   UniverseKeyClient(const std::vector<HostPort>& hps,
                     rpc::ProxyCache* proxy_cache,
-                    std::function<void(const UniverseKeysPB&)> callback)
+                    std::function<void(const encryption::UniverseKeysPB&)> callback)
         : hps_(hps), proxy_cache_(proxy_cache), callback_(std::move(callback)) {}
 
   void GetUniverseKeyRegistryAsync();
@@ -45,23 +46,22 @@ class UniverseKeyClient {
  private:
 
   void ProcessGetUniverseKeyRegistryResponse(
-    std::shared_ptr<master::GetUniverseKeyRegistryResponsePB> resp,
-    std::shared_ptr<rpc::RpcController> rpc,
-    HostPort hp);
+      std::shared_ptr<master::GetUniverseKeyRegistryResponsePB> resp,
+      std::shared_ptr<rpc::RpcController> rpc,
+      HostPort hp,
+      CoarseBackoffWaiter backoff_waiter);
 
-  void SendAsyncRequest(HostPort host_port);
+  void SendAsyncRequest(HostPort host_port, CoarseBackoffWaiter backoff_waiter);
 
   mutable std::mutex mutex_;
   mutable std::condition_variable cond_;
 
   std::vector<HostPort> hps_;
   rpc::ProxyCache* proxy_cache_;
-  std::function<void(const UniverseKeysPB&)> callback_;
+  std::function<void(const encryption::UniverseKeysPB&)> callback_;
 
   bool callback_triggered_ = false;
 };
 
 } // namespace client
 } // namespace yb
-
-#endif // YB_CLIENT_UNIVERSE_KEY_CLIENT_H

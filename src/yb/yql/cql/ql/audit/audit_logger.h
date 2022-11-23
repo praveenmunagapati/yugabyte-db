@@ -19,10 +19,10 @@
 // and thus isn't thread-safe.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_CQL_QL_AUDIT_AUDIT_LOGGER_H_
-#define YB_YQL_CQL_QL_AUDIT_AUDIT_LOGGER_H_
+#pragma once
 
-#include "yb/common/common.pb.h"
+#include <boost/uuid/uuid_generators.hpp>
+
 #include "yb/yql/cql/ql/ql_fwd.h"
 #include "yb/yql/cql/ql/exec/exec_context.h"
 #include "yb/yql/cql/ql/util/cql_message.h"
@@ -55,33 +55,33 @@ class AuditLogger {
   // because in that case separate commands might arrive to different tservers.
   //
   // If this returns non-OK status, batch mode isn't activated.
-  CHECKED_STATUS StartBatchRequest(int statements_count,
-                                   IsRescheduled is_rescheduled);
+  Status StartBatchRequest(size_t statements_count,
+                           IsRescheduled is_rescheduled);
 
   // Exits the batch request mode. Does nothing outside of a batch request.
-  CHECKED_STATUS EndBatchRequest();
+  Status EndBatchRequest();
 
   // Log the response to a user's authentication request.
-  CHECKED_STATUS LogAuthResponse(const CQLResponse& response);
+  Status LogAuthResponse(const CQLResponse& response);
 
   // Log the statement execution start.
   // tnode might be nullptr, in which case this does nothing.
-  CHECKED_STATUS LogStatement(const TreeNode* tnode,
-                              const std::string& statement,
-                              IsPrepare is_prepare);
+  Status LogStatement(const TreeNode* tnode,
+                      const std::string& statement,
+                      IsPrepare is_prepare);
 
   // Log the statement analysis/execution failure.
   // tnode might be nullptr, in which case this does nothing.
-  CHECKED_STATUS LogStatementError(const TreeNode* tnode,
-                                   const std::string& statement,
-                                   const Status& error_status,
-                                   ErrorIsFormatted error_is_formatted);
+  Status LogStatementError(const TreeNode* tnode,
+                           const std::string& statement,
+                           const Status& error_status,
+                           ErrorIsFormatted error_is_formatted);
 
   // Log a general statement processing failure.
   // We should only use this directly when the parse tree is not present.
-  CHECKED_STATUS LogStatementError(const std::string& statement,
-                                   const Status& error_status,
-                                   ErrorIsFormatted error_is_formatted);
+  Status LogStatementError(const std::string& statement,
+                           const Status& error_status,
+                           ErrorIsFormatted error_is_formatted);
 
  private:
   using GflagName = std::string;
@@ -96,6 +96,8 @@ class AuditLogger {
 
   // Empty string means not in a batch processing mode.
   std::string batch_id_;
+
+  boost::uuids::random_generator batch_id_gen_;
 
   // Cache of parsed gflags, to avoid re-parsing unchanged values.
   GflagsCache gflags_cache_;
@@ -122,6 +124,3 @@ class AuditLogger {
 } // namespace audit
 } // namespace ql
 } // namespace yb
-
-
-#endif // YB_YQL_CQL_QL_AUDIT_AUDIT_LOGGER_H_

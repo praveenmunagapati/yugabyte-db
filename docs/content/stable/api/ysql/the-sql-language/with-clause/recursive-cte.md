@@ -1,6 +1,7 @@
 ---
-title: recursive CTE—SQL syntax and semantics
-linkTitle: recursive CTE
+title: >
+  Recursive CTE: SQL syntax and semantics
+linkTitle: Recursive CTE
 headerTitle: The recursive CTE
 description: This section specifies the syntax and semantics of the recursive CTE
 menu:
@@ -8,8 +9,7 @@ menu:
     identifier: recursive-cte
     parent: with-clause
     weight: 30
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 The optional `RECURSIVE` keyword fundamentally changes the meaning of a CTE. The recursive variant lets you implement SQL solutions that, without it, at best require verbose formulations involving, for example, self-joins. In the limit, the recursive CTE lets you implement SQL solutions that otherwise would require procedural programming.
@@ -18,9 +18,9 @@ The optional `RECURSIVE` keyword fundamentally changes the meaning of a CTE. The
 
 When the optional `RECURSIVE` keyword is used, the [`common_table_expression`](../../../syntax_resources/grammar_diagrams/#common-table-expression) must be a `SELECT` statement—and this must have a specific form as the `UNION` or `UNION ALL` of the so-called _non-recursive term_ and the _recursive term_, thus:
 
-```
+```output.sql
 with
-  recursive <name>(c1, c2, ...) as (
+  recursive r(c1, c2, ...) as (
 
     -- Non-recursive term.
     (
@@ -29,13 +29,14 @@ with
 
     union [all]
 
-    -- Recursive term (notice the recursive self-reference to <name>.
+    -- Recursive term. Notice the so-called recursive self-reference to r.
     (
-      select ... from <name> ...
+      select ... from r ...
     )
   )
-select ... from <name> ...;
+select ... from r ...;
 ```
+
 The following minimal example is found in very many articles and in the documentation for several SQL databases.
 
 ```plpgsql
@@ -58,12 +59,13 @@ with
   )
 select n from r order by n;
 ```
+
 Notice that the parentheses that surround the _non-recursive term_ and the _recursive term_ are not required. They are used for clarity. See the section [The _recursive term_ must be parenthesised to allow this to use a WITH clause](#the-recursive-term-must-be-parenthesised-to-allow-this-to-use-a-with-clause) for a scenario where the parentheses _are_ essential.
 
 This is the result:
 
-```
- n 
+```output
+ n
 ---
  1
  2
@@ -81,13 +83,13 @@ The `WITH` clause syntax (see the section [WITH clause—SQL syntax and semantic
 <ul class="nav nav-tabs nav-tabs-yb">
   <li >
     <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
+      <i class="fa-solid fa-file-lines" aria-hidden="true"></i>
       Grammar
     </a>
   </li>
   <li>
     <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
+      <i class="fa-solid fa-diagram-project" aria-hidden="true"></i>
       Diagram
     </a>
   </li>
@@ -95,10 +97,10 @@ The `WITH` clause syntax (see the section [WITH clause—SQL syntax and semantic
 
 <div class="tab-content">
   <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/with-clause/with_clause.grammar.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/with-clause/with_clause.grammar.md" %}}
   </div>
   <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/with-clause/with_clause.diagram.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/with-clause/with_clause.diagram.md" %}}
   </div>
 </div>
 
@@ -141,8 +143,8 @@ order by n desc;
 
 This is the result:
 
-```
- n  
+```output
+ n
 ----
  99
  42
@@ -185,15 +187,15 @@ order by n desc;
 
 causes a _42601_ syntax error to be reported for the line `recursive r(n) as...` If you remove this:
 
-```
+```output.sql
 a1(n) as (
     select 42),
 ```
 
 then the statement executes without error to produce this result:
 
-```
- n  
+```output
+ n
 ----
  99
   5
@@ -233,8 +235,8 @@ select n from r order by n;
 
 Notice that this is simply a _syntax_ example. Using `WITH` clauses within the recursive and non-recursive terms brings no value. The statement executes without error and produces this result:
 
-```
- n 
+```output
+ n
 ---
  1
  2
@@ -245,7 +247,7 @@ Notice that this is simply a _syntax_ example. Using `WITH` clauses within the r
 
 Next, first, remove the parenthesis pair that surrounds the _non-recursive term_. The statement runs without error to produce the same result. Now, re-instate this pair and remove the parenthesis pair that surrounds the _recursive term_. You get the generic _42601_ syntax error, reported for this line:
 
-```
+```output.sql
 with a2(n) as (
 ```
 
@@ -273,9 +275,10 @@ select n from r order by n;
 
 It causes this specific error:
 
-```
+```output
 42P19: aggregate functions are not allowed in a recursive query's recursive term
 ```
+
 The restriction, more carefully stated, disallows aggregate functions when the `FROM` list item is the recursive self-reference. By extension, the keywords `GROUP BY` and `HAVING` are also disallowed when the `FROM` list item is the recursive self-reference.
 
 Here is an example that executes without error that uses an aggregate function on a `FROM` list item that is _not_ the recursive self-reference:
@@ -303,10 +306,10 @@ with
 select n from r order by n;
 ```
 
-This is the results:
+This is the result:
 
-```
- n 
+```output
+ n
 ---
  1
  2
@@ -328,27 +331,27 @@ In informal prose:
 
 ### Pseudocode definition of the semantics
 
-A compact, and exact, formulation is given by using pseudocode. The _"RECURSIVE_CTE_RESULTS"_ table, the _"WORKING_RESULTS"_ table, and the _"TEMP_RESULTS"_ table are transient, statement-duration, structures.
+A compact, and exact, formulation is given by using pseudocode. The _final_results_ table, the _previous_results_ table, and the _"TEMP_RESULTS"_ table are transient, statement-duration, structures.
 
-> - **Purge the RECURSIVE_CTE_RESULTS table and the WORKING_RESULTS table.**
+> - **Purge the _final_results_ table and the _previous_results_ table.**
 >
-> - **Evaluate the non-recursive term, inserting the resulting rows into the WORKING_RESULTS table.**
+> - **Evaluate the non-recursive term, inserting the resulting rows into the _previous_results_ table.**
 >
-> - **Insert the contents of the WORKING_RESULTS table into the RECURSIVE_CTE_RESULTS table.**
+> - **Insert the contents of the _previous_results_ table into the _final_results_ table.**
 >
-> - **while the WORKING_RESULTS table is not empty loop**
+> - **while the _previous_results_ table is not empty loop**
 >
->   - **Purge the TEMP_RESULTS table.**
->   
->   - **Evaluate the recursive term using the current contents of the WORKING_RESULTS table for the recursive self-reference, inserting the resulting rows into the TEMP_RESULTS table.**
->   
->   - **Purge the WORKING_RESULTS table and insert the contents of the TEMP_RESULTS table.**
->   
->   - **Append the contents of the TEMP_RESULTS table into the RECURSIVE_CTE_RESULTS table.**
->   
+>   - **Purge the _temp_results_ table.**
+>
+>   - **Evaluate the recursive term using the current contents of the _previous_results_ table for the recursive self-reference, inserting the resulting rows into the _temp_results_ table.**
+>
+>   - **Purge the _previous_results_ table and insert the contents of the _temp_results_ table.**
+>
+>   - **Append the contents of the _temp_results_ table into the _final_results_ table.**
+>
 >- **end loop**
-> 
->- **Deliver the present contents of the RECURSIVE_CTE_RESULTS table as the final result.**
+>
+>- **Deliver the present contents of the _final_results_ table so that whatever follows the recursive CTE can use them.**
 
 ### PL/pgSQL procedure implementation of the pseudocode : example 1
 
@@ -358,14 +361,15 @@ This pseudocode can be easily implemented, as a PL/pgSQL procedure, for the mini
 set client_min_messages = warning;
 
 drop procedure if exists recursive_with_semantics_1 cascade;
-drop table if exists recursive_cte_results cascade;
-drop table if exists working_results cascade;
+drop table if exists final_results cascade;
+drop table if exists previous_results cascade;
 drop table if exists temp_results cascade;
 
-create table recursive_cte_results(n int primary key);
-create table working_results(n int primary key);
+create table final_results(n int primary key);
+create table previous_results(n int primary key);
 create table temp_results(n int primary key);
 ```
+
 Now create the procedure:
 
 ```plpgsql
@@ -374,21 +378,21 @@ create procedure recursive_with_semantics_1(max_n in int)
 as $body$
 begin
   -- Emulate the non-recursive term.
-  delete from recursive_cte_results;
-  delete from working_results;
-  insert into working_results(n) values(1);
-  insert into recursive_cte_results(n) select n from working_results;
+  delete from final_results;
+  delete from previous_results;
+  insert into previous_results(n) values(1);
+  insert into final_results(n) select n from previous_results;
 
   -- Emulate the recursive term.
-  while ((select count(*) from working_results) > 0) loop
+  while ((select count(*) from previous_results) > 0) loop
     delete from temp_results;
     insert into temp_results
-    select n + 1 from working_results
+    select n + 1 from previous_results
     where n < max_n;
 
-    delete from working_results;
-    insert into working_results(n) select n from temp_results;
-    insert into recursive_cte_results(n) select n from temp_results;
+    delete from previous_results;
+    insert into previous_results(n) select n from temp_results;
+    insert into final_results(n) select n from temp_results;
   end loop;
 end;
 $body$;
@@ -400,11 +404,11 @@ Notice that the [PostgreSQL Version 11 documentation](https://www.postgresql.org
 
 This is a somewhat dubious claim because, in any language, recursion is implemented at a lower level in the hierarchy of abstractions, as iteration. The code of the PL/pgSQL procedure, because it uses a `WHILE` loop, makes this point explicitly.
 
-Now invoke the procedure and observe the contents of the _"RECURSIVE_CTE_RESULTS"_ table:
+Now invoke the procedure and observe the contents of the _final_results_ table:
 
 ```plpgsql
 call recursive_with_semantics_1(5);
-select n from recursive_cte_results order by 1;
+select n from final_results order by 1;
 ```
 
 The result is identical to that produced by the SQL implementation that it emulates (shown in the [Syntax](#syntax) section above).
@@ -433,27 +437,28 @@ with
   )
 select c1, c2 from r order by c1, c2;
 ```
+
 This is the result:
 
-```
- c1 | c2 
+```output
+ c1 | c2
 ----+----
   0 |  1
   0 |  2
   0 |  3
-  
+
   1 |  2
   1 |  3
   1 |  4
-  
+
   2 |  3
   2 |  4
   2 |  5
-  
+
   3 |  4
   3 |  5
   3 |  6
-  
+
   4 |  5
   4 |  6
   4 |  7
@@ -467,25 +472,26 @@ The procedural implementation that emulates the pseudocode is a natural extensio
 set client_min_messages = warning;
 
 drop procedure if exists recursive_with_semantics_2 cascade;
-drop table if exists recursive_cte_results cascade;
-drop table if exists working_results cascade;
+drop table if exists final_results cascade;
+drop table if exists previous_results cascade;
 drop table if exists temp_results cascade;
 
-create table recursive_cte_results(
+create table final_results(
   c1 int not null,
   c2 int not null,
   constraint recursive_cte_results_pk primary key(c1, c2));
 
-create table working_results(
+create table previous_results(
   c1 int not null,
   c2 int not null,
-  constraint working_results_pk primary key(c1, c2));
+  constraint previous_results_pk primary key(c1, c2));
 
 create table temp_results(
   c1 int not null,
   c2 int not null,
   constraint temp_results_pk primary key(c1, c2));
 ```
+
 Now create the procedure:
 
 ```plggsql
@@ -494,21 +500,21 @@ create procedure recursive_with_semantics_2(max_c1 in int)
 as $body$
 begin
   -- Emulate the non-recursive term.
-  delete from recursive_cte_results;
-  delete from working_results;
-  insert into working_results(c1, c2) values (0, 1), (0, 2), (0, 3);
-  insert into recursive_cte_results(c1, c2) select c1, c2 from working_results;
+  delete from final_results;
+  delete from previous_results;
+  insert into previous_results(c1, c2) values (0, 1), (0, 2), (0, 3);
+  insert into final_results(c1, c2) select c1, c2 from previous_results;
 
   -- Emulate the recursive term.
-  while ((select count(*) from working_results) > 0) loop
+  while ((select count(*) from previous_results) > 0) loop
     delete from temp_results;
     insert into temp_results
-    select c1 + 1, c2 + 1 from working_results
+    select c1 + 1, c2 + 1 from previous_results
     where c1 < max_c1;
 
-    delete from working_results;
-    insert into working_results(c1, c2) select c1, c2 from temp_results;
-    insert into recursive_cte_results(c1, c2) select c1, c2 from temp_results;
+    delete from previous_results;
+    insert into previous_results(c1, c2) select c1, c2 from temp_results;
+    insert into final_results(c1, c2) select c1, c2 from temp_results;
   end loop;
 end;
 $body$;
@@ -516,11 +522,11 @@ $body$;
 
 Notice that, here, each iteration accumulates _three_ rows.
 
-Now invoke the procedure and observe the contents of the _"RECURSIVE_CTE_RESULTS"_ table:
+Now invoke the procedure and observe the contents of the _final_results_ table:
 
 ```plpgsql
 call recursive_with_semantics_2(4);
-select c1, c2 from recursive_cte_results order by c1, c2;
+select c1, c2 from final_results order by c1, c2;
 ```
 
 The result is identical to that produced by the SQL implementation that it emulates.
@@ -534,6 +540,3 @@ The remaining sections (in the overall main [WITH clause](../../with-clause/) pa
 - [Case study—Using a recursive CTE to traverse an employee hierarchy](../emps-hierarchy) describes the use case (traversing an employee hierarchy) that is most commonly used to illustrate a practical application of the recursive CTE. Different SQL databases with different variants of SQL use importantly different approaches. PostgreSQL, and therefore YSQL, have only standard SQL features here (and not, therefore, the `CONNECT BY PRIOR` feature that is typically used with Oracle Database). Neither do they have dedicated syntax to ask for breadth-first or depth-first traversal. Rather, these two kinds of traversal must be programmed explicitly. The explicit solutions use array functionality and are straightforward. Moreover, using this approach allows various second-order display choices easily to be implemented.
 
 - [Using a recursive CTE to traverse graphs of all kinds](../traversing-general-graphs/) leading to [Using a recursive CTE to compute Bacon Numbers for actors listed in the IMDb](../bacon-numbers/). The approach to traversing graphs of all kinds is a natural extension of the approach shown for the employee hierarchy traversal. It adds logic to accommodate the fact that the edges are undirected and for cycle prevention. However, this straightforward approach collapses when, as is the case with the IMBd data, there are very many paths between most pairs of actors. This brings an exponential explosion in both time to completion and use of memory. The Bacon Numbers account shows how to avoid this collapse by implementing the algorithm that the recursive CTE implements using explicit SQL issued from a PL/pgSQL stored procedure. This allows early pruning to leave only the shortest paths with each repetition of the _recursive term_.
-
-
-

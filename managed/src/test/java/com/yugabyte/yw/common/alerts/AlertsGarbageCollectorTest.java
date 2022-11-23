@@ -11,19 +11,20 @@ package com.yugabyte.yw.common.alerts;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import akka.actor.ActorSystem;
-import akka.actor.Scheduler;
 import com.typesafe.config.Config;
 import com.yugabyte.yw.common.FakeDBApplication;
 import com.yugabyte.yw.common.ModelFactory;
+import com.yugabyte.yw.common.PlatformScheduler;
 import com.yugabyte.yw.common.config.RuntimeConfigFactory;
 import com.yugabyte.yw.models.Alert;
 import com.yugabyte.yw.models.Alert.State;
 import com.yugabyte.yw.models.Customer;
+import com.yugabyte.yw.models.MaintenanceWindow;
 import com.yugabyte.yw.models.filters.AlertFilter;
+import com.yugabyte.yw.models.filters.MaintenanceWindowFilter;
+import com.yugabyte.yw.models.helpers.CommonUtils;
 import java.sql.Date;
 import java.time.Duration;
 import java.time.Instant;
@@ -34,14 +35,11 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnitRunner;
-import scala.concurrent.ExecutionContext;
 
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class AlertsGarbageCollectorTest extends FakeDBApplication {
 
-  @Mock private ExecutionContext executionContext;
-
-  @Mock private ActorSystem actorSystem;
+  @Mock PlatformScheduler mockPlatformScheduler;
 
   @Mock Config mockAppConfig;
 
@@ -51,17 +49,20 @@ public class AlertsGarbageCollectorTest extends FakeDBApplication {
 
   private Customer customer;
 
+  private MaintenanceService maintenanceService;
+
   @Before
   public void setUp() {
     customer = ModelFactory.testCustomer();
     when(mockRuntimeConfigFactory.forCustomer(customer)).thenReturn(mockAppConfig);
     when(mockAppConfig.getDuration(AlertsGarbageCollector.YB_ALERT_GC_RESOLVED_RETENTION_DURATION))
         .thenReturn(Duration.of(2, ChronoUnit.MINUTES));
-    when(actorSystem.scheduler()).thenReturn(mock(Scheduler.class));
-    AlertService alertService = app.injector().instanceOf(AlertService.class);
+    when(mockAppConfig.getDuration(AlertsGarbageCollector.YB_MAINTENANCE_WINDOW_RETENTION_DURATION))
+        .thenReturn(Duration.of(120, ChronoUnit.DAYS));
+    maintenanceService = app.injector().instanceOf(MaintenanceService.class);
     alertsGarbageCollector =
         new AlertsGarbageCollector(
-            executionContext, actorSystem, mockRuntimeConfigFactory, alertService);
+            mockPlatformScheduler, mockRuntimeConfigFactory, alertService, maintenanceService);
   }
 
   @Test
@@ -80,5 +81,24 @@ public class AlertsGarbageCollectorTest extends FakeDBApplication {
 
     List<Alert> remainingAlerts = alertService.list(AlertFilter.builder().build());
     assertThat(remainingAlerts, containsInAnyOrder(activeAlert, resolvedNotCollected));
+  }
+
+  @Test
+  public void testMaintenanceWindowGc() {
+    MaintenanceWindow activeWindow = ModelFactory.createMaintenanceWindow(customer.getUuid());
+    MaintenanceWindow endedNotCollected =
+        ModelFactory.createMaintenanceWindow(
+            customer.getUuid(),
+            window -> window.setEndTime(CommonUtils.nowMinusWithoutMillis(119, ChronoUnit.DAYS)));
+    MaintenanceWindow endedCollected =
+        ModelFactory.createMaintenanceWindow(
+            customer.getUuid(),
+            window -> window.setEndTime(CommonUtils.nowMinusWithoutMillis(121, ChronoUnit.DAYS)));
+
+    alertsGarbageCollector.scheduleRunner();
+
+    List<MaintenanceWindow> remainingWindows =
+        maintenanceService.list(MaintenanceWindowFilter.builder().build());
+    assertThat(remainingWindows, containsInAnyOrder(activeWindow, endedNotCollected));
   }
 }

@@ -7,8 +7,7 @@ menu:
   stable:
     identifier: dcl_alter_policy
     parent: statements
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 ## Synopsis
@@ -21,13 +20,13 @@ change the roles that the policy applies to and the `USING` and `CHECK` expressi
 <ul class="nav nav-tabs nav-tabs-yb">
   <li >
     <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
+      <i class="fa-solid fa-file-lines" aria-hidden="true"></i>
       Grammar
     </a>
   </li>
   <li>
     <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
+      <i class="fa-solid fa-diagram-project" aria-hidden="true"></i>
       Diagram
     </a>
   </li>
@@ -35,10 +34,10 @@ change the roles that the policy applies to and the `USING` and `CHECK` expressi
 
 <div class="tab-content">
   <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/alter_policy,alter_policy_rename.grammar.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/alter_policy,alter_policy_rename.grammar.md" %}}
   </div>
   <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/alter_policy,alter_policy_rename.diagram.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/alter_policy,alter_policy_rename.diagram.md" %}}
   </div>
 </div>
 
@@ -49,11 +48,11 @@ Where
 - `new_name` is the new name of the policy.
 - `role_name` is the role(s) to which the policy applies. Use `PUBLIC` if the policy should be
   applied to all roles.
-- `using_expression` is a SQL conditional expression. Only rows for which the condition returns to   
-  true will be visible in a `SELECT` and available for modification in an `UPDATE` or `DELETE`.      
-- `check_expression` is a SQL conditional expression that is used only for `INSERT` and `UPDATE`     
-  queries. Only rows for which the expression evaluates to true will be allowed in an `INSERT` or    
-  `UPDATE`. Note that unlike `using_expression`, this is evaluated against the proposed new contents 
+- `using_expression` is a SQL conditional expression. Only rows for which the condition returns to
+  true will be visible in a `SELECT` and available for modification in an `UPDATE` or `DELETE`.
+- `check_expression` is a SQL conditional expression that is used only for `INSERT` and `UPDATE`
+  queries. Only rows for which the expression evaluates to true will be allowed in an `INSERT` or
+  `UPDATE`. Note that unlike `using_expression`, this is evaluated against the proposed new contents
   of the row.
 
 ## Examples

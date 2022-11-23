@@ -14,10 +14,10 @@
 #include <limits>
 
 #include <gtest/gtest.h>
-#include "yb/util/random_util.h"
 
 #include "yb/util/memory/tracked_shared_ptr.h"
 #include "yb/util/memory/tracked_shared_ptr_impl.h"
+#include "yb/util/random_util.h"
 
 using std::numeric_limits;
 
@@ -80,7 +80,7 @@ TEST(TrackedSharedPtr, RandomOps) {
     std::uniform_int_distribution<size_t> random_op(0, 4);
     std::uniform_int_distribution<size_t> random_index(0, kNumObjects - 1);
 
-    for (int i = 0; i < kNumIterations; ++i) {
+    for (size_t i = 0; i < kNumIterations; ++i) {
       switch (random_op(rng)) {
         case 0: {
           // Get.

@@ -29,27 +29,28 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_TRACE_H
-#define YB_UTIL_TRACE_H
+#pragma once
 
 #include <atomic>
+#include <functional>
 #include <iosfwd>
 #include <string>
 #include <vector>
 
-#include <gflags/gflags.h>
+#include "yb/util/flags.h"
 
 #include "yb/gutil/macros.h"
+#include "yb/gutil/ref_counted.h"
 #include "yb/gutil/strings/stringpiece.h"
 #include "yb/gutil/strings/substitute.h"
-#include "yb/gutil/ref_counted.h"
 #include "yb/gutil/threading/thread_collision_warner.h"
 
-#include "yb/util/atomic.h"
+#include "yb/util/atomic.h" // For GetAtomicFlag
 #include "yb/util/locks.h"
 #include "yb/util/memory/arena_fwd.h"
+#include "yb/util/monotime.h"
 
-DECLARE_bool(enable_tracing);
+DECLARE_bool(use_monotime_for_traces);
 DECLARE_int32(tracing_level);
 
 // Adopt a Trace on the current thread for the duration of the current
@@ -58,22 +59,34 @@ DECLARE_int32(tracing_level);
 // 't' should be a Trace* pointer.
 #define ADOPT_TRACE(t) yb::ScopedAdoptTrace _adopt_trace(t);
 
+// Like the above, but takes the trace pointer as an explicit argument.
+#define TRACE_TO_WITH_TIME(trace, time, format, substitutions...) \
+  do { \
+    if ((trace)) { \
+      (trace)->SubstituteAndTrace( \
+          __FILE__, __LINE__, (time), (format), ##substitutions); \
+    } \
+  } while (0)
+
+#define VTRACE_TO(level, trace, format, substitutions...) \
+  do { \
+    if ((trace) && level <= GetAtomicFlag(&FLAGS_tracing_level)) { \
+      const bool use_fine_ts = GetAtomicFlag(&FLAGS_use_monotime_for_traces); \
+      auto time = (use_fine_ts ? ToCoarse(MonoTime::Now()) : CoarseMonoClock::Now()); \
+      TRACE_TO_WITH_TIME(trace, time, format, ##substitutions); \
+    } \
+  } while (0)
+
+#define TRACE_TO(trace, format, substitutions...) \
+  VTRACE_TO(0, (trace), (format), ##substitutions)
+
 // Issue a trace message, if tracing is enabled in the current thread.
 // and the current tracing level flag is >= the specified level.
 // See Trace::SubstituteAndTrace for arguments.
 // Example:
 //  VTRACE(1, "Acquired timestamp $0", timestamp);
 #define VTRACE(level, format, substitutions...) \
-  do { \
-    if (GetAtomicFlag(&FLAGS_enable_tracing) && \
-            level <= GetAtomicFlag(&FLAGS_tracing_level)) { \
-      yb::Trace* _trace = Trace::CurrentTrace(); \
-      if (_trace) { \
-        _trace->SubstituteAndTrace(__FILE__, __LINE__, CoarseMonoClock::Now(), (format),  \
-          ##substitutions); \
-      } \
-    } \
-  } while (0)
+  VTRACE_TO(level, Trace::CurrentTrace(), format, ##substitutions)
 
 // Issue a trace message, if tracing is enabled in the current thread.
 // See Trace::SubstituteAndTrace for arguments.
@@ -82,31 +95,12 @@ DECLARE_int32(tracing_level);
 #define TRACE(format, substitutions...) \
   VTRACE(0, (format), ##substitutions)
 
-// Like the above, but takes the trace pointer as an explicit argument.
-#define VTRACE_TO(level, trace, format, substitutions...) \
-  do { \
-    if (GetAtomicFlag(&FLAGS_enable_tracing) && \
-            level <= GetAtomicFlag(&FLAGS_tracing_level)) { \
-      (trace)->SubstituteAndTrace( \
-          __FILE__, __LINE__, CoarseMonoClock::Now(), (format), ##substitutions); \
-    } \
-  } while (0)
-
-#define TRACE_TO(trace, format, substitutions...) \
-  VTRACE_TO(0, (trace), (format), ##substitutions)
-
-// Like the above, but takes the trace pointer as an explicit argument.
-#define TRACE_TO_WITH_TIME(trace, time, format, substitutions...) \
-  do { \
-    if (GetAtomicFlag(&FLAGS_enable_tracing)) { \
-      (trace)->SubstituteAndTrace( \
-          __FILE__, __LINE__, (time), (format), ##substitutions); \
-    } \
-  } while (0)
+#define TRACE_FUNC() \
+  TRACE(__func__)
 
 #define PLAIN_TRACE_TO(trace, message) \
   do { \
-    if (GetAtomicFlag(&FLAGS_enable_tracing)) { \
+    if ((trace)) { \
       (trace)->Trace(__FILE__, __LINE__, (message)); \
     } \
   } while (0)
@@ -116,11 +110,9 @@ DECLARE_int32(tracing_level);
 #define PRINT_THIS_TRACE() \
   TRACE("Requesting to print this trace"); \
   do { \
-    if (GetAtomicFlag(&FLAGS_enable_tracing)) { \
-      yb::Trace* _trace = Trace::CurrentTrace(); \
-      if (_trace) { \
-        _trace->set_must_print(true); \
-      } \
+    yb::Trace* _trace = Trace::CurrentTrace(); \
+    if (_trace) { \
+      _trace->set_must_print(true); \
     } \
   } while (0)
 
@@ -176,12 +168,12 @@ class Trace : public RefCountedThreadSafe<Trace> {
   // If 'include_time_deltas' is true, calculates and prints the difference between
   // successive trace messages.
   void Dump(std::ostream* out, bool include_time_deltas) const;
-  void Dump(std::ostream* out, const std::string& prefix, bool include_time_deltas) const;
+  void Dump(std::ostream* out, int32_t tracing_depth, bool include_time_deltas) const;
 
   // Dump the trace buffer as a string.
-  std::string DumpToString(const std::string& prefix, bool include_time_deltas) const;
+  std::string DumpToString(int32_t tracing_depth, bool include_time_deltas) const;
   std::string DumpToString(bool include_time_deltas) const {
-    return DumpToString("", include_time_deltas);
+    return DumpToString(0, include_time_deltas);
   }
 
   // Attaches the given trace which will get appended at the end when Dumping.
@@ -191,6 +183,9 @@ class Trace : public RefCountedThreadSafe<Trace> {
   static Trace* CurrentTrace() {
     return threadlocal_trace_;
   }
+
+  static scoped_refptr<Trace> NewTrace();
+  static scoped_refptr<Trace> NewTraceForParent(Trace* parent);
 
   // Simple function to dump the current trace to stderr, if one is
   // available. This is meant for usage when debugging in gdb via
@@ -210,6 +205,16 @@ class Trace : public RefCountedThreadSafe<Trace> {
     must_print_ = flag;
   }
 
+  bool end_to_end_traces_requested() const {
+    std::lock_guard<simple_spinlock> l(lock_);
+    return end_to_end_traces_requested_;
+  }
+
+  void set_end_to_end_traces_requested(bool flag) {
+    std::lock_guard<simple_spinlock> l(lock_);
+    end_to_end_traces_requested_ = flag;
+  }
+
  private:
   friend class ScopedAdoptTrace;
   friend class RefCountedThreadSafe<Trace>;
@@ -224,7 +229,7 @@ class Trace : public RefCountedThreadSafe<Trace> {
 
   // Allocate a new entry from the arena, with enough space to hold a
   // message of length 'len'.
-  TraceEntry* NewEntry(int len, const char* file_path, int line_number, CoarseTimePoint now);
+  TraceEntry* NewEntry(size_t len, const char* file_path, int line_number, CoarseTimePoint now);
 
   // Add the entry to the linked list of entries.
   void AddEntry(TraceEntry* entry);
@@ -242,6 +247,7 @@ class Trace : public RefCountedThreadSafe<Trace> {
 
   // A hint to request that the collected trace be printed.
   bool must_print_ = false;
+  bool end_to_end_traces_requested_ = false;
 
   std::vector<scoped_refptr<Trace> > child_traces_;
 
@@ -263,7 +269,6 @@ class ScopedAdoptTrace {
   DFAKE_MUTEX(ctor_dtor_);
   Trace* old_trace_;
   scoped_refptr<Trace> trace_;
-  bool is_enabled_ = false;
 
   DISALLOW_COPY_AND_ASSIGN(ScopedAdoptTrace);
 };
@@ -278,10 +283,10 @@ class PlainTrace {
 
   void Trace(const char* file_path, int line_number, const char* message);
   void Dump(std::ostream* out, bool include_time_deltas) const;
-  void Dump(std::ostream* out, const std::string& prefix, bool include_time_deltas) const;
-  std::string DumpToString(const std::string& prefix, bool include_time_deltas) const;
+  void Dump(std::ostream* out, int32_t tracing_depth, bool include_time_deltas) const;
+  std::string DumpToString(int32_t tracing_depth, bool include_time_deltas) const;
   std::string DumpToString(bool include_time_deltas) const {
-    return DumpToString("", include_time_deltas);
+    return DumpToString(0, include_time_deltas);
   }
 
  private:
@@ -302,5 +307,3 @@ class PlainTrace {
 };
 
 } // namespace yb
-
-#endif /* YB_UTIL_TRACE_H */

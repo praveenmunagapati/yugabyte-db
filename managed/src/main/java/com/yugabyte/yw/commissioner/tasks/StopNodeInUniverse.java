@@ -11,22 +11,28 @@
 package com.yugabyte.yw.commissioner.tasks;
 
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
-import com.yugabyte.yw.commissioner.SubTaskGroupQueue;
 import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskGroupType;
-import com.yugabyte.yw.commissioner.tasks.UniverseDefinitionTaskBase.ServerType;
 import com.yugabyte.yw.commissioner.tasks.params.NodeTaskParams;
 import com.yugabyte.yw.common.DnsManager;
+import com.yugabyte.yw.common.Util;
+import com.yugabyte.yw.common.config.RuntimeConfigFactory;
+import com.yugabyte.yw.forms.NodeActionFormData;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.helpers.NodeDetails;
 import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
 import java.util.Arrays;
-import java.util.HashSet;
+import java.util.Collections;
+import java.util.List;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
-public class StopNodeInUniverse extends UniverseTaskBase {
+public class StopNodeInUniverse extends UniverseDefinitionTaskBase {
+
+  protected boolean isBlacklistLeaders;
+  protected int leaderBacklistWaitTimeMs;
+  @Inject private RuntimeConfigFactory runtimeConfigFactory;
 
   @Inject
   protected StopNodeInUniverse(BaseTaskDependencies baseTaskDependencies) {
@@ -42,18 +48,25 @@ public class StopNodeInUniverse extends UniverseTaskBase {
   public void run() {
     NodeDetails currentNode = null;
     boolean hitException = false;
+    Universe universe = null;
+    boolean wasNodeMaster = false;
+    boolean wasNodeTserver = false;
+
     try {
       checkUniverseVersion();
-      // Create the task list sequence.
-      subTaskGroupQueue = new SubTaskGroupQueue(userTaskUUID);
 
       // Set the 'updateInProgress' flag to prevent other updates from happening.
-      Universe universe = lockUniverseForUpdate(taskParams().expectedUniverseVersion);
+      universe = lockUniverseForUpdate(taskParams().expectedUniverseVersion);
       log.info(
           "Stop Node with name {} from universe {} ({})",
           taskParams().nodeName,
           taskParams().universeUUID,
           universe.name);
+
+      isBlacklistLeaders =
+          runtimeConfigFactory.forUniverse(universe).getBoolean(Util.BLACKLIST_LEADERS);
+      leaderBacklistWaitTimeMs =
+          runtimeConfigFactory.forUniverse(universe).getInt(Util.BLACKLIST_LEADER_WAIT_TIME_MS);
 
       currentNode = universe.getNode(taskParams().nodeName);
       if (currentNode == null) {
@@ -61,8 +74,16 @@ public class StopNodeInUniverse extends UniverseTaskBase {
         log.error(msg);
         throw new RuntimeException(msg);
       }
+      List<NodeDetails> nodeList = Collections.singletonList(currentNode);
+      wasNodeTserver = currentNode.isTserver;
 
       preTaskActions();
+      isBlacklistLeaders = isBlacklistLeaders && isLeaderBlacklistValidRF(currentNode.nodeName);
+      if (isBlacklistLeaders && wasNodeTserver) {
+        List<NodeDetails> tServerNodes = universe.getTServers();
+        createModifyBlackListTask(tServerNodes, false /* isAdd */, true /* isLeaderBlacklist */)
+            .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
+      }
 
       // Update Node State to Stopping
       createSetNodeStateTask(currentNode, NodeState.Stopping)
@@ -71,22 +92,48 @@ public class StopNodeInUniverse extends UniverseTaskBase {
       taskParams().azUuid = currentNode.azUuid;
       taskParams().placementUuid = currentNode.placementUuid;
       if (instanceExists(taskParams())) {
-        // Stop the tserver.
-        createTServerTaskForNode(currentNode, "stop")
-            .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
+
+        if (wasNodeTserver) {
+          // set leader blacklist and poll
+          if (isBlacklistLeaders) {
+            createModifyBlackListTask(nodeList, true /* isAdd */, true /* isLeaderBlacklist */)
+                .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
+            createWaitForLeaderBlacklistCompletionTask(leaderBacklistWaitTimeMs)
+                .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
+          }
+
+          // Stop the tserver.
+          createTServerTaskForNode(currentNode, "stop")
+              .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
+
+          // remove leader blacklist
+          if (isBlacklistLeaders) {
+            createModifyBlackListTask(nodeList, false /* isAdd */, true /* isLeaderBlacklist */)
+                .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
+          }
+        }
+
+        // Stop Yb-controller on this node.
+        if (universe.isYbcEnabled()) {
+          createStopYbControllerTasks(nodeList)
+              .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
+        }
 
         // Stop the master process on this node.
         if (currentNode.isMaster) {
-          createStopMasterTasks(new HashSet<NodeDetails>(Arrays.asList(currentNode)))
+          createStopMasterTasks(nodeList)
               .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
           createWaitForMasterLeaderTask()
               .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
+          wasNodeMaster = true;
         }
       }
 
-      // Update the per process state in YW DB.
-      createUpdateNodeProcessTask(taskParams().nodeName, ServerType.TSERVER, false)
-          .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
+      if (wasNodeTserver) {
+        // Update the per process state in YW DB.
+        createUpdateNodeProcessTask(taskParams().nodeName, ServerType.TSERVER, false)
+            .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
+      }
       if (currentNode.isMaster) {
         createChangeConfigTask(
             currentNode,
@@ -95,6 +142,9 @@ public class StopNodeInUniverse extends UniverseTaskBase {
             true /* useHostPort */);
         createUpdateNodeProcessTask(taskParams().nodeName, ServerType.MASTER, false)
             .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
+        // Update the master addresses on the target universes whose source universe belongs to
+        // this task.
+        createXClusterConfigUpdateMasterAddressesTask();
       }
 
       // Update Node State to Stopped
@@ -110,18 +160,84 @@ public class StopNodeInUniverse extends UniverseTaskBase {
       // Mark universe task state to success
       createMarkUniverseUpdateSuccessTasks().setSubTaskGroupType(SubTaskGroupType.StoppingNode);
 
-      subTaskGroupQueue.run();
+      getRunnableTask().runSubTasks();
     } catch (Throwable t) {
       log.error("Error executing task {}, error='{}'", getName(), t.getMessage(), t);
       hitException = true;
       throw t;
     } finally {
-      // Reset the state, on any failure, so that the actions can be retried.
-      if (currentNode != null && hitException) {
-        setNodeState(taskParams().nodeName, currentNode.state);
-      }
+      try {
+        // Reset the state, on any failure, so that the actions can be retried.
+        if (currentNode != null && hitException) {
+          setNodeState(taskParams().nodeName, currentNode.state);
+        }
 
-      unlockUniverseForUpdate();
+        // remove leader blacklist for current node if task failed and leader blacklist is not
+        // removed
+        if (isBlacklistLeaders && wasNodeTserver) {
+          // Clear previous subtasks if any.
+          getRunnableTask().reset();
+          createModifyBlackListTask(
+                  Arrays.asList(currentNode), false /* isAdd */, true /* isLeaderBlacklist */)
+              .setSubTaskGroupType(SubTaskGroupType.StoppingNodeProcesses);
+          getRunnableTask().runSubTasks();
+        }
+
+        // Adding a Platform task to automatically start a new master process on another
+        // node as part of this stop master process action, if possible. The other node
+        // must be live, must not currently be a master, and must be in the same
+        // Availability Zone as the node that is about to have its master processes be
+        // stopped.
+        if (wasNodeMaster && currentNode.dedicatedTo == null) {
+          NodeDetails otherNode = null;
+          for (NodeDetails newNode : universe.getNodes()) {
+            // Exclude the current node that is being stopped from consideration
+            // for the new master. For loop filters the list down to select a candidate
+            // node first (if such a node exists), and then creates appropriate tasks for that
+            // selected node. Criteria: Live, not currently a Master, and same AZ.
+            if (!newNode.getNodeName().equals(currentNode.getNodeName())
+                && newNode.getZone().equals(currentNode.getZone())
+                && newNode.state.equals(NodeState.Live)
+                && !newNode.isMaster) {
+              otherNode = newNode;
+              log.info("Found candidate master node: {}.", otherNode.getNodeName());
+              break;
+            }
+          }
+
+          if (otherNode != null) {
+            boolean runtimeStartMasterOnStopNode =
+                runtimeConfigFactory.globalRuntimeConf().getBoolean("yb.start_master_on_stop_node");
+            boolean apiStartMasterOnStopNode = NodeActionFormData.startMasterOnStopNode;
+            if (runtimeStartMasterOnStopNode && apiStartMasterOnStopNode) {
+              getRunnableTask().reset();
+              try {
+                log.info(
+                    "Automatically bringing up master for under replicated "
+                        + "universe {} ({}) on node {}.",
+                    universe.universeUUID,
+                    universe.name,
+                    otherNode.getNodeName());
+                createStartMasterOnNodeTasks(universe, otherNode, currentNode, true);
+                // Run all the tasks.
+                getRunnableTask().runSubTasks();
+
+              } catch (Throwable t) {
+                log.error("Error executing task {} with error='{}'.", getName(), t.getMessage(), t);
+                hitException = true;
+                throw t;
+              } finally {
+                // Reset the state, on any failure, so that the actions can be retried.
+                if (otherNode != null && hitException) {
+                  setNodeState(taskParams().nodeName, otherNode.state);
+                }
+              }
+            }
+          }
+        }
+      } finally {
+        unlockUniverseForUpdate();
+      }
     }
 
     log.info("Finished {} task.", getName());

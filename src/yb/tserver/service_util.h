@@ -13,23 +13,32 @@
 //
 //
 
-#ifndef YB_TSERVER_SERVICE_UTIL_H
-#define YB_TSERVER_SERVICE_UTIL_H
+#pragma once
+
+#include <functional>
 
 #include <boost/optional.hpp>
 
+#include "yb/common/wire_protocol.h"
 #include "yb/consensus/consensus_error.h"
 
 #include "yb/rpc/rpc_context.h"
 #include "yb/server/clock.h"
 
+#include "yb/tablet/tablet_fwd.h"
 #include "yb/tablet/tablet_peer.h"
 
 #include "yb/tserver/tablet_peer_lookup.h"
 #include "yb/tablet/tablet_error.h"
 #include "yb/tserver/tserver_error.h"
+#include "yb/tserver/tserver_fwd.h"
 
 #include "yb/util/logging.h"
+#include "yb/util/result.h"
+#include "yb/util/status_callback.h"
+#include "yb/util/status_format.h"
+
+DECLARE_bool(TEST_enable_db_catalog_version_mode);
 
 namespace yb {
 namespace tserver {
@@ -45,21 +54,33 @@ void SetupErrorAndRespond(TabletServerErrorPB* error,
                           const Status& s,
                           rpc::RpcContext* context);
 
+void SetupError(TabletServerErrorPB* error, const Status& s);
+
+void SetupErrorAndRespond(LWTabletServerErrorPB* error,
+                          const Status& s,
+                          TabletServerErrorPB::Code code,
+                          rpc::RpcContext* context);
+
+void SetupErrorAndRespond(LWTabletServerErrorPB* error,
+                          const Status& s,
+                          rpc::RpcContext* context);
+
+void SetupError(LWTabletServerErrorPB* error, const Status& s);
+
 Result<int64_t> LeaderTerm(const tablet::TabletPeer& tablet_peer);
 
 // Template helpers.
 
-template<class ReqClass, class RespClass>
-bool CheckUuidMatchOrRespond(TabletPeerLookupIf* tablet_manager,
-                             const char* method_name,
-                             const ReqClass* req,
-                             RespClass* resp,
-                             rpc::RpcContext* context) {
-  const string& local_uuid = tablet_manager->NodeInstance().permanent_uuid();
+template<class ReqClass>
+Result<bool> CheckUuidMatch(TabletPeerLookupIf* tablet_manager,
+                            const char* method_name,
+                            const ReqClass* req,
+                            const std::string& requestor_string) {
+  const std::string& local_uuid = tablet_manager->NodeInstance().permanent_uuid();
   if (req->dest_uuid().empty()) {
     // Maintain compat in release mode, but complain.
-    string msg = strings::Substitute("$0: Missing destination UUID in request from $1: $2",
-        method_name, context->requestor_string(), req->ShortDebugString());
+    std::string msg = strings::Substitute("$0: Missing destination UUID in request from $1: $2",
+        method_name, requestor_string, req->ShortDebugString());
 #ifdef NDEBUG
     YB_LOG_EVERY_N(ERROR, 100) << msg;
 #else
@@ -68,16 +89,29 @@ bool CheckUuidMatchOrRespond(TabletPeerLookupIf* tablet_manager,
     return true;
   }
   if (PREDICT_FALSE(req->dest_uuid() != local_uuid)) {
-    const Status s = STATUS_SUBSTITUTE(InvalidArgument,
+    const Status s = STATUS_FORMAT(InvalidArgument,
         "$0: Wrong destination UUID requested. Local UUID: $1. Requested UUID: $2",
         method_name, local_uuid, req->dest_uuid());
-    LOG(WARNING) << s.ToString() << ": from " << context->requestor_string()
+    LOG(WARNING) << s.ToString() << ": from " << requestor_string
                  << ": " << req->ShortDebugString();
-    SetupErrorAndRespond(resp->mutable_error(), s,
-                         TabletServerErrorPB::WRONG_SERVER_UUID, context);
-    return false;
+    return s.CloneAndAddErrorCode(TabletServerError(TabletServerErrorPB::WRONG_SERVER_UUID));
   }
   return true;
+}
+
+template<class ReqClass, class RespClass>
+bool CheckUuidMatchOrRespond(TabletPeerLookupIf* tablet_manager,
+                             const char* method_name,
+                             const ReqClass* req,
+                             RespClass* resp,
+                             rpc::RpcContext* context) {
+  Result<bool> result = CheckUuidMatch(tablet_manager, method_name,
+                                       req, context->requestor_string());
+  if (!result.ok()) {
+     SetupErrorAndRespond(resp->mutable_error(), result.status(), context);
+     return false;
+  }
+  return result.get();
 }
 
 template <class RespType>
@@ -115,40 +149,26 @@ struct TabletPeerTablet {
 // resp->mutable_error() to indicate the failure reason.
 //
 // Returns true if successful.
-template<class RespClass>
+Result<TabletPeerTablet> LookupTabletPeer(
+    TabletPeerLookupIf* tablet_manager,
+    const TabletId& tablet_id);
+
+Result<TabletPeerTablet> LookupTabletPeer(
+    TabletPeerLookupIf* tablet_manager,
+    const Slice& tablet_id);
+
+template<class RespClass, class Key>
 Result<TabletPeerTablet> LookupTabletPeerOrRespond(
     TabletPeerLookupIf* tablet_manager,
-    const string& tablet_id,
+    const Key& tablet_id,
     RespClass* resp,
     rpc::RpcContext* context) {
-  TabletPeerTablet result;
-  Status status = tablet_manager->GetTabletPeer(tablet_id, &result.tablet_peer);
-  if (PREDICT_FALSE(!status.ok())) {
-    TabletServerErrorPB::Code code = status.IsServiceUnavailable() ?
-                                     TabletServerErrorPB::UNKNOWN_ERROR :
-                                     TabletServerErrorPB::TABLET_NOT_FOUND;
-    SetupErrorAndRespond(resp->mutable_error(), status, code, context);
-    return status;
+  Result<TabletPeerTablet> result = LookupTabletPeer(tablet_manager, tablet_id);
+  if (!result.ok()) {
+    SetupErrorAndRespond(resp->mutable_error(), result.status(), context);
+    return result.status();
   }
-
-  // Check RUNNING state.
-  tablet::RaftGroupStatePB state = result.tablet_peer->state();
-  if (PREDICT_FALSE(state != tablet::RUNNING)) {
-    Status s = STATUS(IllegalState, "Tablet not RUNNING", tablet::RaftGroupStateError(state))
-        .CloneAndAddErrorCode(TabletServerError(TabletServerErrorPB::TABLET_NOT_RUNNING));
-    SetupErrorAndRespond(resp->mutable_error(), s, context);
-    return s;
-  }
-
-  result.tablet = result.tablet_peer->shared_tablet();
-  if (!result.tablet) {
-    Status s = STATUS(IllegalState,
-                      "Tablet not running",
-                      TabletServerError(TabletServerErrorPB::TABLET_NOT_RUNNING));
-    SetupErrorAndRespond(resp->mutable_error(), s, context);
-    return s;
-  }
-  return result;
+  return result.get();
 }
 
 template <class Response>
@@ -172,15 +192,20 @@ auto MakeRpcOperationCompletionCallback(
 struct LeaderTabletPeer {
   tablet::TabletPeerPtr peer;
   tablet::TabletPtr tablet;
-  int64_t leader_term;
+  int64_t leader_term = -1;
 
   bool operator!() const {
-    return !peer;
+    return !peer || !tablet;
   }
 
-  bool FillTerm(TabletServerErrorPB* error, rpc::RpcContext* context);
+  Status FillTerm();
   void FillTabletPeer(TabletPeerTablet source);
 };
+
+Result<LeaderTabletPeer> LookupLeaderTablet(
+    TabletPeerLookupIf* tablet_manager,
+    const std::string& tablet_id,
+    TabletPeerTablet peer = TabletPeerTablet());
 
 // The "peer" argument could be provided by the caller in case the caller has already performed
 // the LookupTabletPeerOrRespond call, and we only need to fill the leader term.
@@ -191,28 +216,94 @@ LeaderTabletPeer LookupLeaderTabletOrRespond(
     RespClass* resp,
     rpc::RpcContext* context,
     TabletPeerTablet peer = TabletPeerTablet()) {
-  if (peer.tablet_peer) {
-    LOG_IF(DFATAL, peer.tablet_peer->tablet_id() != tablet_id)
-        << "Mismatching table ids: peer " << peer.tablet_peer->tablet_id()
-        << " vs " << tablet_id;
-    LOG_IF(DFATAL, !peer.tablet) << "Empty tablet pointer for tablet id : " << tablet_id;
-  } else {
-    auto peer_result = LookupTabletPeerOrRespond(tablet_manager, tablet_id, resp, context);
-    if (!peer_result.ok()) {
-      return LeaderTabletPeer();
-    }
-    peer = std::move(*peer_result);
-  }
-  LeaderTabletPeer result;
-  result.FillTabletPeer(std::move(peer));
-
-  if (!result.FillTerm(resp->mutable_error(), context)) {
+  auto result = LookupLeaderTablet(tablet_manager, tablet_id, std::move(peer));
+  if (!result.ok()) {
+    SetupErrorAndRespond(resp->mutable_error(), result.status(), context);
     return LeaderTabletPeer();
   }
-  resp->clear_error();
 
-  return result;
+  resp->clear_error();
+  return *result;
 }
+
+Status CheckPeerIsLeader(const tablet::TabletPeer& tablet_peer);
+
+// Checks if the peer is ready for servicing IOs.
+// allow_split_tablet specifies whether to reject requests to tablets which have been already
+// split.
+Status CheckPeerIsReady(
+    const tablet::TabletPeer& tablet_peer, AllowSplitTablet allow_split_tablet);
+
+Result<std::shared_ptr<tablet::AbstractTablet>> GetTablet(
+    TabletPeerLookupIf* tablet_manager, const TabletId& tablet_id,
+    tablet::TabletPeerPtr tablet_peer, YBConsistencyLevel consistency_level,
+    AllowSplitTablet allow_split_tablet);
+
+Status CheckWriteThrottling(double score, tablet::TabletPeer* tablet_peer);
+
+class CatalogVersionChecker {
+ public:
+  explicit CatalogVersionChecker(std::reference_wrapper<TabletServerIf> tablet_server)
+      : tablet_server_(tablet_server.get()) {}
+
+  template<class PB>
+  Status operator()(const PB& request) {
+    if (!(request.has_ysql_db_catalog_version() || request.has_ysql_catalog_version())) {
+      return Status::OK();
+    }
+    SCHECK(!(request.has_ysql_db_catalog_version() && request.has_ysql_catalog_version()),
+          InvalidArgument,
+          "Both fields ysql_db_catalog_version and ysql_catalog_version are set");
+    auto version_info = VERIFY_RESULT(FetchVersionInfo(request));
+    if (!tserver_version_info_) {
+      tserver_version_info_.emplace(
+          version_info.db_oid, GetLastBreakingVersion(version_info.db_oid));
+    }
+
+    if (*tserver_version_info_ != version_info) {
+      SCHECK_EQ(
+          tserver_version_info_->db_oid, version_info.db_oid,
+          InvalidArgument, "Different db_oid values are not expected");
+      if (version_info.version < tserver_version_info_->version) {
+        return STATUS(
+            QLError, "The catalog snapshot used for this transaction has been invalidated",
+            TabletServerError(TabletServerErrorPB::MISMATCHED_SCHEMA));
+      }
+    }
+    return Status::OK();
+  }
+
+ private:
+  using DbOid = boost::optional<uint32_t>;
+
+  struct VersionInfo {
+    DbOid db_oid;
+    uint64_t version;
+
+    VersionInfo(DbOid db_oid_, uint64_t version_)
+        : db_oid(db_oid_), version(version_) {}
+
+    friend bool operator==(const VersionInfo&, const VersionInfo&) = default;
+  };
+
+  template<class PB>
+  Result<VersionInfo> FetchVersionInfo(const PB& request) const {
+    if (request.has_ysql_catalog_version()) {
+      return VersionInfo(boost::none, request.ysql_catalog_version());
+    }
+    DCHECK(request.has_ysql_db_catalog_version());
+    SCHECK(FLAGS_TEST_enable_db_catalog_version_mode,
+           InvalidArgument,
+           "enable_db_catalog_version_mode is not enabled");
+    SCHECK(request.has_ysql_db_oid(), InvalidArgument, "ysql_db_oid is not specified");
+    return VersionInfo(request.ysql_db_oid(), request.ysql_db_catalog_version());
+  }
+
+  [[nodiscard]] uint64_t GetLastBreakingVersion(DbOid db_oid) const;
+
+  TabletServerIf& tablet_server_;
+  boost::optional<VersionInfo> tserver_version_info_;
+};
 
 }  // namespace tserver
 }  // namespace yb
@@ -228,5 +319,3 @@ LeaderTabletPeer LookupLeaderTabletOrRespond(
       return;                                                  \
     }                                                          \
   } while (0)
-
-#endif // YB_TSERVER_SERVICE_UTIL_H

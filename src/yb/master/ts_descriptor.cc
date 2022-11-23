@@ -32,27 +32,23 @@
 
 #include "yb/master/ts_descriptor.h"
 
-#include <math.h>
-
-#include <mutex>
 #include <vector>
 
 #include "yb/common/common.pb.h"
 #include "yb/common/wire_protocol.h"
-#include "yb/consensus/consensus.proxy.h"
-#include "yb/gutil/strings/substitute.h"
-#include "yb/master/master.pb.h"
+#include "yb/common/wire_protocol.pb.h"
+
 #include "yb/master/master_fwd.h"
-#include "yb/master/catalog_manager.h"
+#include "yb/master/master_util.h"
 #include "yb/master/catalog_manager_util.h"
-#include "yb/tserver/tserver_admin.proxy.h"
-#include "yb/tserver/tserver_service.proxy.h"
-#include "yb/util/flag_tags.h"
-#include "yb/util/net/net_util.h"
-#include "yb/util/shared_lock.h"
+#include "yb/master/master_cluster.pb.h"
+#include "yb/master/master_heartbeat.pb.h"
 
+#include "yb/util/atomic.h"
+#include "yb/util/flags.h"
+#include "yb/util/status_format.h"
 
-DEFINE_int32(tserver_unresponsive_timeout_ms, 60 * 1000,
+DEFINE_UNKNOWN_int32(tserver_unresponsive_timeout_ms, 60 * 1000,
              "The period of time that a Master can go without receiving a heartbeat from a "
              "tablet server before considering it unresponsive. Unresponsive servers are not "
              "selected when assigning replicas during table creation or re-replication.");
@@ -69,27 +65,23 @@ Result<TSDescriptorPtr> TSDescriptor::RegisterNew(
     rpc::ProxyCache* proxy_cache,
     RegisteredThroughHeartbeat registered_through_heartbeat) {
   auto result = std::make_shared<enterprise::TSDescriptor>(
-      instance.permanent_uuid());
-  if (!registered_through_heartbeat) {
-    // This tserver hasn't actually heartbeated, so register using a last_heartbeat_ time of 0.
-    std::lock_guard<decltype(result->lock_)> l(result->lock_);
-    result->last_heartbeat_ = MonoTime::kMin;
-    result->registered_through_heartbeat_ = RegisteredThroughHeartbeat::kFalse;
-  }
+      instance.permanent_uuid(), registered_through_heartbeat);
   RETURN_NOT_OK(result->Register(instance, registration, std::move(local_cloud_info), proxy_cache));
   return std::move(result);
 }
 
-TSDescriptor::TSDescriptor(std::string perm_id)
+TSDescriptor::TSDescriptor(std::string perm_id,
+                           RegisteredThroughHeartbeat registered_through_heartbeat)
     : permanent_uuid_(std::move(perm_id)),
-      last_heartbeat_(MonoTime::Now()),
       has_tablet_report_(false),
+      has_faulty_drive_(false),
       recent_replica_creations_(0),
       last_replica_creations_decay_(MonoTime::Now()),
-      num_live_replicas_(0) {
-}
-
-TSDescriptor::~TSDescriptor() {
+      num_live_replicas_(0),
+      registered_through_heartbeat_(registered_through_heartbeat) {
+  if (registered_through_heartbeat_) {
+    last_heartbeat_ = MonoTime::Now();
+  }
 }
 
 Status TSDescriptor::Register(const NodeInstancePB& instance,
@@ -175,13 +167,20 @@ void TSDescriptor::UpdateHeartbeat(const TSHeartbeatRequestPB* req) {
     physical_time_ = req->ts_physical_time();
     hybrid_time_ = HybridTime::FromPB(req->ts_hybrid_time());
     heartbeat_rtt_ = MonoDelta::FromMicroseconds(req->rtt_us());
+    if (req->has_faulty_drive()) {
+      has_faulty_drive_ = req->faulty_drive();
+    }
   }
 }
 
 MonoDelta TSDescriptor::TimeSinceHeartbeat() const {
-  MonoTime now(MonoTime::Now());
+  auto last_heartbeat = LastHeartbeatTime();
+  return MonoTime::Now().GetDeltaSince(last_heartbeat ? last_heartbeat : MonoTime::kMin);
+}
+
+MonoTime TSDescriptor::LastHeartbeatTime() const {
   SharedLock<decltype(lock_)> l(lock_);
-  return now.GetDeltaSince(last_heartbeat_);
+  return last_heartbeat_;
 }
 
 int64_t TSDescriptor::latest_seqno() const {
@@ -199,8 +198,12 @@ void TSDescriptor::set_has_tablet_report(bool has_report) {
   has_tablet_report_ = has_report;
 }
 
-bool TSDescriptor::registered_through_heartbeat() const {
+bool TSDescriptor::has_faulty_drive() const {
   SharedLock<decltype(lock_)> l(lock_);
+  return has_faulty_drive_;
+}
+
+bool TSDescriptor::registered_through_heartbeat() const {
   return registered_through_heartbeat_;
 }
 
@@ -257,34 +260,14 @@ CloudInfoPB TSDescriptor::GetCloudInfo() const {
   return ts_information_->registration().common().cloud_info();
 }
 
-template<typename Lambda>
-bool TSDescriptor::DoesRegistrationMatch(Lambda predicate) const {
-  TSRegistrationPB reg = GetRegistration();
-  if (std::find_if(reg.common().private_rpc_addresses().begin(),
-                   reg.common().private_rpc_addresses().end(),
-                   predicate) != reg.common().private_rpc_addresses().end()) {
-    return true;
-  }
-  if (std::find_if(reg.common().broadcast_addresses().begin(),
-                   reg.common().broadcast_addresses().end(),
-                   predicate) != reg.common().broadcast_addresses().end()) {
-    return true;
-  }
-  return false;
-}
-
 bool TSDescriptor::IsBlacklisted(const BlacklistSet& blacklist) const {
-  auto predicate = [&blacklist](const HostPortPB& rhs) {
-    return blacklist.count(HostPortFromPB(rhs)) > 0;
-  };
-  return DoesRegistrationMatch(predicate);
+  TSRegistrationPB reg = GetRegistration();
+  return yb::master::IsBlacklisted(reg.common(), blacklist);
 }
 
 bool TSDescriptor::IsRunningOn(const HostPortPB& hp) const {
-  auto predicate = [&hp](const HostPortPB& rhs) {
-    return rhs.host() == hp.host() && rhs.port() == hp.port();
-  };
-  return DoesRegistrationMatch(predicate);
+  TSRegistrationPB reg = GetRegistration();
+  return yb::master::IsRunningOn(reg.common(), hp);
 }
 
 Result<HostPort> TSDescriptor::GetHostPortUnlocked() const {
@@ -310,10 +293,12 @@ void TSDescriptor::UpdateMetrics(const TServerMetricsPB& metrics) {
   ts_metrics_.read_ops_per_sec = metrics.read_ops_per_sec();
   ts_metrics_.write_ops_per_sec = metrics.write_ops_per_sec();
   ts_metrics_.uptime_seconds = metrics.uptime_seconds();
+  ts_metrics_.path_metrics.clear();
   for (const auto& path_metric : metrics.path_metrics()) {
     ts_metrics_.path_metrics[path_metric.path_id()] =
         { path_metric.used_space(), path_metric.total_space() };
   }
+  ts_metrics_.disable_tablet_split_if_default_ttl = metrics.disable_tablet_split_if_default_ttl();
 }
 
 void TSDescriptor::GetMetrics(TServerMetricsPB* metrics) {
@@ -332,6 +317,7 @@ void TSDescriptor::GetMetrics(TServerMetricsPB* metrics) {
     new_path_metric->set_used_space(path_metric.second.used_space);
     new_path_metric->set_total_space(path_metric.second.total_space);
   }
+  metrics->set_disable_tablet_split_if_default_ttl(ts_metrics_.disable_tablet_split_if_default_ttl);
 }
 
 bool TSDescriptor::HasTabletDeletePending() const {

@@ -7,15 +7,20 @@ import static play.mvc.Http.Status.BAD_REQUEST;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonIgnore;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.yugabyte.yw.common.PlatformServiceException;
+import com.yugabyte.yw.common.encryption.HashBuilder;
+import com.yugabyte.yw.common.encryption.bc.BcOpenBsdHasher;
 import io.ebean.DuplicateKeyException;
 import io.ebean.Finder;
 import io.ebean.Model;
+import io.ebean.annotation.Encrypted;
 import io.ebean.annotation.EnumValue;
 import io.swagger.annotations.ApiModel;
 import io.swagger.annotations.ApiModelProperty;
+import java.math.BigInteger;
+import java.security.SecureRandom;
+import java.time.Duration;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
@@ -25,20 +30,21 @@ import javax.persistence.Entity;
 import javax.persistence.EnumType;
 import javax.persistence.Enumerated;
 import javax.persistence.Id;
+import lombok.extern.slf4j.Slf4j;
 import org.joda.time.DateTime;
-import org.mindrot.jbcrypt.BCrypt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import play.data.validation.Constraints;
-import play.libs.Json;
 import play.mvc.Http.Status;
 
+@Slf4j
 @Entity
 @ApiModel(description = "A user associated with a customer")
 public class Users extends Model {
 
   public static final Logger LOG = LoggerFactory.getLogger(Users.class);
-  // A globally unique UUID for the Users.
+
+  private static final HashBuilder hasher = new BcOpenBsdHasher();
 
   /** These are the available user roles */
   public enum Role {
@@ -70,6 +76,15 @@ public class Users extends Model {
     }
   }
 
+  public enum UserType {
+    @EnumValue("local")
+    local,
+
+    @EnumValue("ldap")
+    ldap;
+  }
+
+  // A globally unique UUID for the Users.
   @Id
   @Column(nullable = false, unique = true)
   @ApiModelProperty(value = "User UUID", accessMode = READ_ONLY)
@@ -104,18 +119,18 @@ public class Users extends Model {
   public String passwordHash;
 
   public void setPassword(String password) {
-    this.passwordHash = BCrypt.hashpw(password, BCrypt.gensalt());
+    this.passwordHash = Users.hasher.hash(password);
   }
 
   @Column(nullable = false)
-  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd HH:mm:ss")
+  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ssXXX")
   @ApiModelProperty(
       value = "User creation date",
-      example = "2021-06-17 15:00:05",
+      example = "2021-06-17T15:00:05-04:00",
       accessMode = READ_ONLY)
   public Date creationDate;
 
-  private String authToken;
+  @Encrypted private String authToken;
 
   @Column(nullable = true)
   @ApiModelProperty(
@@ -129,9 +144,9 @@ public class Users extends Model {
   @ApiModelProperty(value = "User API token", accessMode = READ_ONLY)
   private String apiToken;
 
-  @Column(nullable = true, columnDefinition = "TEXT")
-  @ApiModelProperty(value = "UI_ONLY", hidden = true, accessMode = READ_ONLY)
-  private JsonNode features;
+  @Column(nullable = true)
+  @ApiModelProperty(value = "User timezone")
+  private String timezone;
 
   // The role of the user.
   @Column(nullable = false)
@@ -159,8 +174,40 @@ public class Users extends Model {
     this.isPrimary = isPrimary;
   }
 
+  @Column(nullable = false)
+  @ApiModelProperty(value = "User Type")
+  public UserType userType;
+
+  public void setUserType(UserType userType) {
+    this.userType = userType;
+  }
+
+  public UserType getUserType() {
+    return this.userType;
+  }
+
+  @Column(nullable = false)
+  @ApiModelProperty(value = "LDAP Specified Role")
+  public boolean ldapSpecifiedRole;
+
+  public void setLdapSpecifiedRole(boolean ldapSpecifiedRole) {
+    this.ldapSpecifiedRole = ldapSpecifiedRole;
+  }
+
+  public boolean getLdapSpecifiedRole() {
+    return this.ldapSpecifiedRole;
+  }
+
   public Date getAuthTokenIssueDate() {
     return this.authTokenIssueDate;
+  }
+
+  public String getTimezone() {
+    return this.timezone;
+  }
+
+  public void setTimezone(String timezone) {
+    this.timezone = timezone;
   }
 
   public static final Finder<UUID, Users> find = new Finder<UUID, Users>(Users.class) {};
@@ -225,8 +272,25 @@ public class Users extends Model {
     users.creationDate = new Date();
     users.role = role;
     users.isPrimary = isPrimary;
+    users.setUserType(UserType.local);
+    users.setLdapSpecifiedRole(false);
     users.save();
     return users;
+  }
+
+  /**
+   * Delete Users identified via email
+   *
+   * @param email
+   * @return void
+   */
+  public static void deleteUser(String email) {
+    Users userToDelete = Users.find.query().where().eq("email", email).findOne();
+    if (userToDelete != null && userToDelete.userType.equals(UserType.ldap)) {
+      log.info("Deleting user id {} with email address {}", userToDelete.uuid, userToDelete.email);
+      userToDelete.delete();
+    }
+    return;
   }
 
   /**
@@ -239,7 +303,7 @@ public class Users extends Model {
   public static Users authWithPassword(String email, String password) {
     Users users = Users.find.query().where().eq("email", email).findOne();
 
-    if (users != null && BCrypt.checkpw(password, users.passwordHash)) {
+    if (users != null && Users.hasher.isValid(password, users.passwordHash)) {
       return users;
     } else {
       return null;
@@ -268,7 +332,12 @@ public class Users extends Model {
   public String createAuthToken() {
     Date tokenExpiryDate = new DateTime().minusDays(1).toDate();
     if (authTokenIssueDate == null || authTokenIssueDate.before(tokenExpiryDate)) {
-      authToken = UUID.randomUUID().toString();
+      SecureRandom randomGenerator = new SecureRandom();
+      // Keeping the length as 128 bits.
+      byte[] randomBytes = new byte[16];
+      randomGenerator.nextBytes(randomBytes);
+      // Converting to hexadecimal encoding
+      authToken = new BigInteger(1, randomBytes).toString(16);
       authTokenIssueDate = new Date();
       save();
     }
@@ -309,14 +378,30 @@ public class Users extends Model {
    * @param authToken
    * @return Authenticated Users Info
    */
-  public static Users authWithToken(String authToken) {
+  public static Users authWithToken(String authToken, Duration authTokenExpiry) {
     if (authToken == null) {
       return null;
     }
 
     try {
-      // TODO: handle authToken expiry etc.
-      return find.query().where().eq("authToken", authToken).findOne();
+      Users userWithToken = find.query().where().eq("authToken", authToken).findOne();
+      if (userWithToken != null) {
+        long tokenExpiryDuration = authTokenExpiry.toMinutes();
+        int tokenExpiryInMinutes = (int) tokenExpiryDuration;
+        Calendar calTokenExpiryDate = Calendar.getInstance();
+        calTokenExpiryDate.setTime(userWithToken.authTokenIssueDate);
+        calTokenExpiryDate.add(Calendar.MINUTE, tokenExpiryInMinutes);
+        Calendar calCurrentDate = Calendar.getInstance();
+        long tokenDiffMinutes =
+            Duration.between(calCurrentDate.toInstant(), calTokenExpiryDate.toInstant())
+                .toMinutes();
+
+        // Call deleteAuthToken to delete authToken and its issueDate for that specific user
+        if (tokenDiffMinutes <= 0) {
+          userWithToken.deleteAuthToken();
+        }
+      }
+      return userWithToken;
     } catch (Exception e) {
       return null;
     }
@@ -344,29 +429,6 @@ public class Users extends Model {
   public void deleteAuthToken() {
     authToken = null;
     authTokenIssueDate = null;
-    save();
-  }
-
-  /** Get features for this Users. */
-  public JsonNode getFeatures() {
-    return features == null ? Json.newObject() : features;
-  }
-
-  /** Set features for this User. */
-  public void setFeatures(JsonNode input) {
-    this.features = input;
-  }
-
-  /**
-   * Upserts features for this Users. If updating a feature, only specified features will be
-   * updated.
-   */
-  public void upsertFeatures(JsonNode input) {
-    if (features == null) {
-      features = input;
-    } else {
-      ((ObjectNode) features).setAll((ObjectNode) input);
-    }
     save();
   }
 

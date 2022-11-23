@@ -209,7 +209,6 @@ check_xact_readonly(Node *parsetree)
 		case T_ViewStmt:
 		case T_DropStmt:
 		case T_DropdbStmt:
-		case T_DropTableGroupStmt:
 		case T_DropTableSpaceStmt:
 		case T_DropRoleStmt:
 		case T_GrantStmt:
@@ -552,11 +551,6 @@ standard_ProcessUtility(PlannedStmt *pstmt,
 			CreateTableGroup((CreateTableGroupStmt *) parsetree);
 			break;
 
-		case T_DropTableGroupStmt:
-			PreventInTransactionBlock(isTopLevel, "DROP TABLEGROUP");
-			DropTableGroup((DropTableGroupStmt *) parsetree);
-			break;
-
 		case T_CreateTableSpaceStmt:
 			/* no event triggers for global objects */
 			PreventInTransactionBlock(isTopLevel, "CREATE TABLESPACE");
@@ -845,8 +839,7 @@ standard_ProcessUtility(PlannedStmt *pstmt,
 			 */
 			if (!IsYugaByteEnabled() ||
 				!MyProcPort->yb_is_tserver_auth_method ||
-				IsBootstrapProcessingMode() ||
-				YBIsPreparingTemplates())
+				IsBootstrapProcessingMode())
 			{
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -1343,18 +1336,18 @@ ProcessUtilitySlow(ParseState *pstate,
 					Oid			relid;
 					LOCKMODE	lockmode;
 
-					if (stmt->concurrent)
+					if (stmt->concurrent != YB_CONCURRENCY_DISABLED)
 					{
-						if (IsYugaByteEnabled() &&
+						/*
+						 * If concurrency is implicitly enabled, transparently
+						 * switch to nonconcurrent index build.
+						 * TODO(jason): heed issue #6240.
+						 */
+						if (stmt->concurrent == YB_CONCURRENCY_IMPLICIT_ENABLED &&
+							IsYugaByteEnabled() &&
 							!IsBootstrapProcessingMode() &&
-							!YBIsPreparingTemplates() &&
 							IsInTransactionBlock(isTopLevel))
 						{
-							/*
-							 * Transparently switch to nonconcurrent index
-							 * build.
-							 * TODO(jason): heed issue #6240.
-							 */
 							ereport(NOTICE,
 									(errmsg("making create index for table "
 											"\"%s\" nonconcurrent",
@@ -1363,7 +1356,7 @@ ProcessUtilitySlow(ParseState *pstate,
 											   " block cannot be concurrent."),
 									 errhint("Consider running it outside of a"
 											 " transaction block. See https://github.com/yugabyte/yugabyte-db/issues/6240.")));
-							stmt->concurrent = false;
+							stmt->concurrent = YB_CONCURRENCY_DISABLED;
 						}
 						else
 							PreventInTransactionBlock(isTopLevel,
@@ -1379,8 +1372,8 @@ ProcessUtilitySlow(ParseState *pstate,
 					 * eventually be needed here, so the lockmode calculation
 					 * needs to match what DefineIndex() does.
 					 */
-					lockmode = stmt->concurrent ? ShareUpdateExclusiveLock
-						: ShareLock;
+					lockmode = (stmt->concurrent != YB_CONCURRENCY_DISABLED)
+						? ShareUpdateExclusiveLock : ShareLock;
 					relid =
 						RangeVarGetRelidExtended(stmt->relation, lockmode,
 												 0,
@@ -1420,21 +1413,26 @@ ProcessUtilitySlow(ParseState *pstate,
 												   stmt->relation->relname)));
 						}
 						list_free(inheritors);
+					}
 
+					if (get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
+					{
 						/*
-						 * Transparently switch to nonconcurrent index build.
+						 * If CONCURRENTLY is explicitly specified, an error
+						 * will be thrown during the DefineIndex() subroutine.
+						 * If concurrency is implicitly enabled, transparently switch
+						 * to nonconcurrent index build.
 						 */
-						if (stmt->concurrent &&
+						if (stmt->concurrent == YB_CONCURRENCY_IMPLICIT_ENABLED &&
 							IsYugaByteEnabled() &&
-							!IsBootstrapProcessingMode() &&
-							!YBIsPreparingTemplates())
+							!IsBootstrapProcessingMode())
 						{
 							ereport(DEBUG1,
 									(errmsg("making create index on "
 											"partitioned table \"%s\" "
 											"nonconcurrent",
 											stmt->relation->relname)));
-							stmt->concurrent = false;
+							stmt->concurrent = YB_CONCURRENCY_DISABLED;
 						}
 					}
 
@@ -2117,7 +2115,7 @@ AlterObjectTypeCommandTag(ObjectType objtype)
 		case OBJECT_TABCONSTRAINT:
 			tag = "ALTER TABLE";
 			break;
-		case OBJECT_TABLEGROUP:
+		case OBJECT_YBTABLEGROUP:
 			tag = "ALTER TABLEGROUP";
 			break;
 		case OBJECT_TABLESPACE:
@@ -2298,10 +2296,6 @@ CreateCommandTag(Node *parsetree)
 			tag = "CREATE TABLEGROUP";
 			break;
 
-		case T_DropTableGroupStmt:
-			tag = "DROP TABLEGROUP";
-			break;
-
 		case T_CreateTableSpaceStmt:
 			tag = "CREATE TABLESPACE";
 			break;
@@ -2469,6 +2463,9 @@ CreateCommandTag(Node *parsetree)
 					break;
 				case OBJECT_STATISTIC_EXT:
 					tag = "DROP STATISTICS";
+					break;
+				case OBJECT_YBTABLEGROUP:
+					tag = "DROP TABLEGROUP";
 					break;
 				default:
 					tag = "???";
@@ -3558,10 +3555,6 @@ GetCommandLogLevel(Node *parsetree)
 			break;
 
 		case T_CreateTableGroupStmt:
-			lev = LOGSTMT_DDL;
-			break;
-
-		case T_DropTableGroupStmt:
 			lev = LOGSTMT_DDL;
 			break;
 

@@ -40,25 +40,63 @@
 #include <vector>
 
 #include "yb/consensus/consensus.h"
+#include "yb/consensus/consensus.pb.h"
 #include "yb/consensus/log_anchor_registry.h"
 #include "yb/consensus/quorum_util.h"
+
 #include "yb/gutil/map-util.h"
 #include "yb/gutil/strings/human_readable.h"
 #include "yb/gutil/strings/join.h"
 #include "yb/gutil/strings/numbers.h"
 #include "yb/gutil/strings/substitute.h"
+
+#include "yb/rocksdb/db.h"
+#include "yb/rocksdb/util/options_parser.h"
+
 #include "yb/server/webui_util.h"
+
 #include "yb/tablet/maintenance_manager.h"
 #include "yb/tablet/tablet.h"
 #include "yb/tablet/tablet.pb.h"
 #include "yb/tablet/tablet_bootstrap_if.h"
 #include "yb/tablet/tablet_metadata.h"
 #include "yb/tablet/tablet_peer.h"
+#include "yb/tablet/transaction_participant.h"
+
+#include "yb/tserver/service_util.h"
 #include "yb/tserver/tablet_server.h"
 #include "yb/tserver/ts_tablet_manager.h"
+
+#include "yb/util/jsonwriter.h"
 #include "yb/util/url-coding.h"
 #include "yb/util/version_info.h"
 #include "yb/util/version_info.pb.h"
+#include "yb/util/flags.h"
+
+using yb::consensus::GetConsensusRole;
+using yb::consensus::CONSENSUS_CONFIG_COMMITTED;
+using yb::consensus::ConsensusStatePB;
+using yb::consensus::RaftPeerPB;
+using yb::consensus::OperationStatusPB;
+using yb::tablet::MaintenanceManagerStatusPB;
+using yb::tablet::MaintenanceManagerStatusPB_CompletedOpPB;
+using yb::tablet::MaintenanceManagerStatusPB_MaintenanceOpPB;
+using yb::tablet::Tablet;
+using yb::tablet::TabletDataState;
+using yb::tablet::TabletPeer;
+using yb::tablet::TabletStatusPB;
+using yb::tablet::Operation;
+
+using std::endl;
+using std::shared_ptr;
+using std::vector;
+using std::string;
+using strings::Substitute;
+
+using namespace std::placeholders;  // NOLINT(build/namespaces)
+
+DEFINE_UNKNOWN_bool(enable_intentsdb_page, false,
+    "Enable displaying the contents of intentsdb page.");
 
 namespace {
 
@@ -66,10 +104,11 @@ namespace {
 struct TabletPeerInfo {
   string namespace_name;
   string name;
+  bool is_hidden;
   uint64_t num_sst_files;
   yb::tablet::TabletOnDiskSizeInfo disk_size_info;
   bool has_on_disk_size;
-  yb::consensus::RaftPeerPB::Role raft_role;
+  yb::PeerRole raft_role;
 };
 
 // An identifier for a table, according to the `/tables` page.
@@ -82,14 +121,16 @@ struct TableIdentifier {
 struct TableInfo {
   string namespace_name;
   string name;
+  bool is_hidden;
   uint64_t num_sst_files;
   yb::tablet::TabletOnDiskSizeInfo disk_size_info;
   bool has_complete_on_disk_size;
-  std::map<yb::consensus::RaftPeerPB::Role, size_t> raft_role_counts;
+  std::map<yb::PeerRole, size_t> raft_role_counts;
 
   explicit TableInfo(TabletPeerInfo info)
       : namespace_name(info.namespace_name),
         name(info.name),
+        is_hidden(info.is_hidden),
         num_sst_files(info.num_sst_files),
         disk_size_info(info.disk_size_info),
         has_complete_on_disk_size(info.has_on_disk_size) {
@@ -131,26 +172,6 @@ struct less<TableIdentifier> {
 namespace yb {
 namespace tserver {
 
-using yb::consensus::GetConsensusRole;
-using yb::consensus::CONSENSUS_CONFIG_COMMITTED;
-using yb::consensus::ConsensusStatePB;
-using yb::consensus::RaftPeerPB;
-using yb::consensus::OperationStatusPB;
-using yb::tablet::MaintenanceManagerStatusPB;
-using yb::tablet::MaintenanceManagerStatusPB_CompletedOpPB;
-using yb::tablet::MaintenanceManagerStatusPB_MaintenanceOpPB;
-using yb::tablet::Tablet;
-using yb::tablet::TabletDataState;
-using yb::tablet::TabletPeer;
-using yb::tablet::TabletStatusPB;
-using yb::tablet::Operation;
-using std::endl;
-using std::shared_ptr;
-using std::vector;
-using strings::Substitute;
-
-using namespace std::placeholders;  // NOLINT(build/namespaces)
-
 namespace {
 
 bool GetTabletID(const Webserver::WebRequest& req, string* id, std::stringstream *out) {
@@ -162,20 +183,23 @@ bool GetTabletID(const Webserver::WebRequest& req, string* id, std::stringstream
   return true;
 }
 
-bool GetTabletPeer(TabletServer* tserver, const Webserver::WebRequest& req,
-                   std::shared_ptr<TabletPeer>* peer, const string& tablet_id,
-                   std::stringstream *out) {
-  if (!tserver->tablet_manager()->LookupTablet(tablet_id, peer)) {
+tablet::TabletPeerPtr GetTabletPeer(TabletServer* tserver, const Webserver::WebRequest& req,
+                                    const TabletId& tablet_id, std::stringstream *out) {
+  auto result = tserver->tablet_manager()->LookupTablet(tablet_id);
+  if (!result) {
     (*out) << "Tablet " << EscapeForHtmlToString(tablet_id) << " not found";
-    return false;
   }
-  return true;
+  return result;
 }
 
-bool TabletBootstrapping(const std::shared_ptr<TabletPeer>& peer, const string& tablet_id,
+bool TabletReady(const std::shared_ptr<TabletPeer>& peer, const string& tablet_id,
                          std::stringstream* out) {
-  if (peer->state() == tablet::BOOTSTRAPPING) {
+  auto state = peer->state();
+  if (state == tablet::BOOTSTRAPPING) {
     (*out) << "Tablet " << EscapeForHtmlToString(tablet_id) << " is still bootstrapping";
+    return false;
+  } else if (state == tablet::NOT_STARTED) {
+    (*out) << "Tablet " << EscapeForHtmlToString(tablet_id) << " has not yet started";
     return false;
   }
   return true;
@@ -183,14 +207,16 @@ bool TabletBootstrapping(const std::shared_ptr<TabletPeer>& peer, const string& 
 
 // Returns true if the tablet_id was properly specified, the
 // tablet is found, and is in a non-bootstrapping state.
-bool LoadTablet(TabletServer* tserver,
-                const Webserver::WebRequest& req,
-                string* tablet_id, std::shared_ptr<TabletPeer>* peer,
-                std::stringstream* out) {
-  if (!GetTabletID(req, tablet_id, out)) return false;
-  if (!GetTabletPeer(tserver, req, peer, *tablet_id, out)) return false;
-  if (!TabletBootstrapping(*peer, *tablet_id, out)) return false;
-  return true;
+tablet::TabletPeerPtr LoadTablet(TabletServer* tserver,
+                                 const Webserver::WebRequest& req,
+                                 string* tablet_id,
+                                 std::stringstream* out) {
+  if (!GetTabletID(req, tablet_id, out)) return nullptr;
+  auto result = GetTabletPeer(tserver, req, *tablet_id, out);
+  if (!result || !TabletReady(result, *tablet_id, out)) {
+    return nullptr;
+  }
+  return result;
 }
 
 void HandleTabletPage(
@@ -204,7 +230,7 @@ void HandleTabletPage(
   // Output schema in tabular format.
   *output << "<h2>Schema</h2>\n";
   const SchemaPtr schema = peer->tablet_metadata()->schema();
-  HtmlOutputSchemaTable(*schema, output);
+  server::HtmlOutputSchemaTable(*schema, output);
 
   *output << "<h2>Other Tablet Info Pages</h2>" << endl;
 
@@ -291,9 +317,39 @@ void HandleTransactionsPage(
   *output << "Tablet is non transactional";
 }
 
-void DumpRocksDB(const char* title, rocksdb::DB* db, std::ostream* out) {
+void DumpRocksDBOptions(rocksdb::DB* db, std::stringstream* out) {
+    std::vector<std::string> cf_names;
+    std::vector<rocksdb::ColumnFamilyOptions> cf_options;
+    db->GetColumnFamiliesOptions(&cf_names, &cf_options);
+
+    auto env = rocksdb::NewMemEnv(db->GetEnv());
+    const std::string tag_id = Uuid::Generate().ToHexString();
+    *out << "<input type=\"checkbox\" id=\"" << tag_id << "\" class=\"yb-collapsible-cb\"/>"
+         << "<label for=\"" << tag_id << "\"><h3>Options</h3></label>" << std::endl
+         << "<pre>" << std::endl;
+
+    std::string content;
+    auto status = rocksdb::PersistRocksDBOptions(db->GetDBOptions(),
+                                                 cf_names, cf_options, "opts", env,
+                                                 rocksdb::IncludeHeader::kFalse,
+                                                 rocksdb::IncludeFileVersion::kFalse);
+    if (PREDICT_TRUE(status.ok())) {
+      status = rocksdb::ReadFileToString(env, "opts", &content);
+    }
+    if (PREDICT_TRUE(status.ok())) {
+      EscapeForHtml(content, out);
+    } else {
+      *out << "Failed to get options: " << status << std::endl;
+    }
+    *out << "</pre>" << std::endl;
+    delete env;
+}
+
+void DumpRocksDB(const char* title, rocksdb::DB* db, std::stringstream* out) {
   if (db) {
     *out << "<h2>" << title << "</h2>" << std::endl;
+    DumpRocksDBOptions(db, out);
+
     *out << "<h3>Files</h3>" << std::endl;
     auto files = db->GetLiveFilesMetaData();
     *out << "<pre>" << std::endl;
@@ -301,6 +357,7 @@ void DumpRocksDB(const char* title, rocksdb::DB* db, std::ostream* out) {
       *out << file.ToString() << std::endl;
     }
     *out << "</pre>" << std::endl;
+
     rocksdb::TablePropertiesCollection properties;
     auto status = db->GetPropertiesOfAllTables(&properties);
     if (status.ok()) {
@@ -320,7 +377,12 @@ void HandleRocksDBPage(
   std::stringstream *output = &resp->output;
   *output << "<h1>RocksDB for Tablet " << EscapeForHtmlToString(tablet_id) << "</h1>" << std::endl;
 
-  auto doc_db = peer->tablet()->doc_db();
+  auto tablet_result = peer->shared_tablet_safe();
+  if (!tablet_result.ok()) {
+    *output << tablet_result.status();
+    return;
+  }
+  auto doc_db = (*tablet_result)->doc_db();
   DumpRocksDB("Regular", doc_db.regular, output);
   DumpRocksDB("Intents", doc_db.intents, output);
 }
@@ -331,8 +393,8 @@ void RegisterTabletPathHandler(
   auto handler = [tserver, f](const Webserver::WebRequest& req, Webserver::WebResponse* resp) {
     std::stringstream *output = &resp->output;
     string tablet_id;
-    tablet::TabletPeerPtr peer;
-    if (!LoadTablet(tserver, req, &tablet_id, &peer, output)) return;
+    tablet::TabletPeerPtr peer = LoadTablet(tserver, req, &tablet_id, output);
+    if (!peer) return;
 
     f(tablet_id, peer, req, resp);
   };
@@ -365,6 +427,12 @@ Status TabletServerPathHandlers::Register(Webserver* server) {
       "/", "Dashboards",
       std::bind(&TabletServerPathHandlers::HandleDashboardsPage, this, _1, _2), true /* styled */,
       true /* is_on_nav_bar */, "fa fa-dashboard");
+#ifndef NDEBUG
+  server->RegisterPathHandler(
+      "/intentsdb", "IntentsDB",
+      std::bind(&TabletServerPathHandlers::HandleIntentsDBPage, this, _1, _2), true /* styled */,
+      true /* is_on_nav_bar */, "fa fa-lock");
+#endif
   server->RegisterPathHandler(
       "/maintenance-manager", "",
       std::bind(&TabletServerPathHandlers::HandleMaintenanceManagerPage, this, _1, _2),
@@ -414,7 +482,8 @@ void TabletServerPathHandlers::HandleOperationsPage(const Webserver::WebRequest&
   for (const std::shared_ptr<TabletPeer>& peer : peers) {
     vector<OperationStatusPB> inflight;
 
-    if (peer->tablet() == nullptr) {
+    auto tablet = peer->shared_tablet();
+    if (tablet == nullptr) {
       continue;
     }
 
@@ -499,11 +568,11 @@ std::map<TableIdentifier, TableInfo> GetTablesInfo(
     }
 
     auto consensus = peer->shared_consensus();
-    auto raft_role = RaftPeerPB::UNKNOWN_ROLE;
+    auto raft_role = PeerRole::UNKNOWN_ROLE;
     if (consensus) {
       raft_role = consensus->role();
     } else if (status.tablet_data_state() == TabletDataState::TABLET_DATA_COPYING) {
-      raft_role = RaftPeerPB::LEARNER;
+      raft_role = PeerRole::LEARNER;
     }
 
     auto identifer = TableIdentifier {
@@ -513,14 +582,16 @@ std::map<TableIdentifier, TableInfo> GetTablesInfo(
 
     auto tablet = peer->shared_tablet();
     uint64_t num_sst_files = (tablet) ? tablet->GetCurrentVersionNumSSTFiles() : 0;
+    bool is_hidden = status.is_hidden();
 
     auto info = TabletPeerInfo {
-      .namespace_name = std::move(status.namespace_name()),
-      .name = std::move(status.table_name()),
-      .num_sst_files = num_sst_files,
-      .disk_size_info = yb::tablet::TabletOnDiskSizeInfo::FromPB(status),
-      .has_on_disk_size = status.has_estimated_on_disk_size(),
-      .raft_role = raft_role
+        .namespace_name = std::move(status.namespace_name()),
+        .name = std::move(status.table_name()),
+        .is_hidden = is_hidden,
+        .num_sst_files = num_sst_files,
+        .disk_size_info = yb::tablet::TabletOnDiskSizeInfo::FromPB(status),
+        .has_on_disk_size = status.has_estimated_on_disk_size(),
+        .raft_role = raft_role
     };
 
     auto table_iter = table_map.find(identifer);
@@ -547,7 +618,8 @@ void TabletServerPathHandlers::HandleTablesPage(const Webserver::WebRequest& req
           << "<table class='table table-striped'>\n"
           << "  <tr>\n"
           << "    <th>Namespace</th><th>Table name</th><th>Table UUID</th>\n"
-          << "    <th>State</th><th>Num SST Files</th><th>On-disk size</th><th>Raft roles</th>\n"
+          << "    <th>State</th><th>Hidden</th><th>Num SST Files</th>\n"
+          << "    <th>On-disk size</th><th>Raft roles</th>\n"
           << "  </tr>\n";
 
   for (const auto& table_iter : table_map) {
@@ -563,17 +635,19 @@ void TabletServerPathHandlers::HandleTablesPage(const Webserver::WebRequest& req
     std::stringstream role_counts_html;
     role_counts_html << "<ul>";
     for (const auto& rc_iter : info.raft_role_counts) {
-      role_counts_html << "<li>" << RaftPeerPB::Role_Name(rc_iter.first)
+      role_counts_html << "<li>" << PeerRole_Name(rc_iter.first)
                        << ": " << rc_iter.second << "</li>";
     }
     role_counts_html << "</ul>";
 
     *output << Substitute(
-        "<tr><td>$0</td><td>$1</td><td>$2</td><td>$3</td><td>$4</td><td>$5</td><td>$6</td></tr>\n",
+        "<tr><td>$0</td><td>$1</td><td>$2</td><td>$3</td><td>$4</td>"
+        "<td>$5</td><td>$6</td><td>$7</td></tr>\n",
         EscapeForHtmlToString(info.namespace_name),
         EscapeForHtmlToString(info.name),
         EscapeForHtmlToString(identifier.uuid),
         EscapeForHtmlToString(identifier.state),
+        info.is_hidden,
         info.num_sst_files,
         tables_disk_size_html,
         role_counts_html.str());
@@ -596,9 +670,10 @@ void TabletServerPathHandlers::HandleTabletsPage(const Webserver::WebRequest& re
   *output << "<h1>Tablets</h1>\n";
   *output << "<table class='table table-striped'>\n";
   *output << "  <tr><th>Namespace</th><th>Table name</th><th>Table UUID</th><th>Tablet ID</th>"
-      "<th>Partition</th>"
-      "<th>State</th><th>Num SST Files</th><th>On-disk size</th><th>RaftConfig</th>"
-      "<th>Last status</th></tr>\n";
+             "<th>Partition</th>"
+             "<th>State</th><th>Hidden</th><th>Num SST Files</th><th>On-disk "
+             "size</th><th>RaftConfig</th>"
+             "<th>Last status</th></tr>\n";
   for (const std::shared_ptr<TabletPeer>& peer : peers) {
     TabletStatusPB status;
     peer->GetTabletStatusPB(&status);
@@ -607,7 +682,8 @@ void TabletServerPathHandlers::HandleTabletsPage(const Webserver::WebRequest& re
     string table_name = status.table_name();
     string table_id = status.table_id();
     string tablet_id_or_link;
-    if (peer->tablet() != nullptr) {
+    auto tablet = peer->shared_tablet();
+    if (tablet != nullptr) {
       tablet_id_or_link = TabletLink(id);
     } else {
       tablet_id_or_link = EscapeForHtmlToString(id);
@@ -616,11 +692,11 @@ void TabletServerPathHandlers::HandleTabletsPage(const Webserver::WebRequest& re
         yb::tablet::TabletOnDiskSizeInfo::FromPB(status)
     );
 
-    string partition = peer->tablet_metadata()->partition_schema()
+    auto tablet_metadata = peer->tablet_metadata();
+    string partition = tablet_metadata->partition_schema()
                             ->PartitionDebugString(*peer->status_listener()->partition(),
-                                                   *peer->tablet_metadata()->schema());
+                                                   *tablet_metadata->schema());
 
-    auto tablet = peer->shared_tablet();
     uint64_t num_sst_files = (tablet) ? tablet->GetCurrentVersionNumSSTFiles() : 0;
 
     // TODO: would be nice to include some other stuff like memory usage
@@ -628,19 +704,20 @@ void TabletServerPathHandlers::HandleTabletsPage(const Webserver::WebRequest& re
     (*output) << Substitute(
         // Namespace, Table name, UUID of table, tablet id, partition
         "<tr><td>$0</td><td>$1</td><td>$2</td><td>$3</td><td>$4</td>"
-        // State, num SST files, on-disk size, consensus configuration, last status
-        "<td>$5</td><td>$6</td><td>$7</td><td>$8</td><td>$9</td></tr>\n",
-        EscapeForHtmlToString(namespace_name),  // $0
-        EscapeForHtmlToString(table_name),  // $1
-        EscapeForHtmlToString(table_id),  // $2
-        tablet_id_or_link,  // $3
-        EscapeForHtmlToString(partition),  // $4
+        // State, Hidden, num SST files, on-disk size, consensus configuration, last status
+        "<td>$5</td><td>$6</td><td>$7</td><td>$8</td><td>$9</td><td>$10</td></tr>\n",
+        EscapeForHtmlToString(namespace_name),              // $0
+        EscapeForHtmlToString(table_name),                  // $1
+        EscapeForHtmlToString(table_id),                    // $2
+        tablet_id_or_link,                                  // $3
+        EscapeForHtmlToString(partition),                   // $4
         EscapeForHtmlToString(peer->HumanReadableState()),  // $5
-        num_sst_files,  // $6
-        tablets_disk_size_html,  // $7
+        status.is_hidden(),                                 // $6
+        num_sst_files,                                      // $7
+        tablets_disk_size_html,                             // $8
         consensus ? ConsensusStatePBToHtml(consensus->ConsensusState(CONSENSUS_CONFIG_COMMITTED))
-                  : "",  // $8
-        EscapeForHtmlToString(status.last_status()));  // $9
+                  : "",                                // $9
+        EscapeForHtmlToString(status.last_status()));  // $10
   }
   *output << "</table>\n";
 }
@@ -667,7 +744,7 @@ string TabletServerPathHandlers::ConsensusStatePBToHtml(const ConsensusStatePB& 
         ? peer.last_known_private_addr()[0].host()
         : peer.permanent_uuid();
     peer_addr_or_uuid = EscapeForHtmlToString(peer_addr_or_uuid);
-    string role_name = RaftPeerPB::Role_Name(GetConsensusRole(peer.permanent_uuid(), cstate));
+    string role_name = PeerRole_Name(GetConsensusRole(peer.permanent_uuid(), cstate));
     string formatted = Substitute("$0: $1", role_name, peer_addr_or_uuid);
     // Make the local peer bold.
     if (peer.permanent_uuid() == tserver_->instance_pb().permanent_uuid()) {
@@ -691,6 +768,51 @@ void TabletServerPathHandlers::HandleDashboardsPage(const Webserver::WebRequest&
   *output << GetDashboardLine("maintenance-manager", "Maintenance Manager",
                               "List of operations that are currently running and those "
                               "that are registered.");
+}
+
+void TabletServerPathHandlers::HandleIntentsDBPage(const Webserver::WebRequest& req,
+                                                   Webserver::WebResponse* resp) {
+  std::stringstream *output = &resp->output;
+  if (!FLAGS_enable_intentsdb_page) {
+    (*output) << "Intentsdb is disabled, please set the gflag enable_intentsdb_page to true "
+                 "to show the content of intentsdb.";
+    return;
+  }
+
+  TSTabletManager::TabletPtrs tablet_ptrs;
+  std::vector<tablet::TabletPeerPtr> tablet_peers;
+
+  auto it = req.parsed_args.find("tablet_id");
+  if (it != req.parsed_args.end()) {
+    auto tablet_id = it->second;
+    auto tablet_peer = LookupTabletPeer(tserver_->tablet_peer_lookup(), tablet_id);
+    if (!tablet_peer.ok()) {
+      (*output) << Format("Unable to lookup tablet with ID {}", tablet_id);
+      return;
+    }
+    auto tablet = tablet_peer.get().tablet;
+    if (tablet == nullptr) {
+      (*output) << Format("Unable to lookup tablet with ID {}", tablet_id);
+      return;
+    }
+    tablet_ptrs.push_back(std::move(tablet));
+  } else {
+    tablet_peers = tserver_->tablet_manager()->GetTabletPeers(&tablet_ptrs);
+  }
+
+  std::vector<std::string> intents;
+  for (const auto& tablet : tablet_ptrs) {
+    auto res = tablet->ReadIntents(&intents);
+    if (!res.ok()) {
+      (*output) << "Got an error when reading intents";
+      return;
+    }
+  }
+
+  (*output) << Format("Intents size: $0<br>", intents.size()) << "\n";
+  for (const auto& item : intents) {
+    (*output) << Format("$0<br>", item);
+  }
 }
 
 string TabletServerPathHandlers::GetDashboardLine(const std::string& link,

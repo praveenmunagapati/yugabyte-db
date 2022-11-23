@@ -12,17 +12,22 @@
 // under the License.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_CQL_QL_QL_FWD_H_
-#define YB_YQL_CQL_QL_QL_FWD_H_
+#pragma once
+
+#include <memory>
 
 #include "yb/util/strongly_typed_bool.h"
 
 namespace yb {
 namespace ql {
 
+class QLProcessor;
+class QLSession;
+class Statement;
+
 YB_STRONGLY_TYPED_BOOL(IsRescheduled)
+
+using QLSessionPtr = std::shared_ptr<QLSession>;
 
 } // namespace ql
 } // namespace yb
-
-#endif // YB_YQL_CQL_QL_QL_FWD_H_

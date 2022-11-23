@@ -23,27 +23,29 @@
 
 #include <assert.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <gflags/gflags.h>
 
-#include "yb/util/metrics.h"
 #include "yb/rocksdb/cache.h"
-#include "yb/rocksdb/statistics.h"
 #include "yb/rocksdb/port/port.h"
+#include "yb/rocksdb/statistics.h"
 #include "yb/rocksdb/util/autovector.h"
 #include "yb/rocksdb/util/hash.h"
 #include "yb/rocksdb/util/mutexlock.h"
 #include "yb/rocksdb/util/statistics.h"
 
+#include "yb/util/cache_metrics.h"
 #include "yb/util/enums.h"
+#include "yb/util/metrics.h"
 #include "yb/util/random_util.h"
+#include "yb/util/flags.h"
+
+using std::shared_ptr;
 
 // 0 value means that there exist no single_touch cache and
 // 1 means that the entire cache is treated as a multi-touch cache.
-DEFINE_double(cache_single_touch_ratio, 0.2,
+DEFINE_UNKNOWN_double(cache_single_touch_ratio, 0.2,
               "Fraction of the cache dedicated to single-touch items");
 
-DEFINE_bool(cache_overflow_single_touch, true,
+DEFINE_UNKNOWN_bool(cache_overflow_single_touch, true,
             "Whether to enable overflow of single touch cache into the multi touch cache "
             "allocation");
 
@@ -237,7 +239,7 @@ class HandleTable {
     }
     LRUHandle** new_list = new LRUHandle*[new_length];
     memset(new_list, 0, sizeof(new_list[0]) * new_length);
-    uint32_t count = 0;
+    uint32_t count __attribute__((unused)) = 0;
     LRUHandle* h;
     LRUHandle* next;
     LRUHandle** ptr;
@@ -421,7 +423,7 @@ class LRUCache {
                               bool thread_safe);
 
   std::pair<size_t, size_t> TEST_GetIndividualUsages() {
-    return make_pair<size_t, size_t>(
+    return std::pair<size_t, size_t>(
         single_touch_sub_cache_.Usage(), multi_touch_sub_cache_.Usage());
   }
 
@@ -1004,7 +1006,7 @@ class ShardedLRUCache : public Cache {
     }
   }
 
-  virtual std::vector<std::pair<size_t,size_t>> TEST_GetIndividualUsages() override {
+  virtual std::vector<std::pair<size_t, size_t>> TEST_GetIndividualUsages() override {
     std::vector<std::pair<size_t, size_t>> cache_sizes;
     cache_sizes.reserve(1 << num_shard_bits_);
 

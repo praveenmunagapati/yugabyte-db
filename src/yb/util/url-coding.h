@@ -41,10 +41,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef UTIL_URL_CODING_H
-#define UTIL_URL_CODING_H
-
-#include <stdint.h>
+#pragma once
 
 #include <string>
 #include <vector>
@@ -92,5 +89,3 @@ void EscapeForHtml(const std::string& in, std::stringstream* out);
 std::string EscapeForHtmlToString(const std::string& in);
 
 } // namespace yb
-
-#endif

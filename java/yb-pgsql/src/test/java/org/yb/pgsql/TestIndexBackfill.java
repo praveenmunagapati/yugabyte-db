@@ -82,7 +82,7 @@ public class TestIndexBackfill extends BasePgSQLTest {
           Statement stmt = conn.createStatement()) {
         backfillThreadStarted.countDown();
         insertDone.await(AWAIT_TIMEOUT_SEC, TimeUnit.SECONDS);
-        // This will wait for pg_index.indisready=true
+        // This will wait for pg_index.indisvalid=true
         stmt.executeUpdate("CREATE INDEX " + indexName + " ON " + tableName + "(v ASC)");
       } catch (Exception ex) {
         LOG.error("CREATE INDEX thread failed", ex);
@@ -218,6 +218,10 @@ public class TestIndexBackfill extends BasePgSQLTest {
     String msgLc = ex.getMessage().toLowerCase();
     return msgLc.contains("schema version mismatch")
         || msgLc.contains("catalog version mismatch")
-        || (msgLc.contains("resource unavailable") && msgLc.contains("rocksdb"));
+        || (msgLc.contains("resource unavailable") && (msgLc.contains("rocksdb")
+                                                       || msgLc.contains("null")))
+        || msgLc.contains("expired or aborted by a conflict")
+        || msgLc.contains("operation expired: transaction aborted:")
+        || msgLc.contains("transaction was recently aborted");
   }
 }

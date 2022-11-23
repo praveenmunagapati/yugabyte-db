@@ -13,8 +13,7 @@
 //
 //
 
-#ifndef YB_RPC_SCHEDULER_H
-#define YB_RPC_SCHEDULER_H
+#pragma once
 
 #include "yb/rpc/rpc_fwd.h"
 #include "yb/util/net/net_fwd.h"
@@ -118,7 +117,7 @@ class ScheduledTaskTracker {
  public:
   ScheduledTaskTracker() = default;
 
-  explicit ScheduledTaskTracker(Scheduler* scheduler) : scheduler_(DCHECK_NOTNULL(scheduler)) {}
+  explicit ScheduledTaskTracker(Scheduler* scheduler);
 
   void Bind(Scheduler* scheduler) {
     scheduler_ = scheduler;
@@ -162,5 +161,3 @@ class ScheduledTaskTracker {
 
 } // namespace rpc
 } // namespace yb
-
-#endif // YB_RPC_SCHEDULER_H

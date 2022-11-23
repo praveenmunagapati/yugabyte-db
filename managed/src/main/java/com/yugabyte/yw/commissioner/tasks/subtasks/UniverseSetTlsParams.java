@@ -4,7 +4,7 @@ package com.yugabyte.yw.commissioner.tasks.subtasks;
 
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
 import com.yugabyte.yw.commissioner.tasks.UniverseTaskBase;
-import com.yugabyte.yw.common.CertificateHelper;
+import com.yugabyte.yw.common.certmgmt.EncryptionInTransitUtil;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.forms.UniverseTaskParams;
 import com.yugabyte.yw.models.Universe;
@@ -54,18 +54,21 @@ public class UniverseSetTlsParams extends UniverseTaskBase {
               throw new RuntimeException(errMsg);
             }
 
-            UniverseDefinitionTaskParams.UserIntent userIntent =
-                universeDetails.getPrimaryCluster().userIntent;
-            userIntent.enableNodeToNodeEncrypt = taskParams().enableNodeToNodeEncrypt;
-            userIntent.enableClientToNodeEncrypt = taskParams().enableClientToNodeEncrypt;
+            universeDetails.clusters.forEach(
+                cluster -> {
+                  cluster.userIntent.enableNodeToNodeEncrypt = taskParams().enableNodeToNodeEncrypt;
+                  cluster.userIntent.enableClientToNodeEncrypt =
+                      taskParams().enableClientToNodeEncrypt;
+                });
+
             universeDetails.allowInsecure = taskParams().allowInsecure;
             universeDetails.rootCA = null;
             universeDetails.clientRootCA = null;
             universeDetails.rootAndClientRootCASame = taskParams().rootAndClientRootCASame;
-            if (CertificateHelper.isRootCARequired(taskParams())) {
+            if (EncryptionInTransitUtil.isRootCARequired(taskParams())) {
               universeDetails.rootCA = taskParams().rootCA;
             }
-            if (CertificateHelper.isClientRootCARequired(taskParams())) {
+            if (EncryptionInTransitUtil.isClientRootCARequired(taskParams())) {
               universeDetails.clientRootCA = taskParams().clientRootCA;
             }
             universe.setUniverseDetails(universeDetails);

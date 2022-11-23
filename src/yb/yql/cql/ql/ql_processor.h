@@ -16,19 +16,24 @@
 // Notably, this does NOT apply to Reschedule implementation methods, which are called from
 // different ExecContexts, so non-thread-safe fields should not be referenced there.
 //--------------------------------------------------------------------------------------------------
-#ifndef YB_YQL_CQL_QL_QL_PROCESSOR_H_
-#define YB_YQL_CQL_QL_QL_PROCESSOR_H_
+#pragma once
 
-#include "yb/client/callbacks.h"
+#include "yb/client/client_fwd.h"
+
+#include "yb/server/server_fwd.h"
+
+#include "yb/util/mem_tracker.h"
+#include "yb/util/metrics_fwd.h"
+#include "yb/util/object_pool.h"
 
 #include "yb/yql/cql/ql/ql_fwd.h"
-#include "yb/yql/cql/ql/exec/executor.h"
-#include "yb/yql/cql/ql/parser/parser.h"
+#include "yb/yql/cql/ql/audit/audit_logger.h"
 #include "yb/yql/cql/ql/sem/analyzer.h"
+#include "yb/yql/cql/ql/exec/executor.h"
+#include "yb/yql/cql/ql/exec/rescheduler.h"
+#include "yb/yql/cql/ql/parser/parser_fwd.h"
 #include "yb/yql/cql/ql/util/ql_env.h"
-
-#include "yb/util/metrics.h"
-#include "yb/util/object_pool.h"
+#include "yb/yql/cql/ql/util/statement_result.h"
 
 namespace yb {
 namespace ql {
@@ -36,6 +41,7 @@ namespace ql {
 class QLMetrics {
  public:
   explicit QLMetrics(const scoped_refptr<yb::MetricEntity>& metric_entity);
+  ~QLMetrics();
 
   scoped_refptr<yb::Histogram> time_to_parse_ql_query_;
   scoped_refptr<yb::Histogram> time_to_analyze_ql_query_;
@@ -72,9 +78,9 @@ class QLProcessor : public Rescheduler {
 
   // Prepare a SQL statement (parse and analyze). A reference to the statement string is saved in
   // the parse tree.
-  CHECKED_STATUS Prepare(const std::string& stmt, ParseTree::UniPtr* parse_tree,
-                         bool reparsed = false, const MemTrackerPtr& mem_tracker = nullptr,
-                         const bool internal = false);
+  Status Prepare(const std::string& stmt, ParseTreePtr* parse_tree,
+                 bool reparsed = false, const MemTrackerPtr& mem_tracker = nullptr,
+                 const bool internal = false);
 
   // Check whether the current user has the required permissions to execute the statment.
   bool CheckPermissions(const ParseTree& parse_tree, StatementExecutedCallback cb);
@@ -91,7 +97,7 @@ class QLProcessor : public Rescheduler {
                 StatementExecutedCallback cb, bool reparsed = false);
 
  protected:
-  void SetCurrentSession(const QLSession::SharedPtr& ql_session) {
+  void SetCurrentSession(const QLSessionPtr& ql_session) {
     ql_env_.set_ql_session(ql_session);
   }
 
@@ -100,7 +106,7 @@ class QLProcessor : public Rescheduler {
   CoarseTimePoint GetDeadline() const override;
 
   // Check whether the current user has the required permissions for the parser tree node.
-  CHECKED_STATUS CheckNodePermissions(const TreeNode* tnode);
+  Status CheckNodePermissions(const TreeNode* tnode);
 
   //------------------------------------------------------------------------------------------------
   // Environment (YBClient) that processor uses to execute statement.
@@ -128,12 +134,12 @@ class QLProcessor : public Rescheduler {
   friend class TestQLProcessor;
 
   // Parse a SQL statement and generate a parse tree.
-  CHECKED_STATUS Parse(const std::string& stmt, ParseTree::UniPtr* parse_tree,
-                       bool reparsed = false, const MemTrackerPtr& mem_tracker = nullptr,
-                       const bool internal = false);
+  Status Parse(const std::string& stmt, ParseTreePtr* parse_tree,
+               bool reparsed = false, const MemTrackerPtr& mem_tracker = nullptr,
+               const bool internal = false);
 
   // Semantically analyze a parse tree.
-  CHECKED_STATUS Analyze(ParseTree::UniPtr* parse_tree);
+  Status Analyze(ParseTreePtr* parse_tree);
 
   void RunAsyncDone(const std::string& stmt, const StatementParameters& params,
                     const ParseTree* parse_tree, StatementExecutedCallback cb,
@@ -174,5 +180,3 @@ class QLProcessor : public Rescheduler {
 
 }  // namespace ql
 }  // namespace yb
-
-#endif  // YB_YQL_CQL_QL_QL_PROCESSOR_H_

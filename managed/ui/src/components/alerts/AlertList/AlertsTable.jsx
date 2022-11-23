@@ -7,10 +7,13 @@ import { YBPanelItem } from '../../panels';
 import { Link } from 'react-router';
 import AlertDetails from './AlertDetails';
 import { YBButton } from '../../common/forms/fields';
+import { isAvailable } from '../../../utils/LayoutUtils';
 
 import './AlertsTable.scss';
 import { toast } from 'react-toastify';
 import { Label } from 'react-bootstrap';
+import { timeFormatter } from '../../../utils/TableFormatters';
+import { useSearchParam } from 'react-use';
 
 const DEFAULT_SORT_COLUMN = 'createTime';
 const DEFAULT_SORT_DIRECTION = 'DESC';
@@ -20,7 +23,7 @@ const findValueforlabel = (labels, labelToFind) => {
   return label ? label.value : '';
 };
 
-export default function AlertsTable({ filters }) {
+export default function AlertsTable({ filters, customer }) {
   const [page, setPage] = useState(1);
   const [limit, setLimit] = useState(10);
   const [sortType, setSortType] = useState(DEFAULT_SORT_COLUMN);
@@ -45,7 +48,7 @@ export default function AlertsTable({ filters }) {
         const resp = await api.getAlert(variables.uuid);
 
         queryClient.invalidateQueries('alerts');
-        toast.success('Acknowledged!.');
+        toast.success('Acknowledged!');
         if (alertDetails !== null) {
           setAlertDetails(resp);
         }
@@ -60,13 +63,25 @@ export default function AlertsTable({ filters }) {
     resetPage();
   }, [filters.states, filters.severities, filters.configurationTypes, filters.sourceName]);
 
-  if (isLoading) return <YBLoading />;
+  const showDetails = useSearchParam('showDetails');
+  const { isLoading: isAlertDetailsLoading } = useQuery(
+    [showDetails],
+    () => api.getAlert(showDetails),
+    {
+      enabled: showDetails !== null,
+      onSuccess: (data) => {
+        setAlertDetails(data);
+      }
+    }
+  );
+
+  if (isLoading || isAlertDetailsLoading) return <YBLoading />;
 
   if (!data) return 'Unable to load data at the moment. Please try again later';
 
   const setSortOptions = (sortType, sortDirection) => {
     resetPage();
-    let sortColumn = sortType === 'labels' ? 'sourceName' : sortType;
+    const sortColumn = sortType === 'labels' ? 'sourceName' : sortType;
     setSortType(sortColumn);
     setSortDirection(sortDirection.toUpperCase());
   };
@@ -150,6 +165,7 @@ export default function AlertsTable({ filters }) {
                 dataField="createTime"
                 columnClassName="no-border name-column"
                 className="no-border"
+                dataFormat={timeFormatter}
                 width={'20%'}
                 dataSort
               >
@@ -164,36 +180,39 @@ export default function AlertsTable({ filters }) {
               >
                 Status
               </TableHeaderColumn>
-              <TableHeaderColumn
-                dataField="message"
-                columnClassName="no-border name-column"
-                className="no-border"
-                width={'10%'}
-                tdStyle={{ whiteSpace: 'normal' }}
-                dataFormat={(_, row) => {
-                  if (row.state !== 'ACTIVE') {
-                    return '';
-                  }
-                  return (
-                    <YBButton
-                      btnText="Acknowledge"
-                      btnStyle="link"
-                      btnClass="acknowledge-link-button"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        acknowledge.mutateAsync(row);
-                      }}
-                    />
-                  );
-                }}
-              >
-                Action
-              </TableHeaderColumn>
+              {isAvailable(customer.currentCustomer.data.features, 'alert.list.actions') && (
+                <TableHeaderColumn
+                  dataField="message"
+                  columnClassName="no-border name-column"
+                  className="no-border"
+                  width={'10%'}
+                  tdStyle={{ whiteSpace: 'normal' }}
+                  dataFormat={(_, row) => {
+                    if (row.state !== 'ACTIVE') {
+                      return '';
+                    }
+                    return (
+                      <YBButton
+                        btnText="Acknowledge"
+                        btnStyle="link"
+                        btnClass="acknowledge-link-button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          acknowledge.mutateAsync(row);
+                        }}
+                      />
+                    );
+                  }}
+                >
+                  Action
+                </TableHeaderColumn>
+              )}
             </BootstrapTable>
           </>
         }
       />
       <AlertDetails
+        customer={customer.currentCustomer}
         alertDetails={alertDetails}
         visible={alertDetails != null}
         onHide={() => {

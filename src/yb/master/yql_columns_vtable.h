@@ -11,10 +11,8 @@
 // under the License.
 //
 
-#ifndef YB_MASTER_YQL_COLUMNS_VTABLE_H
-#define YB_MASTER_YQL_COLUMNS_VTABLE_H
+#pragma once
 
-#include "yb/master/master.h"
 #include "yb/master/yql_virtual_table.h"
 
 namespace yb {
@@ -31,11 +29,11 @@ class YQLColumnsVTable : public YQLVirtualTable {
  protected:
   Schema CreateSchema() const;
  private:
-  CHECKED_STATUS PopulateColumnInformation(const Schema& schema,
-                                           const std::string& keyspace_name,
-                                           const std::string& table_name,
-                                           const size_t col_idx,
-                                           QLRow* const row) const;
+  Status PopulateColumnInformation(const Schema& schema,
+                                   const std::string& keyspace_name,
+                                   const std::string& table_name,
+                                   const size_t col_idx,
+                                   QLRow* const row) const;
   static constexpr const char* const kKeyspaceName = "keyspace_name";
   static constexpr const char* const kTableName = "table_name";
   static constexpr const char* const kColumnName = "column_name";
@@ -48,4 +46,3 @@ class YQLColumnsVTable : public YQLVirtualTable {
 
 }  // namespace master
 }  // namespace yb
-#endif // YB_MASTER_YQL_COLUMNS_VTABLE_H

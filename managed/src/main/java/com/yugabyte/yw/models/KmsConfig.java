@@ -12,12 +12,12 @@ package com.yugabyte.yw.models;
 
 import static io.swagger.annotations.ApiModelProperty.AccessMode.READ_ONLY;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.yugabyte.yw.common.kms.util.KeyProvider;
 import io.ebean.Finder;
 import io.ebean.Model;
 import io.ebean.annotation.DbJson;
+import io.ebean.annotation.Encrypted;
 import io.ebean.annotation.JsonIgnore;
 import io.swagger.annotations.ApiModel;
 import io.swagger.annotations.ApiModelProperty;
@@ -26,11 +26,14 @@ import java.util.UUID;
 import javax.persistence.Column;
 import javax.persistence.Entity;
 import javax.persistence.Id;
+import javax.persistence.Table;
+import javax.persistence.UniqueConstraint;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import play.data.validation.Constraints;
 
 @Entity
+@Table(uniqueConstraints = @UniqueConstraint(columnNames = {"customer_uuid", "name"}))
 @ApiModel(description = "KMS configuration")
 public class KmsConfig extends Model {
   public static final Logger LOG = LoggerFactory.getLogger(KmsConfig.class);
@@ -56,9 +59,10 @@ public class KmsConfig extends Model {
   @Constraints.Required
   @Column(nullable = false, columnDefinition = "TEXT")
   @DbJson
+  @Encrypted
   @JsonIgnore
   @ApiModelProperty(value = "Auth config")
-  public JsonNode authConfig;
+  public ObjectNode authConfig;
 
   @Constraints.Required
   @Column(nullable = false)
@@ -88,7 +92,7 @@ public class KmsConfig extends Model {
   public static ObjectNode getKMSAuthObj(UUID configUUID) {
     KmsConfig config = get(configUUID);
     if (config == null) return null;
-    return (ObjectNode) config.authConfig.deepCopy();
+    return config.authConfig;
   }
 
   public static List<KmsConfig> listKMSConfigs(UUID customerUUID) {
@@ -98,6 +102,10 @@ public class KmsConfig extends Model {
         .eq("customer_UUID", customerUUID)
         .eq("version", SCHEMA_VERSION)
         .findList();
+  }
+
+  public static List<KmsConfig> listAllKMSConfigs() {
+    return KmsConfig.find.query().where().eq("version", SCHEMA_VERSION).findList();
   }
 
   public static KmsConfig updateKMSConfig(UUID configUUID, ObjectNode updatedConfig) {

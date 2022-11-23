@@ -49,7 +49,9 @@ export default class TableDetail extends Component {
     const {
       customer,
       universe: { currentUniverse },
-      tables: { currentTableDetail }
+      tables: { currentTableDetail },
+      modal: { visibleModal },
+      featureFlags
     } = this.props;
     const width = this.state.dimensions.width;
     if (getPromiseState(currentUniverse).isSuccess()) {
@@ -92,6 +94,8 @@ export default class TableDetail extends Component {
           customer={customer}
           tableName={tableName}
           nodePrefixes={nodePrefixes}
+          visibleModal={visibleModal}
+          featureFlags={featureFlags}
         />
       );
     }
@@ -140,6 +144,7 @@ export default class TableDetail extends Component {
       isNonEmptyObject(currentUniverse.data) &&
       isNonEmptyObject(currentTableDetail.tableDetails)
     ) {
+
       universeState = (
         <Col lg={10} sm={8} xs={6}>
           {/* UNIVERSE NAME */}
@@ -159,6 +164,7 @@ export default class TableDetail extends Component {
               currentUniverse={currentUniverse.data}
               showLabelText={true}
               refreshUniverseData={this.getUniverseInfo}
+              shouldDisplayTaskButton={true}
             />
           </div>
         </Col>
@@ -172,7 +178,7 @@ export default class TableDetail extends Component {
           <Row>
             <Col lg={12}>
               <Measure onMeasure={this.onResize.bind(this)}>
-                <YBTabsPanel defaultTab={'schema'} id={'tables-tab-panel'}>
+                <YBTabsPanel defaultTab={'metrics'} id={'tables-tab-panel'}>
                   {tabElements}
                 </YBTabsPanel>
               </Measure>

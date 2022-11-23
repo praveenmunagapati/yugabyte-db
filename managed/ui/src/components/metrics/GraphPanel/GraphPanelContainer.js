@@ -1,5 +1,5 @@
 // Copyright (c) YugaByte, Inc.
-
+// TODO: Entire file needs to be removed once Top K metrics is tested and integrated fully (PLAT-5689)
 import { connect } from 'react-redux';
 
 import { GraphPanel } from '../../metrics';
@@ -29,7 +29,8 @@ const mapDispatchToProps = (dispatch) => {
 const mapStateToProps = (state) => {
   return {
     insecureLoginToken: state.customer.INSECURE_apiToken,
-    graph: state.graph
+    graph: state.graph,
+    customer: state.customer
   };
 };
 

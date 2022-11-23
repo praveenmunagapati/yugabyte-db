@@ -11,11 +11,12 @@
 // under the License.
 //
 
-#ifndef YB_CLIENT_CLIENT_ERROR_H
-#define YB_CLIENT_CLIENT_ERROR_H
+#pragma once
 
 #include "yb/util/enums.h"
+#include "yb/util/math_util.h"
 #include "yb/util/status.h"
+#include "yb/util/status_ec.h"
 
 namespace yb {
 namespace client {
@@ -48,5 +49,3 @@ bool IsRetryableClientError(const Status& status);
 
 } // namespace client
 } // namespace yb
-
-#endif // YB_CLIENT_CLIENT_ERROR_H

@@ -2,7 +2,9 @@
   "exclude": [
      "(\\.l$)",
      "(Makefile$)",
-     "(src/yb/common/ql_type.h$)",
+     "(src/yb/common/ql_type.cc$)",
+     "(src/yb/gutil/valgrind.h$)",
+     "(\\.ipynb$)",
      "(\\.sql$)",
      "(\\.txt$)",
      "(^src/postgres/.*$)",
@@ -11,9 +13,29 @@
      "(^managed/src/main/public/swagger-ui/)",
      "(^managed/src/main/resources/swagger.json$)",
      "(^managed/build.sbt$)",
-     "(^managed/src/main/resources/aws_pricing/.*$)"
+     "(^managed/src/main/resources/aws_pricing/.*$)",
+     "(^python/yb/test_data/.*[.](log|out)$)",
+     "(^managed/src/main/resources/metric/Dashboard.json$)",
+     "(^managed/src/main/resources/metric/recording_rules.yml$)",
+     "(^managed/devops/replicated.yml$)"
   ],
   "linters": {
+    "go-files": {
+        "type": "golint",
+        "include": "(^managed/.*\\.go$)",
+        "exclude": [
+            "(^managed/.*/third-party$)",
+            "(^managed/.*/generated$)"
+        ]
+    },
+    "go-files-length": {
+        "type": "text",
+        "text.max-line-length": 100,
+        "include": "(^managed/.*\\.go$)",
+        "severity": {
+            "2": "disabled"
+        }
+    },
     "script-and-regex.script": {
       "type": "script-and-regex",
       "include": "(^managed/.*\\.java$)",
@@ -26,6 +48,9 @@
       "type": "text",
       "text.max-line-length": 100,
       "exclude": [
+        "(^managed/.*\\.go$)",
+        "(^managed/.*/go.mod)",
+        "(^managed/.*/go.sum)",
         "(^managed/ui/)",
         "(^thirdparty/thirdparty_src_checksums[.]txt$)",
         "(^java/yb-client/src/test/java/org/yb/client/TestYBClient[.]java$)",

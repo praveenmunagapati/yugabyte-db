@@ -29,17 +29,13 @@
 // Example code is also available
 //   https://github.com/facebook/rocksdb/wiki/A-Tutorial-of-RocksDB-SST-formats#wiki-examples
 
-#ifndef YB_ROCKSDB_TABLE_H
-#define YB_ROCKSDB_TABLE_H
+#pragma once
 
 #include <memory>
 #include <string>
 #include <unordered_map>
 
-#include "yb/rocksdb/env.h"
-#include "yb/rocksdb/iterator.h"
 #include "yb/rocksdb/options.h"
-#include "yb/rocksdb/immutable_options.h"
 #include "yb/rocksdb/status.h"
 #include "yb/rocksdb/types.h"
 
@@ -57,7 +53,6 @@ class WritableFileWriter;
 struct EnvOptions;
 struct Options;
 
-using std::unique_ptr;
 using namespace yb::size_literals;
 
 enum ChecksumType : char {
@@ -234,7 +229,6 @@ struct BlockBasedTablePropertyNames {
 extern TableFactory* NewBlockBasedTableFactory(
     const BlockBasedTableOptions& table_options = BlockBasedTableOptions());
 
-#ifndef ROCKSDB_LITE
 
 enum EncodingType : char {
   // Always write full keys without any special encoding.
@@ -324,7 +318,6 @@ struct PlainTableOptions {
 extern TableFactory* NewPlainTableFactory(const PlainTableOptions& options =
                                               PlainTableOptions());
 
-#endif  // ROCKSDB_LITE
 
 class RandomAccessFileReader;
 
@@ -361,8 +354,8 @@ class TableFactory {
   // table_reader is the output table reader.
   virtual Status NewTableReader(
       const TableReaderOptions& table_reader_options,
-      unique_ptr<RandomAccessFileReader>&& base_file, uint64_t base_file_size,
-      unique_ptr<TableReader>* table_reader) const = 0;
+      std::unique_ptr<RandomAccessFileReader>&& base_file, uint64_t base_file_size,
+      std::unique_ptr<TableReader>* table_reader) const = 0;
 
   // Whether SST split into metadata and data file(s) is supported for writing.
   // There is a AdaptiveTableFactory inheriting common TableFactory interface. AdaptiveTableFactory
@@ -392,7 +385,7 @@ class TableFactory {
   // It is the caller's responsibility to keep the file open and close the file
   // after closing the table builder. compression_type is the compression type
   // to use in this table.
-  virtual TableBuilder* NewTableBuilder(
+  virtual std::unique_ptr<TableBuilder> NewTableBuilder(
       const TableBuilderOptions& table_builder_options,
       uint32_t column_family_id, WritableFileWriter* base_file,
       WritableFileWriter* data_file = nullptr) const = 0;
@@ -433,7 +426,6 @@ class TableFactory {
       const ReadOptions &read_options, const Slice &user_key) const { return nullptr; }
 };
 
-#ifndef ROCKSDB_LITE
 // Create a special table factory that can open either of the supported
 // table formats, based on setting inside the SST files. It should be used to
 // convert a DB from one table format to another.
@@ -446,8 +438,5 @@ extern TableFactory* NewAdaptiveTableFactory(
     std::shared_ptr<TableFactory> block_based_table_factory = nullptr,
     std::shared_ptr<TableFactory> plain_table_factory = nullptr);
 
-#endif  // ROCKSDB_LITE
 
 }  // namespace rocksdb
-
-#endif  // YB_ROCKSDB_TABLE_H

@@ -15,14 +15,15 @@ import static play.mvc.Http.Status.INTERNAL_SERVER_ERROR;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.google.common.collect.ImmutableList;
-import com.typesafe.config.Config;
 import com.yugabyte.yw.commissioner.Common;
 import com.yugabyte.yw.models.Provider;
 import com.yugabyte.yw.models.Region;
-import com.yugabyte.yw.common.config.RuntimeConfigFactory;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import javax.annotation.Nullable;
 import javax.inject.Singleton;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,16 +32,28 @@ import play.libs.Json;
 @Singleton
 public class CloudQueryHelper extends DevopsBase {
   public static final Logger LOG = LoggerFactory.getLogger(CloudQueryHelper.class);
+  private static final List<String> AWS_METADATA_TYPES =
+      ImmutableList.of("instance-id", "vpc-id", "privateIp", "region");
 
   private static final String YB_CLOUD_COMMAND_TYPE = "query";
   private static final String DEFAULT_IMAGE_KEY = "default_image";
+  public static final String ARCHITECTURE_KEY = "architecture";
+
+  private Map<Common.CloudType, JsonNode> cachedHostInfos = new ConcurrentHashMap<>();
 
   @Override
   protected String getCommandType() {
     return YB_CLOUD_COMMAND_TYPE;
   }
 
-  public JsonNode currentHostInfo(Common.CloudType cloudType, List<String> metadataTypes) {
+  public JsonNode getCurrentHostInfo(Common.CloudType cloudType) {
+    return cachedHostInfos.computeIfAbsent(
+        cloudType,
+        ct -> currentHostInfo(ct, ct == Common.CloudType.aws ? AWS_METADATA_TYPES : null));
+  }
+
+  private JsonNode currentHostInfo(
+      Common.CloudType cloudType, @Nullable List<String> metadataTypes) {
     List<String> commandArgs = new ArrayList<>();
     if (metadataTypes != null) {
       commandArgs.add("--metadata_types");
@@ -55,7 +68,7 @@ public class CloudQueryHelper extends DevopsBase {
     List<String> commandArgs = new ArrayList<>();
     if (p.code.equals("gcp")) {
       // TODO: ideally we shouldn't have this hardcoded string present in multiple places.
-      String potentialGcpNetwork = p.getConfig().get("CUSTOM_GCE_NETWORK");
+      String potentialGcpNetwork = p.getUnmaskedConfig().get("CUSTOM_GCE_NETWORK");
       if (potentialGcpNetwork != null && !potentialGcpNetwork.isEmpty()) {
         commandArgs.add("--network");
         commandArgs.add(potentialGcpNetwork);
@@ -125,9 +138,6 @@ public class CloudQueryHelper extends DevopsBase {
       commandArgs.add("--custom_payload");
       commandArgs.add(customPayload);
     }
-    if (runtimeConfigFactory.globalRuntimeConf().getBoolean("yb.internal.gcp_instances")) {
-      commandArgs.add("--gcp_internal");
-    }
     return execAndParseCommandRegion(regionList.get(0).uuid, "instance_types", commandArgs);
   }
 
@@ -156,6 +166,34 @@ public class CloudQueryHelper extends DevopsBase {
       }
     }
     return defaultImage;
+  }
+
+  public JsonNode queryImage(UUID regionUUID, String ybImage) {
+    List<String> commandArgs = new ArrayList<>();
+    commandArgs.add("--machine_image");
+    commandArgs.add(ybImage);
+    return execAndParseCommandRegion(regionUUID, "image", commandArgs);
+  }
+
+  public String getImageArchitecture(Region region) {
+
+    if (region.ybImage == null || region.ybImage == "") {
+      throw new PlatformServiceException(
+          INTERNAL_SERVER_ERROR, "ybImage not set for region " + region.code);
+    }
+    JsonNode result = queryImage(region.uuid, region.ybImage);
+
+    if (result.has("error")) {
+      throw new PlatformServiceException(
+          INTERNAL_SERVER_ERROR, "Error querying image architecture " + result.get("error"));
+    }
+
+    String arch = null;
+    JsonNode archJson = result.get(ARCHITECTURE_KEY);
+    if (archJson != null) {
+      arch = archJson.asText();
+    }
+    return arch;
   }
 
   public JsonNode queryVnet(UUID regionUUID) {

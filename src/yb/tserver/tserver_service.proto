@@ -35,9 +35,12 @@ package yb.tserver;
 
 option java_package = "org.yb.tserver";
 
-import "yb/common/common.proto";
+import "yb/common/common_types.proto";
+import "yb/common/transaction.proto";
+import "yb/tablet/tablet_types.proto";
+import "yb/tablet/operations.proto";
 import "yb/tserver/tserver.proto";
-import "yb/tablet/metadata.proto";
+import "yb/tserver/tserver_types.proto";
 
 service TabletServerService {
   rpc Write(WriteRequestPB) returns (WriteResponsePB);
@@ -67,6 +70,13 @@ service TabletServerService {
   rpc GetTransactionStatusAtParticipant(GetTransactionStatusAtParticipantRequestPB)
       returns (GetTransactionStatusAtParticipantResponsePB);
   rpc AbortTransaction(AbortTransactionRequestPB) returns (AbortTransactionResponsePB);
+  // Change the status tablet id used for a transaction.
+  rpc UpdateTransactionStatusLocation(UpdateTransactionStatusLocationRequestPB)
+      returns (UpdateTransactionStatusLocationResponsePB);
+  rpc UpdateTransactionWaitingForStatus(UpdateTransactionWaitingForStatusRequestPB)
+      returns (UpdateTransactionWaitingForStatusResponsePB);
+  rpc ProbeTransactionDeadlock(ProbeTransactionDeadlockRequestPB)
+      returns (ProbeTransactionDeadlockResponsePB);
   rpc Truncate(TruncateRequestPB) returns (TruncateResponsePB);
   rpc GetTabletStatus(GetTabletStatusRequestPB) returns (GetTabletStatusResponsePB);
   rpc GetMasterAddresses(GetMasterAddressesRequestPB) returns (GetMasterAddressesResponsePB);
@@ -75,12 +85,12 @@ service TabletServerService {
 
   rpc IsTabletServerReady(IsTabletServerReadyRequestPB) returns (IsTabletServerReadyResponsePB);
 
-  // Takes precreated transaction from this tserver.
-  rpc TakeTransaction(TakeTransactionRequestPB) returns (TakeTransactionResponsePB);
-
   rpc GetSplitKey(GetSplitKeyRequestPB) returns (GetSplitKeyResponsePB);
 
   rpc GetSharedData(GetSharedDataRequestPB) returns (GetSharedDataResponsePB);
+
+  rpc GetTserverCatalogVersionInfo(GetTserverCatalogVersionInfoRequestPB)
+      returns (GetTserverCatalogVersionInfoResponsePB);
 }
 
 message GetLogLocationRequestPB {
@@ -139,9 +149,10 @@ message ImportDataResponsePB {
 
 message UpdateTransactionRequestPB {
   optional bytes tablet_id = 1;
-  optional TransactionStatePB state = 2;
+  optional tablet.TransactionStatePB state = 2;
 
   optional fixed64 propagated_hybrid_time = 3;
+  optional bool is_external = 4;
 }
 
 message UpdateTransactionResponsePB {
@@ -155,6 +166,7 @@ message GetTransactionStatusRequestPB {
   optional bytes tablet_id = 1;
   repeated bytes transaction_id = 2;
   optional fixed64 propagated_hybrid_time = 3;
+  optional fixed64 external_hybrid_time = 4;
 }
 
 message GetTransactionStatusResponsePB {
@@ -176,6 +188,57 @@ message GetTransactionStatusResponsePB {
   repeated fixed64 coordinator_safe_time = 6;
 
   repeated AbortedSubTransactionSetPB aborted_subtxn_set = 7;
+}
+
+message UpdateTransactionWaitingForStatusRequestPB {
+  message BlockingTransaction {
+    optional bytes transaction_id = 1;
+    optional bytes status_tablet_id = 2;
+  }
+  message WaitingTransaction {
+    optional bytes transaction_id = 1;
+    repeated BlockingTransaction blocking_transaction = 2;
+    optional fixed64 wait_start_time = 3;
+  }
+
+  optional fixed64 propagated_hybrid_time = 1;
+
+  optional bytes tablet_id = 2;
+
+  repeated WaitingTransaction waiting_transactions = 3;
+}
+
+message UpdateTransactionWaitingForStatusResponsePB {
+  optional fixed64 propagated_hybrid_time = 1;
+
+  optional TabletServerErrorPB error = 2;
+}
+
+message ProbeTransactionDeadlockRequestPB {
+  optional fixed64 propagated_hybrid_time = 1;
+
+  optional bytes tablet_id = 2;
+
+  optional bytes waiting_txn_id = 3;
+
+  optional bytes blocking_txn_id = 4;
+
+  optional bytes detector_uuid = 5;
+
+  optional fixed32 probe_num = 6;
+
+  optional fixed32 min_probe_num = 7;
+}
+
+message ProbeTransactionDeadlockResponsePB {
+  optional fixed64 propagated_hybrid_time = 1;
+
+  optional TabletServerErrorPB error = 2;
+
+  // If empty, no deadlock was detected. Otherwise, includes reverse ordered list of the deadlock
+  // participants detected by the probe recipient. The probe sender should append its own txn to
+  // this list before responding to its own probe sender.
+  repeated bytes deadlocked_txn_ids = 3;
 }
 
 message GetTransactionStatusAtParticipantRequestPB {
@@ -213,16 +276,24 @@ message AbortTransactionResponsePB {
   optional fixed64 coordinator_safe_time = 5;
 }
 
-message TakeTransactionRequestPB {
+message UpdateTransactionStatusLocationRequestPB {
+  optional bytes tablet_id = 1;
+  optional bytes transaction_id = 2;
+  optional fixed64 propagated_hybrid_time = 3;
+
+  // ID of new status tablet that the transaction will be using.
+  optional bytes new_status_tablet_id = 4;
 }
 
-message TakeTransactionResponsePB {
-  optional TransactionMetadataPB metadata = 1;
+message UpdateTransactionStatusLocationResponsePB {
+  // Error message, if any.
+  optional TabletServerErrorPB error = 1;
 }
 
 message GetSplitKeyRequestPB {
   required bytes tablet_id = 1;
   optional fixed64 propagated_hybrid_time = 2;
+  optional bool is_manual_split = 3;
 }
 
 message GetSplitKeyResponsePB {
@@ -237,4 +308,24 @@ message GetSharedDataRequestPB {
 
 message GetSharedDataResponsePB {
   optional bytes data = 1;
+}
+
+message GetTserverCatalogVersionInfoRequestPB {
+  // We ask for the catalog version of all databases from the tserver.
+}
+
+message GetTserverCatalogVersionInfoResponsePB {
+  // An entry for each database catalog version info.
+  message Entry {
+    // The Postgres OID of this database.
+    optional uint32 db_oid = 1;
+    // The index of the tserver shared memory catalog version array for this database.
+    optional int32 shm_index = 2;
+    // The current catalog version for this database.
+    optional uint64 current_version = 3;
+  }
+
+  // Error message, if any.
+  optional TabletServerErrorPB error = 1;
+  repeated Entry entries = 2;
 }

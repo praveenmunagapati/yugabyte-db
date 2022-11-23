@@ -6,23 +6,19 @@ import static com.yugabyte.yw.commissioner.tasks.UniverseDefinitionTaskBase.chec
 import static com.yugabyte.yw.commissioner.tasks.UniverseDefinitionTaskBase.getNodeName;
 import static org.hamcrest.CoreMatchers.allOf;
 import static org.hamcrest.CoreMatchers.notNullValue;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.StringContains.containsString;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
 import static org.junit.Assert.fail;
 
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
 import com.yugabyte.yw.common.ApiUtils;
-import com.yugabyte.yw.forms.ITaskParams;
-import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.Cluster;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.ClusterType;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.UserIntent;
 import com.yugabyte.yw.models.helpers.NodeDetails;
 import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
 import junitparams.JUnitParamsRunner;
-import junitparams.Parameters;
-import junitparams.naming.TestCaseName;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -40,7 +36,7 @@ public class UniverseDefinitionTaskBaseTest {
   private NodeDetails myNode;
   private UserIntent userIntent;
 
-  @Mock BaseTaskDependencies baseTaskDependencies;
+  @Mock private BaseTaskDependencies baseTaskDependencies;
 
   @Before
   public void setUp() {
@@ -203,55 +199,6 @@ public class UniverseDefinitionTaskBaseTest {
       fail();
     } catch (RuntimeException e) {
       assertThat(e.getMessage(), allOf(notNullValue(), containsString("Duplicate universe")));
-    }
-  }
-
-  @Test
-  // @Parameters({"false, false", "true, true", "true, false", "false, true"})
-  @Parameters({
-    "false, true, false",
-    "false, true, true",
-    "true, false, false",
-    "true, false, true",
-    "true, true, false",
-    "true, true, true"
-  })
-  // @TestCaseName("{method}(YSQL:{0}, YEDIS:{1})")
-  @TestCaseName("{method}(YCQL:{0}, YSQL:{1}, YEDIS:{2})")
-  public void doTestAddDefaultGFlags(boolean enableYCQL, boolean enableYSQL, boolean enableYEDIS) {
-    UniverseDefinitionTaskBaseFake instance = new UniverseDefinitionTaskBaseFake();
-    instance.taskParams = new UniverseDefinitionTaskParams();
-    ((UniverseDefinitionTaskParams) instance.taskParams).clusters.add(myCluster);
-    myCluster.userIntent.enableYEDIS = enableYEDIS;
-    myCluster.userIntent.enableYSQL = enableYSQL;
-    myCluster.userIntent.enableYCQL = enableYCQL;
-
-    assertEquals(0, userIntent.tserverGFlags.size());
-    instance.addDefaultGFlags(userIntent);
-    assertEquals(userIntent, instance.taskParams().getPrimaryCluster().userIntent);
-    assertEquals(enableYCQL, userIntent.tserverGFlags.containsKey("cql_proxy_webserver_port"));
-    assertEquals(enableYSQL, userIntent.tserverGFlags.containsKey("pgsql_proxy_webserver_port"));
-    assertEquals(enableYEDIS, userIntent.tserverGFlags.containsKey("redis_proxy_webserver_port"));
-    assertEquals(!enableYEDIS, userIntent.tserverGFlags.containsKey("start_redis_proxy"));
-    if (!enableYEDIS) {
-      assertEquals("false", userIntent.tserverGFlags.get("start_redis_proxy"));
-    }
-  }
-
-  private class UniverseDefinitionTaskBaseFake extends UniverseDefinitionTaskBase {
-    // The params for this task. Overrides visibility
-    public ITaskParams taskParams;
-
-    protected UniverseDefinitionTaskBaseFake() {
-      super(baseTaskDependencies);
-    }
-
-    @Override
-    public void run() {}
-
-    @Override
-    protected UniverseDefinitionTaskParams taskParams() {
-      return (UniverseDefinitionTaskParams) taskParams;
     }
   }
 }

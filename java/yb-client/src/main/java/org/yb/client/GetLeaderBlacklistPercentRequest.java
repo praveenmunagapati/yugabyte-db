@@ -13,20 +13,11 @@
 
 package org.yb.client;
 
-import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
-import org.jboss.netty.buffer.ChannelBuffer;
-
+import io.netty.buffer.ByteBuf;
 import org.yb.annotations.InterfaceAudience;
-import org.yb.Common.HostPortPB;
-import org.yb.consensus.Consensus;
-import org.yb.consensus.Metadata;
-import org.yb.consensus.Metadata.RaftPeerPB;
-import org.yb.master.Master;
+import org.yb.master.MasterClusterOuterClass;
 import org.yb.util.Pair;
-
-import java.util.ArrayList;
-import java.util.List;
 
 @InterfaceAudience.Public
 class GetLeaderBlacklistPercentRequest extends YRpc<GetLoadMovePercentResponse> {
@@ -35,10 +26,10 @@ class GetLeaderBlacklistPercentRequest extends YRpc<GetLoadMovePercentResponse> 
   }
 
   @Override
-  ChannelBuffer serialize(Message header) {
+  ByteBuf serialize(Message header) {
     assert header.isInitialized();
-    final Master.GetLeaderBlacklistPercentRequestPB.Builder builder =
-      Master.GetLeaderBlacklistPercentRequestPB.newBuilder();
+    final MasterClusterOuterClass.GetLeaderBlacklistPercentRequestPB.Builder builder =
+      MasterClusterOuterClass.GetLeaderBlacklistPercentRequestPB.newBuilder();
 
     return toChannelBuffer(header, builder.build());
   }
@@ -53,8 +44,8 @@ class GetLeaderBlacklistPercentRequest extends YRpc<GetLoadMovePercentResponse> 
   Pair<GetLoadMovePercentResponse, Object> deserialize(
       CallResponse callResponse,
       String masterUUID) throws Exception {
-    final Master.GetLoadMovePercentResponsePB.Builder respBuilder =
-      Master.GetLoadMovePercentResponsePB.newBuilder();
+    final MasterClusterOuterClass.GetLoadMovePercentResponsePB.Builder respBuilder =
+      MasterClusterOuterClass.GetLoadMovePercentResponsePB.newBuilder();
     readProtobuf(callResponse.getPBMessage(), respBuilder);
     boolean hasErr = respBuilder.hasError();
     GetLoadMovePercentResponse response =

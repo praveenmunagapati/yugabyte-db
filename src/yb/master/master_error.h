@@ -11,12 +11,12 @@
 // under the License.
 //
 
-#ifndef YB_MASTER_MASTER_ERROR_H
-#define YB_MASTER_MASTER_ERROR_H
+#pragma once
 
-#include "yb/master/master.pb.h"
+#include "yb/master/master_types.pb.h"
 
-#include "yb/util/status.h"
+#include "yb/util/status_fwd.h"
+#include "yb/util/status_ec.h"
 
 namespace yb {
 namespace master {
@@ -34,5 +34,3 @@ typedef StatusErrorCodeImpl<MasterErrorTag> MasterError;
 
 } // namespace master
 } // namespace yb
-
-#endif // YB_MASTER_MASTER_ERROR_H

@@ -11,15 +11,14 @@
 // under the License.
 //
 
-#ifndef YB_RPC_TCP_STREAM_H
-#define YB_RPC_TCP_STREAM_H
+#pragma once
 
 #include <ev++.h>
 
-#include "yb/rpc/growable_buffer.h"
 #include "yb/rpc/stream.h"
 
 #include "yb/util/net/socket.h"
+#include "yb/util/mem_tracker.h"
 #include "yb/util/ref_cnt_buffer.h"
 
 namespace yb {
@@ -29,7 +28,7 @@ class Counter;
 namespace rpc {
 
 struct TcpStreamSendingData {
-  typedef boost::container::small_vector<RefCntBuffer, 4> SendingBytes;
+  typedef boost::container::small_vector<RefCntSlice, 4> SendingBytes;
 
   TcpStreamSendingData(OutboundDataPtr data_, const MemTrackerPtr& mem_tracker);
 
@@ -72,12 +71,12 @@ class TcpStream : public Stream {
     bool only_heartbeats;
   };
 
-  CHECKED_STATUS Start(bool connect, ev::loop_ref* loop, StreamContext* context) override;
+  Status Start(bool connect, ev::loop_ref* loop, StreamContext* context) override;
   void Close() override;
   void Shutdown(const Status& status) override;
   Result<size_t> Send(OutboundDataPtr data) override;
-  CHECKED_STATUS TryWrite() override;
-  void Cancelled(size_t handle) override;
+  Status TryWrite() override;
+  bool Cancelled(size_t handle) override;
 
   bool Idle(std::string* reason_not_idle) override;
   bool IsConnected() override { return connected_; }
@@ -92,13 +91,13 @@ class TcpStream : public Stream {
 
   void ParseReceived() override;
 
-  CHECKED_STATUS DoWrite();
+  Status DoWrite();
   void HandleOutcome(const Status& status, bool enqueue);
   void ClearSending(const Status& status);
 
   void Handler(ev::io& watcher, int revents); // NOLINT
-  CHECKED_STATUS ReadHandler();
-  CHECKED_STATUS WriteHandler(bool just_connected);
+  Status ReadHandler();
+  Status WriteHandler(bool just_connected);
 
   Result<bool> Receive();
   // Try to parse received data and process it.
@@ -111,7 +110,7 @@ class TcpStream : public Stream {
 
   void DelayConnectHandler(ev::timer& watcher, int revents); // NOLINT
 
-  CHECKED_STATUS DoStart(ev::loop_ref* loop, bool connect);
+  Status DoStart(ev::loop_ref* loop, bool connect);
 
   StreamReadBuffer& ReadBuffer() {
     return context_->ReadBuffer();
@@ -157,5 +156,3 @@ class TcpStream : public Stream {
 
 } // namespace rpc
 } // namespace yb
-
-#endif // YB_RPC_TCP_STREAM_H

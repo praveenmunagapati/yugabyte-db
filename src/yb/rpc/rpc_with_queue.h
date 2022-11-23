@@ -13,15 +13,19 @@
 //
 //
 
-#ifndef YB_RPC_RPC_WITH_QUEUE_H
-#define YB_RPC_RPC_WITH_QUEUE_H
+#pragma once
+
+#include <stdint.h>
 
 #include <functional>
 #include <mutex>
+#include <type_traits>
 #include <unordered_set>
 
 #include "yb/rpc/connection_context.h"
 #include "yb/rpc/inbound_call.h"
+
+#include "yb/util/size_literals.h"
 
 namespace yb {
 namespace rpc {
@@ -29,8 +33,8 @@ namespace rpc {
 class QueueableInboundCall : public InboundCall {
  public:
   QueueableInboundCall(ConnectionPtr conn, size_t weight_in_bytes,
-                       CallProcessedListener call_processed_listener)
-      : InboundCall(std::move(conn), nullptr /* rpc_metrics */, std::move(call_processed_listener)),
+                       CallProcessedListener* call_processed_listener)
+      : InboundCall(std::move(conn), nullptr /* rpc_metrics */, call_processed_listener),
         weight_in_bytes_(weight_in_bytes) {}
 
   void SetHasReply() {
@@ -59,17 +63,14 @@ class QueueableInboundCall : public InboundCall {
   const size_t weight_in_bytes_;
 };
 
-class ConnectionContextWithQueue : public ConnectionContextBase {
+class ConnectionContextWithQueue : public ConnectionContextBase,
+                                   public InboundCall::CallProcessedListener {
  protected:
   explicit ConnectionContextWithQueue(
       size_t max_concurrent_calls,
       size_t max_queued_bytes);
 
   ~ConnectionContextWithQueue();
-
-  InboundCall::CallProcessedListener call_processed_listener() {
-    return std::bind(&ConnectionContextWithQueue::CallProcessed, this, std::placeholders::_1);
-  }
 
   bool can_enqueue() const {
     return queued_bytes_ <= max_queued_bytes_;
@@ -90,7 +91,7 @@ class ConnectionContextWithQueue : public ConnectionContextBase {
   void QueueResponse(const ConnectionPtr& conn, InboundCallPtr call) override;
   void ListenIdle(IdleListener listener) override { idle_listener_ = std::move(listener); }
 
-  void CallProcessed(InboundCall* call);
+  void CallProcessed(InboundCall* call) override;
   void FlushOutboundQueue(Connection* conn);
   void FlushOutboundQueueAborted(const Status& status);
 
@@ -116,5 +117,3 @@ class ConnectionContextWithQueue : public ConnectionContextBase {
 
 } // namespace rpc
 } // namespace yb
-
-#endif // YB_RPC_RPC_WITH_QUEUE_H

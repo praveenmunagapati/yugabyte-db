@@ -37,7 +37,19 @@
 #define YB_TEXTARRAYOID 1009 /* text[] */
 #define YB_ACLITEMARRAYOID 1034 /* aclitem[] */
 
+/*
+ * Special type entity used for ybgin null categories.
+ */
+extern const YBCPgTypeEntity YBCGinNullTypeEntity;
+
 extern const YBCPgTypeEntity *YbDataTypeFromOidMod(int attnum, Oid type_id);
+
+/*
+ * For non-primitive types (the ones without a corresponding YBCPgTypeEntity),
+ * returns the corresponding primitive type's oid.
+ */
+extern const Oid YbGetPrimitiveTypeOid(Oid type_id, char typtype,
+									   Oid typbasetype);
 
 /*
  * Returns true if we are allow the given type to be used for key columns such as primary key or

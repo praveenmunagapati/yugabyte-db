@@ -30,14 +30,22 @@
 // under the License.
 //
 
-#include "yb/master/sys_catalog-test_base.h"
-
 #include <algorithm>
 #include <memory>
 #include <vector>
 
+#include "yb/common/schema.h"
+#include "yb/common/wire_protocol.h"
+
 #include "yb/gutil/stl_util.h"
+
+#include "yb/integration-tests/external_mini_cluster.h"
 #include "yb/master/async_rpc_tasks.h"
+#include "yb/master/catalog_manager.h"
+#include "yb/master/master_cluster.pb.h"
+#include "yb/master/sys_catalog-test_base.h"
+#include "yb/master/sys_catalog.h"
+
 #include "yb/util/net/sockaddr.h"
 #include "yb/util/status.h"
 
@@ -45,6 +53,7 @@ using std::make_shared;
 using std::string;
 using std::shared_ptr;
 using std::unique_ptr;
+using std::vector;
 using yb::rpc::Messenger;
 using yb::rpc::MessengerBuilder;
 using yb::rpc::RpcController;
@@ -81,14 +90,15 @@ class TestTableLoader : public Visitor<PersistentTableInfo> {
 };
 
 TEST_F(SysCatalogTest, TestPrepareDefaultClusterConfig) {
-
-  FLAGS_cluster_uuid = "invalid_uuid";
-
-  CatalogManager catalog_manager(nullptr);
-  {
-    CatalogManager::LockGuard lock(catalog_manager.mutex_);
-    ASSERT_NOK(catalog_manager.PrepareDefaultClusterConfig(0));
-  }
+  // Verify that a cluster cannot be created with an invalid uuid.
+  ExternalMiniClusterOptions opts;
+  opts.num_masters = 1;
+  opts.num_tablet_servers = 1;
+  opts.extra_master_flags.push_back("--FLAGS_cluster_uuid=invalid_uuid");
+  auto external_mini_cluster = std::make_unique<ExternalMiniCluster>(opts);
+  Status s = external_mini_cluster->Start();
+  ASSERT_NOK(s);
+  ASSERT_STR_CONTAINS(s.message().ToBuffer(), "Unable to start Master");
 
   auto dir = GetTestPath("Master") + "valid_cluster_uuid_test";
   ASSERT_OK(Env::Default()->CreateDir(dir));
@@ -97,7 +107,7 @@ TEST_F(SysCatalogTest, TestPrepareDefaultClusterConfig) {
 
 
   // Test that config.cluster_uuid gets set to the value that we specify through flag cluster_uuid.
-  FLAGS_cluster_uuid = to_string(Uuid::Generate());
+  FLAGS_cluster_uuid = Uuid::Generate().ToString();
   ASSERT_OK(mini_master->Start());
   auto master = mini_master->master();
   ASSERT_OK(master->WaitUntilCatalogManagerIsLeaderAndReadyForTests());
@@ -126,8 +136,7 @@ TEST_F(SysCatalogTest, TestPrepareDefaultClusterConfig) {
   ASSERT_FALSE(config.cluster_uuid().empty());
 
   // Check that the cluster uuid is valid.
-  Uuid uuid;
-  ASSERT_OK(uuid.FromString(config.cluster_uuid()));
+  ASSERT_OK(Uuid::FromString(config.cluster_uuid()));
 
   mini_master->Shutdown();
 }
@@ -399,22 +408,18 @@ class TestClusterConfigLoader : public Visitor<PersistentClusterConfigInfo> {
   virtual Status Visit(
       const std::string& fake_id, const SysClusterConfigEntryPB& metadata) override {
     CHECK(!config_info) << "We either got multiple config_info entries, or we didn't Reset()";
-    config_info = new ClusterConfigInfo();
+    config_info = std::make_shared<ClusterConfigInfo>();
     auto l = config_info->LockForWrite();
     l.mutable_data()->pb.CopyFrom(metadata);
     l.Commit();
-    config_info->AddRef();
     return Status::OK();
   }
 
   void Reset() {
-    if (config_info) {
-      config_info->Release();
-      config_info = nullptr;
-    }
+    config_info.reset();
   }
 
-  ClusterConfigInfo* config_info = nullptr;
+  std::shared_ptr<ClusterConfigInfo> config_info = nullptr;
 };
 
 // Test the sys-catalog tables basic operations (add, update, delete, visit)
@@ -433,7 +438,7 @@ TEST_F(SysCatalogTest, TestSysCatalogPlacementOperations) {
   // Test modifications directly through the Sys catalog API.
 
   // Create a config_info block.
-  scoped_refptr<ClusterConfigInfo> config_info(new ClusterConfigInfo());
+  std::shared_ptr<ClusterConfigInfo> config_info(make_shared<ClusterConfigInfo>());
   {
     auto l = config_info->LockForWrite();
     auto pb = l.mutable_data()
@@ -447,7 +452,7 @@ TEST_F(SysCatalogTest, TestSysCatalogPlacementOperations) {
     pb->set_min_num_replicas(100);
 
     // Set it in the sys_catalog. It already has the default entry, so we use update.
-    ASSERT_OK(sys_catalog->Upsert(kLeaderTerm, config_info));
+    ASSERT_OK(sys_catalog->Upsert(kLeaderTerm, config_info.get()));
     l.Commit();
   }
 
@@ -455,7 +460,7 @@ TEST_F(SysCatalogTest, TestSysCatalogPlacementOperations) {
   loader->Reset();
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   ASSERT_TRUE(loader->config_info);
-  ASSERT_METADATA_EQ(config_info.get(), loader->config_info);
+  ASSERT_METADATA_EQ(config_info.get(), loader->config_info.get());
 
   {
     auto l = config_info->LockForWrite();
@@ -468,7 +473,7 @@ TEST_F(SysCatalogTest, TestSysCatalogPlacementOperations) {
     cloud_info->set_placement_cloud("cloud2");
     pb->set_min_num_replicas(200);
     // Update it in the sys_catalog.
-    ASSERT_OK(sys_catalog->Upsert(kLeaderTerm, config_info));
+    ASSERT_OK(sys_catalog->Upsert(kLeaderTerm, config_info.get()));
     l.Commit();
   }
 
@@ -476,7 +481,7 @@ TEST_F(SysCatalogTest, TestSysCatalogPlacementOperations) {
   loader->Reset();
   ASSERT_OK(sys_catalog->Visit(loader.get()));
   ASSERT_TRUE(loader->config_info);
-  ASSERT_METADATA_EQ(config_info.get(), loader->config_info);
+  ASSERT_METADATA_EQ(config_info.get(), loader->config_info.get());
 
   // Test data through the CatalogManager API.
 
@@ -821,6 +826,7 @@ TEST_F(SysCatalogTest, TestSysCatalogSysConfigOperations) {
   //   a. "security-config" entry is set up with roles_version = 0.
   //   b. "ysql-catalog-configuration" entry is set up with version = 0 and the transactional YSQL
   //      sys catalog flag is set to true.
+  //   c. "transaction-tables-config" entry is set up with version = 0.
   scoped_refptr<SysConfigInfo> security_config = new SysConfigInfo(kSecurityConfigType);
   {
     auto l = security_config->LockForWrite();
@@ -835,11 +841,20 @@ TEST_F(SysCatalogTest, TestSysCatalogSysConfigOperations) {
     ysql_catalog_config_pb.set_transactional_sys_catalog_enabled(true);
     l.Commit();
   }
+  scoped_refptr<SysConfigInfo> transaction_tables_config =
+      new SysConfigInfo(kTransactionTablesConfigType);
+  {
+    auto l = transaction_tables_config->LockForWrite();
+    auto& transaction_tables_config_pb = *l.mutable_data()->pb.mutable_transaction_tables_config();
+    transaction_tables_config_pb.set_version(0);
+    l.Commit();
+  }
   unique_ptr<TestSysConfigLoader> loader(new TestSysConfigLoader());
   ASSERT_OK(sys_catalog->Visit(loader.get()));
-  ASSERT_EQ(2, loader->sys_configs.size());
+  ASSERT_EQ(3, loader->sys_configs.size());
   ASSERT_METADATA_EQ(security_config.get(), loader->sys_configs[0]);
-  ASSERT_METADATA_EQ(ysql_catalog_config.get(), loader->sys_configs[1]);
+  ASSERT_METADATA_EQ(transaction_tables_config.get(), loader->sys_configs[1]);
+  ASSERT_METADATA_EQ(ysql_catalog_config.get(), loader->sys_configs[2]);
 
   // 2. Add a new SysConfigEntryPB and verify it shows up.
   scoped_refptr<SysConfigInfo> test_config = new SysConfigInfo("test-security-configuration");
@@ -853,18 +868,20 @@ TEST_F(SysCatalogTest, TestSysCatalogSysConfigOperations) {
   }
   loader->Reset();
   ASSERT_OK(sys_catalog->Visit(loader.get()));
-  ASSERT_EQ(3, loader->sys_configs.size());
+  ASSERT_EQ(4, loader->sys_configs.size());
   ASSERT_METADATA_EQ(security_config.get(), loader->sys_configs[0]);
   ASSERT_METADATA_EQ(test_config.get(), loader->sys_configs[1]);
-  ASSERT_METADATA_EQ(ysql_catalog_config.get(), loader->sys_configs[2]);
+  ASSERT_METADATA_EQ(transaction_tables_config.get(), loader->sys_configs[2]);
+  ASSERT_METADATA_EQ(ysql_catalog_config.get(), loader->sys_configs[3]);
 
   // 2. Remove the SysConfigEntry and verify that it got removed.
   ASSERT_OK(sys_catalog->Delete(kLeaderTerm, test_config));
   loader->Reset();
   ASSERT_OK(sys_catalog->Visit(loader.get()));
-  ASSERT_EQ(2, loader->sys_configs.size());
+  ASSERT_EQ(3, loader->sys_configs.size());
   ASSERT_METADATA_EQ(security_config.get(), loader->sys_configs[0]);
-  ASSERT_METADATA_EQ(ysql_catalog_config.get(), loader->sys_configs[1]);
+  ASSERT_METADATA_EQ(transaction_tables_config.get(), loader->sys_configs[1]);
+  ASSERT_METADATA_EQ(ysql_catalog_config.get(), loader->sys_configs[2]);
 }
 
 class TestRoleLoader : public Visitor<PersistentRoleInfo> {
@@ -1064,117 +1081,6 @@ TEST_F(SysCatalogTest, TestCatalogManagerTasksTracker) {
 
   // Cleanup tasks.
   table->AbortTasksAndClose();
-}
-
-// Test the tablespace info parsing.
-TEST_F(SysCatalogTest, TestTablespaceJsonProcessing) {
-  SysCatalogTable* const sys_catalog = master_->catalog_manager()->sys_catalog();
-
-  // Variables to be used throughout the test.
-  const string& valid_json =
-      "{\"num_replicas\":3,\"placement_blocks\":"
-      "[{\"cloud\":\"c1\",\"region\":\"r1\",\"zone\":\"z1\",\"min_num_replicas\":2},"
-      "{\"cloud\":\"c2\",\"region\":\"r2\",\"zone\":\"z2\",\"min_num_replicas\":1}]}";
-
-  QLValuePB option, invalid_option;
-  option.set_string_value("replica_placement=" + valid_json);
-  invalid_option.set_string_value("read_replica_placement=" + valid_json);
-
-  vector<QLValuePB> options;
-
-  // Tablespace id does not matter, use any string.
-  const TablespaceId tablespace_id = "12345";
-
-  // Negative tests.
-  // 1. Empty input.
-  ASSERT_NOK(sys_catalog->ParseReplicationInfo(tablespace_id, options));
-
-  // 2. Invalid number of options.
-  options.push_back(option);
-  options.push_back(invalid_option);
-  ASSERT_NOK(sys_catalog->ParseReplicationInfo(tablespace_id, options));
-
-  // 3. Invalid option name.
-  options.clear();
-  options.push_back(invalid_option);
-  ASSERT_NOK(sys_catalog->ParseReplicationInfo(tablespace_id, options));
-
-  // 4. Empty json.
-  options.clear();
-  QLValuePB opt_empty_value;
-  opt_empty_value.set_string_value("replica_placement=[{}]");
-  options.emplace_back(opt_empty_value);
-  ASSERT_NOK(sys_catalog->ParseReplicationInfo(tablespace_id, options));
-
-  // 5. Missing num_replicas field.
-  options.clear();
-  QLValuePB invalid_json_option;
-  invalid_json_option.set_string_value("replica_placement={\"placement_blocks\":"
-      "[{\"cloud\":\"c1\",\"region\":\"r1\",\"zone\":\"z1\",\"min_num_replicas\":3}]}");
-  options.emplace_back(invalid_json_option);
-  ASSERT_NOK(sys_catalog->ParseReplicationInfo(tablespace_id, options));
-
-  // 6. Invalid value for num_replicas field.
-  options.clear();
-  invalid_json_option.set_string_value(
-      "replica_placement={\"num_replicas\":\"abc\",\"placement_blocks\":"
-      "[{\"cloud\":\"c1\",\"region\":\"r1\",\"zone\":\"z1\",\"min_num_replicas\":3}]}");
-  options.emplace_back(invalid_json_option);
-  ASSERT_NOK(sys_catalog->ParseReplicationInfo(tablespace_id, options));
-
-  // 7. Missing placement blocks field.
-  options.clear();
-  invalid_json_option.set_string_value("replica_placement={\"num_replicas\":3}");
-  options.emplace_back(invalid_json_option);
-  ASSERT_NOK(sys_catalog->ParseReplicationInfo(tablespace_id, options));
-
-  // 8. Missing keys in placement blocks.
-  options.clear();
-  invalid_json_option.set_string_value(
-      "replica_placement={\"num_replicas\":\"abc\",\"placement_blocks\":"
-      "[{\"cloud\":\"c1\",\"region\":\"r1\",\"zone\":\"z1\"}]}");
-  options.emplace_back(invalid_json_option);
-  ASSERT_NOK(sys_catalog->ParseReplicationInfo(tablespace_id, options));
-
-  // 9. Invalid format for "min_num_replicas".
-  options.clear();
-  invalid_json_option.set_string_value(
-        "replica_placement={\"num_replicas\":3,\"placement_blocks\":"
-        "[{\"cloud\":\"c1\",\"region\":\"r1\",\"zone\":\"z1\",\"min_num_replicas\":\"abc\"}]}");
-  options.emplace_back(invalid_json_option);
-  ASSERT_NOK(sys_catalog->ParseReplicationInfo(tablespace_id, options));
-
-  // 10. Invalid json.
-  options.clear();
-  invalid_json_option.set_string_value("replica_placement=["
-      "{\"cloud\":\"c1\",\"region\":\"r1\",\"zone\":\"z1\",\"min_number_of_replica");
-  options.emplace_back(invalid_json_option);
-  ASSERT_NOK(sys_catalog->ParseReplicationInfo(tablespace_id, options));
-
-  // 11. Test whether total replication factor is populated correctly.
-  options.clear();
-  options.push_back(option);
-  ReplicationInfoPB result = EXPECT_RESULT(
-      sys_catalog->ParseReplicationInfo(tablespace_id, options)).value();
-  const auto live_replicas = result.live_replicas();
-  ASSERT_EQ(live_replicas.num_replicas(), 3);
-
-  // 12. Test whether the cloud/region/zone information has been populated correctly.
-  ASSERT_EQ(live_replicas.placement_blocks_size(), 2);
-  for (int i = 0; i < live_replicas.placement_blocks_size(); ++i) {
-    const auto& placement_block = live_replicas.placement_blocks(i);
-    const auto& cloud_info = placement_block.cloud_info();
-    if (cloud_info.placement_cloud() == "c1") {
-      ASSERT_EQ(cloud_info.placement_region(), "r1");
-      ASSERT_EQ(cloud_info.placement_zone(), "z1");
-      ASSERT_EQ(placement_block.min_num_replicas(), 2);
-      continue;
-    }
-    ASSERT_EQ(cloud_info.placement_cloud(), "c2");
-    ASSERT_EQ(cloud_info.placement_region(), "r2");
-    ASSERT_EQ(cloud_info.placement_zone(), "z2");
-    ASSERT_EQ(placement_block.min_num_replicas(), 1);
-  }
 }
 
 } // namespace master

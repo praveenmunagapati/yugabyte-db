@@ -59,9 +59,11 @@ import os
 import pwd
 import random
 import re
+import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import errno
@@ -83,6 +85,13 @@ TEST_TIMEOUT_UPPER_BOUND_SEC = 35 * 60
 # this amount of time, we terminate the run-test.sh script. This should prevent tests getting stuck
 # for a long time in macOS builds.
 TIME_SEC_TO_START_RUNNING_TEST = 5 * 60
+
+# Defaults for maximum test failure threshold, after which the Spark job will be aborted
+DEFAULT_MAX_NUM_TEST_FAILURES_MACOS_DEBUG = 150
+DEFAULT_MAX_NUM_TEST_FAILURES = 100
+
+# Default for test artifact size limit, in bytes
+MAX_ARTIFACT_SIZE_BYTES = 100*1024*1024  # 10 MB
 
 
 def wait_for_path_to_exist(target_path: str) -> None:
@@ -166,12 +175,6 @@ ONE_SHOT_TESTS = set([
 
 HASH_COMMENT_RE = re.compile('#.*$')
 
-# Number of failures of any particular task before giving up on the job. The total number of
-# failures spread across different tasks will not cause the job to fail; a particular task has to
-# fail this number of attempts. Should be greater than or equal to 1. Number of allowed retries =
-# this value - 1.
-SPARK_TASK_MAX_FAILURES = 100
-
 # Global variables. Some of these are used on the remote worker side.
 verbose = False
 g_spark_master_url_override = None
@@ -179,6 +182,7 @@ propagated_env_vars: Dict[str, str] = {}
 global_conf_dict = None
 spark_context = None
 archive_sha256sum = None
+g_max_num_test_failures = sys.maxsize
 
 
 def configure_logging() -> None:
@@ -213,6 +217,16 @@ def log_heading(msg: str) -> None:
     logging.info('\n%s\n%s\n%s' % ('-' * 80, msg, '-' * 80))
 
 
+def find_python_interpreter() -> str:
+    # We are not using "which" here because we don't want to pick up the python3 script inside the
+    # virtualenv's bin directory.
+    candidates = ['/usr/local/bin/python3', '/usr/bin/python3']
+    for python_interpreter_path in candidates:
+        if os.path.isfile(python_interpreter_path):
+            return python_interpreter_path
+    raise ValueError("Could not find Python interpreter at any of the paths: %s" % candidates)
+
+
 # Initializes the spark context. The details list will be incorporated in the Spark application
 # name visible in the Spark web UI.
 def init_spark_context(details: List[str] = []) -> None:
@@ -223,7 +237,6 @@ def init_spark_context(details: List[str] = []) -> None:
     global_conf = yb_dist_tests.get_global_conf()
     build_type = global_conf.build_type
     from pyspark import SparkContext  # type: ignore
-    SparkContext.setSystemProperty('spark.task.maxFailures', str(SPARK_TASK_MAX_FAILURES))
 
     spark_master_url = g_spark_master_url_override
     if spark_master_url is None:
@@ -247,7 +260,9 @@ def init_spark_context(details: List[str] = []) -> None:
     if 'BUILD_URL' in os.environ:
         details.append('URL: {}'.format(os.environ['BUILD_URL']))
 
-    SparkContext.setSystemProperty("spark.pyspark.python", "/usr/local/bin/python3")
+    python_interpreter = find_python_interpreter()
+    logging.info("Using this Python interpreter for Spark: %s", python_interpreter)
+    SparkContext.setSystemProperty("spark.pyspark.python", python_interpreter)
     spark_context = SparkContext(spark_master_url, "YB tests: {}".format(' '.join(details)))
     yb_python_zip_path = yb_dist_tests.get_tmp_filename(
             prefix='yb_python_module_for_spark_workers_', suffix='.zip', auto_remove=True)
@@ -276,11 +291,45 @@ def get_bash_path() -> str:
     return '/bin/bash'
 
 
-def parallel_run_test(test_descriptor_str: str) -> yb_dist_tests.TestResult:
+def copy_spark_stderr(test_descriptor_str: str, build_host: str) -> None:
+    """
+    If the initialization or the test fails, copy the Spark worker stderr log back to build host.
+    :param test_descriptor_str: Test descriptor to figure out the correct name for the log file.
+    :param build_host: Host to which the log will be copied.
+    :return: None
+    """
+    try:
+        from pyspark import SparkFiles  # type: ignore
+        spark_stderr_src = os.path.join(os.path.abspath(SparkFiles.getRootDirectory()), 'stderr')
+
+        test_descriptor = yb_dist_tests.TestDescriptor(test_descriptor_str)
+        error_output_path = test_descriptor.error_output_path
+        spark_stderr_dest = error_output_path.replace('__error.log', '__spark_stderr.log')
+
+        error_log_dir_path = os.path.dirname(spark_stderr_dest)
+        if not os.path.isdir(error_log_dir_path):
+            subprocess.check_call(['mkdir', '-p', error_log_dir_path])
+
+        logging.info(f"Copying spark stderr {spark_stderr_src} to {spark_stderr_dest}")
+        shutil.copyfile(spark_stderr_src, spark_stderr_dest)
+        copy_to_host([spark_stderr_dest], build_host)
+
+    except Exception as e:
+        logging.exception("Error copying spark stderr log}")
+
+
+def parallel_run_test(test_descriptor_str: str, fail_count: Any) -> yb_dist_tests.TestResult:
     """
     This is invoked in parallel to actually run tests.
     """
-    global_conf = initialize_remote_task()
+    try:
+        global_conf = initialize_remote_task()
+    except Exception as e:
+        build_host = os.environ.get('YB_BUILD_HOST', None)
+        if build_host:
+            copy_spark_stderr(test_descriptor_str, build_host)
+        raise e
+
     from yb import yb_dist_tests
 
     wait_for_path_to_exist(global_conf.build_root)
@@ -383,6 +432,8 @@ def parallel_run_test(test_descriptor_str: str) -> yb_dist_tests.TestResult:
         elapsed_time_sec = time.time() - start_time_sec
         logging.info("Test %s ran on %s in %.1f seconds, rc=%d",
                      test_descriptor, socket.gethostname(), elapsed_time_sec, exit_code)
+        if exit_code != 0:
+            fail_count.add(1)
         return exit_code, elapsed_time_sec
 
     # End of the local run_test() function.
@@ -422,31 +473,11 @@ def parallel_run_test(test_descriptor_str: str) -> yb_dist_tests.TestResult:
             else:
                 logging.warning("Artifact list does not exist: '%s'", artifact_list_path)
 
-            if is_macos() and socket.gethostname() == os.environ.get('YB_BUILD_HOST'):
-                logging.info("Files already local to build host. Skipping artifact copy.")
-            else:
-                num_artifacts_copied = 0
-                for artifact_path in artifact_paths:
-                    if not os.path.exists(artifact_path):
-                        logging.warning("Build artifact file does not exist: '%s'", artifact_path)
-                        continue
-                    if is_macos():
-                        dest_path = get_mac_shared_nfs(artifact_path)
-                    else:
-                        dest_path = yb_dist_tests.to_real_nfs_path(artifact_path)
-                    dest_dir = os.path.dirname(dest_path)
-                    if not os.path.exists(dest_dir):
-                        logging.info("Creating directory %s", dest_dir)
-                        subprocess.check_call(['mkdir', '-p', dest_dir])
-                    logging.info("Copying %s to %s", artifact_path, dest_path)
-                    try:
-                        subprocess.check_call(['cp', '-f', artifact_path, dest_path])
-                    except subprocess.CalledProcessError as ex:
-                        logging.error("Error copying %s to %s: %s", artifact_path, dest_path, ex)
-                        num_errors_copying_artifacts = 1
-
-                    num_artifacts_copied += 1
-                logging.info("Number of build artifact files copied: %d", num_artifacts_copied)
+            build_host = os.environ.get('YB_BUILD_HOST')
+            assert build_host is not None
+            num_errors_copying_artifacts = copy_to_host(artifact_paths, build_host)
+            if exit_code != 0:
+                copy_spark_stderr(test_descriptor_str, build_host)
 
             rel_artifact_paths = [
                     os.path.relpath(os.path.abspath(artifact_path), global_conf.yb_src_root)
@@ -496,12 +527,18 @@ def initialize_remote_task() -> yb_dist_tests.GlobalTestConfig:
     # worker or dev server), but put it in as separate variable to have flexibility to change it
     # later.
     remote_yb_src_root = global_conf.yb_src_root
+    remote_yb_src_job_dir = os.path.dirname(remote_yb_src_root)
+    # Job clean-up directory should be common on spark worker node for all jobs and should be on
+    # same filesystem as yb_src_root for efficient two-stage clean-up.
+    remote_yb_src_removal = os.environ.get('YB_SPARK_CLEAN_DIR', '/tmp/SPARK_TO_REMOVE')
 
-    subprocess.check_call([
-        'mkdir',
-        '-p',
-        os.path.dirname(remote_yb_src_root)])
     try:
+        subprocess.check_call([
+            'mkdir',
+            '-p',
+            remote_yb_src_removal,
+            remote_yb_src_job_dir])
+
         untar_script_path = os.path.join(
                 worker_tmp_dir, 'untar_archive_once_%d.sh' % random.randint(0, 2**64))
         # We also copy the temporary script here for later reference.
@@ -514,12 +551,26 @@ def initialize_remote_task() -> yb_dist_tests.GlobalTestConfig:
             # Do the locking using the flock command in Bash -- file locking in Python is painful.
             # Some curly braces in the script template are escaped as "{{" and }}".
 
-            # TODO: rewrite this shell script in Python, except for the flock part.
             untar_script_file.write("""#!{bash_shebang}
 set -euo pipefail
 (
     PATH=/usr/local/bin:$PATH
+    # Options for asynchronous clean-up jobs.
+    # Optional argument for checking workspace path associated with this spark app.
+    if [[ "${{1:-none}}" == "path" ]]; then
+      echo '{remote_yb_src_root}'
+      exit 0
+    fi
+    # Optional argument for marking workspace to be removed.
+    if [[ "${{1:-none}}" == "remove" ]]; then
+      rm -f '{archive_path}'
+      mv '{remote_yb_src_job_dir}' '{remote_yb_src_removal}/'
+      exit 0
+    fi
     flock -w 60 200
+    # Clean up any pending removals before we unpack the archive.
+    rm -rf {remote_yb_src_removal}/*
+    # Check existing workspace.
     if [[ -d '{remote_yb_src_root}' ]]; then
         previous_sha256_file_path='{remote_yb_src_root}/extracted_from_archive.sha256'
         if [[ ! -f $previous_sha256_file_path ]]; then
@@ -545,7 +596,7 @@ set -euo pipefail
         fi
         actual_archive_sha256sum=$( (
             [[ $OSTYPE == linux* ]] && sha256sum '{archive_path}' ||
-            shasum --portable --algorithm 256 '{archive_path}'
+            shasum --algorithm 256 '{archive_path}'
         ) | awk '{{ print $1 }}' )
         if [[ $actual_archive_sha256sum != '{expected_archive_sha256sum}' ]]; then
           echo "Archive SHA256 sum of '{archive_path}' is $actual_archive_sha256sum, which" \
@@ -554,7 +605,7 @@ set -euo pipefail
         fi
         chmod 0755 '{untar_script_path_for_reference}'
         yb_src_root_extract_tmp_dir='{remote_yb_src_root}'.$RANDOM.$RANDOM.$RANDOM.$RANDOM
-        mkdir "$yb_src_root_extract_tmp_dir"
+        mkdir -p "$yb_src_root_extract_tmp_dir"
         if [[ -x /bin/pigz ]]; then
             # Decompress faster with pigz
             /bin/pigz -dc '{archive_path}' | tar xf - -C "$yb_src_root_extract_tmp_dir"
@@ -569,6 +620,13 @@ set -euo pipefail
 """.format(**locals()))
         os.chmod(untar_script_path, 0o755)
         subprocess.check_call(untar_script_path)
+
+    except subprocess.CalledProcessError as e:
+        logging.exception(f"Error initializing the remote task:\n"
+                          f"STDOUT: {e.stdout}\n"
+                          f"STDERR: {e.stderr}")
+        raise e
+
     finally:
         if os.path.exists(untar_script_path):
             os.remove(untar_script_path)
@@ -676,6 +734,62 @@ def get_mac_shared_nfs(path: str) -> str:
     return "/Volumes/net/v1/" + yb_build_host + relpath
 
 
+def copy_to_host(artifact_paths: List[str], build_host: str) -> int:
+    """
+    Provide compatibility to copy artifacts back to build host via NFS or SSH.
+    """
+    num_errors_copying_artifacts = 0
+
+    if is_macos() and socket.gethostname() == build_host:
+        logging.info("Files already local to build host. Skipping artifact copy.")
+
+    else:
+        ssh_mode = True if os.getenv('YB_SPARK_COPY_MODE') == 'SSH' else False
+        num_artifacts_copied = 0
+
+        artifact_size_limit = int(os.getenv('YB_SPARK_MAX_ARTIFACT_SIZE_BYTES',
+                                            MAX_ARTIFACT_SIZE_BYTES))
+
+        for artifact_path in artifact_paths:
+            if not os.path.exists(artifact_path):
+                logging.warning("Build artifact file does not exist: '%s'", artifact_path)
+                continue
+
+            artifact_size = os.path.getsize(artifact_path)
+            if artifact_size > artifact_size_limit:
+                logging.warning(
+                    "Build artifact file {} of size {} bytes exceeds max limit of {} bytes".format(
+                        artifact_path, os.path.getsize(artifact_path), artifact_size_limit)
+                )
+                continue
+
+            if ssh_mode:
+                dest_dir = os.path.dirname(artifact_path)
+                logging.info(f"Copying {artifact_path} to {build_host}:{dest_dir}")
+            else:
+                if is_macos():
+                    dest_path = get_mac_shared_nfs(artifact_path)
+                else:
+                    dest_path = yb_dist_tests.to_real_nfs_path(artifact_path)
+                dest_dir = os.path.dirname(dest_path)
+                logging.info(f"Copying {artifact_path} to {dest_dir}")
+            try:
+                if ssh_mode:
+                    subprocess.check_call(['ssh', build_host, 'mkdir', '-p', dest_dir])
+                    subprocess.check_call(['scp', artifact_path, f'{build_host}:{dest_dir}/'])
+                else:
+                    subprocess.check_call(['mkdir', '-p', dest_dir])
+                    subprocess.check_call(['cp', '-f', artifact_path, dest_path])
+            except subprocess.CalledProcessError as ex:
+                logging.error("Error copying %s to %s: %s", artifact_path, dest_dir, ex)
+                num_errors_copying_artifacts += 1
+
+            num_artifacts_copied += 1
+        logging.info("Number of build artifact files copied: %d", num_artifacts_copied)
+
+    return num_errors_copying_artifacts
+
+
 def get_jenkins_job_name() -> Optional[str]:
     return os.environ.get('JOB_NAME')
 
@@ -770,7 +884,7 @@ def save_report(
             elapsed_time_sec=result.elapsed_time_sec,
             exit_code=result.exit_code,
             language=test_descriptor.language,
-            rtifact_paths=result.artifact_paths
+            artifact_paths=result.artifact_paths
         )
         test_reports_by_descriptor[test_descriptor.descriptor_str] = test_report_dict
         if test_descriptor.error_output_path and os.path.isfile(test_descriptor.error_output_path):
@@ -1040,8 +1154,12 @@ def run_spark_action(action: Any) -> Any:
     import py4j  # type: ignore
     try:
         results = action()
-    except py4j.protocol.Py4JJavaError:
-        logging.error("Spark job failed to run! Jenkins should probably restart this build.")
+    except py4j.protocol.Py4JJavaError as e:
+        if "cancelled as part of cancellation of all jobs" in str(e):
+            logging.warning("Spark job was killed after hitting test failure threshold of %s",
+                            g_max_num_test_failures)
+        else:
+            logging.error("Spark job failed to run! Jenkins should probably restart this build.")
         raise
 
     return results
@@ -1107,6 +1225,12 @@ def main() -> None:
                         help='When --send_archive_to_workers is specified, use this option to '
                              're-create the archive that we would send to workers even if it '
                              'already exists.')
+    parser.add_argument('--max-num-test_failures', type=int, dest='max_num_test_failures',
+                        default=None,
+                        help='Maximum number of test failures before aborting the Spark test job.'
+                             'Default is {} for all the builds except {} for macOS debug.'.format(
+                              DEFAULT_MAX_NUM_TEST_FAILURES,
+                              DEFAULT_MAX_NUM_TEST_FAILURES_MACOS_DEBUG))
 
     args = parser.parse_args()
     global g_spark_master_url_override
@@ -1166,6 +1290,17 @@ def main() -> None:
 
     if not args.send_archive_to_workers and args.recreate_archive_for_workers:
         fatal_error("Specify --send_archive_to_workers to use --recreate_archive_for_workers")
+
+    global g_max_num_test_failures
+    if not (args.max_num_test_failures or os.environ.get('YB_MAX_NUM_TEST_FAILURES', None)):
+        if is_macos() and global_conf.build_type == 'debug':
+            g_max_num_test_failures = DEFAULT_MAX_NUM_TEST_FAILURES_MACOS_DEBUG
+        else:
+            g_max_num_test_failures = DEFAULT_MAX_NUM_TEST_FAILURES
+    elif args.max_num_test_failures:
+        g_max_num_test_failures = args.max_num_test_failures
+    else:
+        g_max_num_test_failures = int(str(os.environ.get('YB_MAX_NUM_TEST_FAILURES')))
 
     # ---------------------------------------------------------------------------------------------
     # End of argument validation.
@@ -1246,6 +1381,20 @@ def main() -> None:
     # attempt indexes attached to each test descriptor.
     spark_succeeded = False
     if test_descriptors:
+        def monitor_fail_count(stop_event: threading.Event) -> None:
+            while fail_count.value < g_max_num_test_failures and not stop_event.is_set():
+                time.sleep(5)
+
+            if fail_count.value >= g_max_num_test_failures:
+                logging.info("Stopping all jobs for application %s",
+                             spark_context.applicationId)  # type: ignore
+                spark_context.cancelAllJobs()  # type: ignore
+
+        fail_count = spark_context.accumulator(0)  # type: ignore
+        counter_stop = threading.Event()
+        counter_thread = threading.Thread(target=monitor_fail_count, args=(counter_stop,))
+        counter_thread.daemon = True
+
         logging.info("Running {} tasks on Spark".format(total_num_tests))
         assert total_num_tests == len(test_descriptors), \
             "total_num_tests={}, len(test_descriptors)={}".format(
@@ -1253,19 +1402,28 @@ def main() -> None:
 
         # Randomize test order to avoid any kind of skew.
         random.shuffle(test_descriptors)
-
         test_names_rdd = spark_context.parallelize(  # type: ignore
                 [test_descriptor.descriptor_str for test_descriptor in test_descriptors],
                 numSlices=total_num_tests)
 
-        results = run_spark_action(lambda: test_names_rdd.map(parallel_run_test).collect())
+        try:
+            counter_thread.start()
+            results = run_spark_action(lambda: test_names_rdd.map(
+              lambda test_name: parallel_run_test(test_name, fail_count)
+            ).collect())
+
+        finally:
+            counter_stop.set()
+            counter_thread.join(timeout=10)
+
     else:
         # Allow running zero tests, for testing the reporting logic.
         results = []
 
     test_exit_codes = set([result.exit_code for result in results])
 
-    global_exit_code = 0 if test_exit_codes == set([0]) else 1
+    # Success if we got results for all the tests we intended to run.
+    global_exit_code = 0 if len(results) == total_num_tests else 1
 
     logging.info("Tests are done, set of exit codes: %s, tentative global exit code: %s",
                  sorted(test_exit_codes), global_exit_code)
@@ -1284,7 +1442,7 @@ def main() -> None:
             failed_test_desc_strs.append(result.test_descriptor.descriptor_str)
         if result.num_errors_copying_artifacts > 0:
             logging.info("Test had errors copying artifacts to build host: %s",
-                         result.test_descriptors)
+                         result.test_descriptor)
         num_tests_by_language[test_language] += 1
 
     if had_errors_copying_artifacts and global_exit_code == 0:

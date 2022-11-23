@@ -11,11 +11,17 @@
 // under the License.
 //
 
-#ifndef YB_MASTER_TABLET_SPLIT_DRIVER_H
-#define YB_MASTER_TABLET_SPLIT_DRIVER_H
+#pragma once
 
-#include "yb/common/entity_ids.h"
-#include "yb/master/catalog_entity_info.h"
+#include <set>
+#include <utility>
+
+#include "yb/common/entity_ids_types.h"
+
+#include "yb/master/master_fwd.h"
+#include "yb/master/tablet_split_fwd.h"
+
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 namespace master {
@@ -23,9 +29,10 @@ namespace master {
 class TabletSplitDriverIf {
  public:
   virtual ~TabletSplitDriverIf() {}
-  virtual CHECKED_STATUS SplitTablet(const TabletId& tablet_id) = 0;
+  virtual Status SplitTablet(
+      const TabletId& tablet_id, ManualSplit is_manual_split) = 0;
+  virtual Result<size_t> GetTableReplicationFactor(const TableInfoPtr& table) const = 0;
 };
 
 }  // namespace master
 }  // namespace yb
-#endif // YB_MASTER_TABLET_SPLIT_DRIVER_H

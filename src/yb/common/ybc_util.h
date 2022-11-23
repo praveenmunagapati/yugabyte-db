@@ -13,8 +13,7 @@
 // C wrappers around some YB utilities. Suitable for inclusion into C codebases such as our modified
 // version of PostgreSQL.
 
-#ifndef YB_COMMON_YBC_UTIL_H
-#define YB_COMMON_YBC_UTIL_H
+#pragma once
 
 #include <stddef.h>
 #include <stdint.h>
@@ -44,10 +43,47 @@ extern bool yb_format_funcs_include_yb_metadata;
  */
 extern bool yb_non_ddl_txn_for_sys_tables_allowed;
 
+/*
+ * Toggles whether to force use of global transaction status table.
+ */
+extern bool yb_force_global_transaction;
+
+/*
+ * Guc variable to suppress non-Postgres logs from appearing in Postgres log file.
+ */
+extern bool suppress_nonpg_logs;
+
+/*
+ * Guc variable to control the max session batch size before flushing.
+ */
+extern int ysql_session_max_batch_size;
+
+/*
+ * Guc variable to control the max number of in-flight operations from YSQL to tablet server.
+ */
+extern int ysql_max_in_flight_ops;
+
+/*
+ * Guc variable to enable binary restore from a binary backup of YSQL tables. When doing binary
+ * restore, we copy the docdb SST files of those tables from the source database and reuse them
+ * for a newly created target database to restore those tables.
+ */
+extern bool yb_binary_restore;
+
+/*
+ * xcluster consistency level
+ */
+#define XCLUSTER_CONSISTENCY_TABLET 0
+#define XCLUSTER_CONSISTENCY_DATABASE 1
+
+/*
+ * Enables atomic and ordered reads of data in xCluster replicated databases. This may add a delay
+ * to the visibility of all data in the database.
+ */
+extern int yb_xcluster_consistency_level;
+
 typedef struct YBCStatusStruct* YBCStatus;
 
-extern YBCStatus YBCStatusOK;
-bool YBCStatusIsOK(YBCStatus s);
 bool YBCStatusIsNotFound(YBCStatus s);
 bool YBCStatusIsDuplicateKey(YBCStatus s);
 uint32_t YBCStatusPgsqlError(YBCStatus s);
@@ -57,11 +93,17 @@ void YBCFreeStatus(YBCStatus s);
 size_t YBCStatusMessageLen(YBCStatus s);
 const char* YBCStatusMessageBegin(YBCStatus s);
 const char* YBCStatusCodeAsCString(YBCStatus s);
-char* DupYBStatusMessage(YBCStatus status, bool message_only);
+
+typedef const char* (*GetUniqueConstraintNameFn)(unsigned int);
+
+const char* BuildYBStatusMessage(YBCStatus status,
+                                 GetUniqueConstraintNameFn get_constraint_name);
 
 bool YBCIsRestartReadError(uint16_t txn_errcode);
 
 bool YBCIsTxnConflictError(uint16_t txn_errcode);
+bool YBCIsTxnSkipLockingError(uint16_t txn_errcode);
+uint16_t YBCGetTxnConflictErrorCode();
 
 void YBCResolveHostname();
 
@@ -76,8 +118,6 @@ CHECKED_YBCSTATUS YBCInit(
     const char* argv0,
     YBCPAllocFn palloc_fn,
     YBCCStringToTextWithLenFn cstring_to_text_with_len_fn);
-
-CHECKED_YBCSTATUS YBCInitGFlags(const char* argv0);
 
 // From glog's log_severity.h:
 // const int GLOG_INFO = 0, GLOG_WARNING = 1, GLOG_ERROR = 2, GLOG_FATAL = 3;
@@ -134,8 +174,8 @@ const char* YBCGetStackTrace();
 // Initializes global state needed for thread management, including CDS library initialization.
 void YBCInitThreading();
 
+double YBCEvalHashValueSelectivity(int32_t hash_low, int32_t hash_high);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
-
-#endif  // YB_COMMON_YBC_UTIL_H

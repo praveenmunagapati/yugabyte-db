@@ -7,8 +7,7 @@ menu:
   stable:
     identifier: ddl_create_index
     parent: statements
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 ## Synopsis
@@ -20,13 +19,13 @@ Use the `CREATE INDEX` statement to create an index on the specified columns of 
 <ul class="nav nav-tabs nav-tabs-yb">
   <li >
     <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
+      <i class="fa-solid fa-file-lines" aria-hidden="true"></i>
       Grammar
     </a>
   </li>
   <li>
     <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
+      <i class="fa-solid fa-diagram-project" aria-hidden="true"></i>
       Diagram
     </a>
   </li>
@@ -34,16 +33,14 @@ Use the `CREATE INDEX` statement to create an index on the specified columns of 
 
 <div class="tab-content">
   <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_index,index_elem.grammar.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_index,index_elem.grammar.md" %}}
   </div>
   <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_index,index_elem.diagram.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_index,index_elem.diagram.md" %}}
   </div>
 </div>
 
 ## Semantics
-
-`CONCURRENTLY`, `USING method`, `COLLATE`, and `TABLESPACE` options are not yet supported.
 
 When an index is created on a populated table, YugabyteDB automatically backfills the existing data into the index.
 In most cases, this uses an online schema migration.
@@ -55,7 +52,10 @@ The following table explains some of the differences between creating an index o
 | Keeps other transactions alive during `CREATE INDEX`? | mostly | no |
 | Parallelizes index loading? | yes | no |
 
+`CREATE INDEX CONCURRENTLY` is supported, though online index backfill is enabled by default. Some restrictions apply (see [CONCURRENTLY](#concurrently)).
+
 To disable online schema migration for YSQL `CREATE INDEX`, set the flag `ysql_disable_index_backfill=true` on **all** nodes and **both** master and tserver.
+
 To disable online schema migration for one `CREATE INDEX`, use `CREATE INDEX NONCONCURRENTLY`.
 
 {{< note title="Note" >}}
@@ -64,19 +64,53 @@ For details on how online index backfill works, refer to [Online Index Backfill]
 
 {{< /note >}}
 
+Regarding colocation, indexes follow their table. If the table is colocated, its index is also colocated; if the table is not colocated, its index is also not colocated.
+
+### Partitioned Indexes
+
+Creating an index on a partitioned table automatically creates a corresponding index for every partition in the default tablespace. It's also possible to create an index on each partition individually, which you should do in the following cases:
+
+* Parallel writes are expected while creating the index, because concurrent builds for indexes on partitioned tables aren't supported. In this case, it's better to use concurrent builds to create indexes on each partition individually.
+* [Row-level geo-partitioning](../../../../../explore/multi-region-deployments/row-level-geo-partitioning/) is being used. In this case, create the index separately on each partition to customize the tablespace in which each index is created.
+* `CREATE INDEX CONCURRENTLY` is not supported for partitioned tables (see [CONCURRENTLY](#concurrently)).
+
 ### UNIQUE
 
 Enforce that duplicate values in a table are not allowed.
+
+### CONCURRENTLY
+Enable online schema migration (see [Semantics](#semantics) for details), with some restrictions:
+* When creating an index on a temporary table, online schema migration is disabled.
+* `CREATE INDEX CONCURRENTLY` is not supported for partitioned tables.
+* `CREATE INDEX CONCURRENTLY` is not supported inside a transaction block.
+
+### NONCONCURRENTLY
+
+Disable online schema migration (see [Semantics](#semantics) for details).
+
+### ONLY
+
+Indicates not to recurse creating indexes on partitions, if the table is partitioned. The default is to recurse.
+
+### *access_method_name*
+
+The name of the index access method.
+By default, `lsm` is used for YugabyteDB tables and `btree` is used otherwise (for example, temporary tables).
+[GIN indexes](../../../../../explore/indexes-constraints/gin/) can be created in YugabyteDB by using the `ybgin` access method.
 
 ### INCLUDE clause
 
 Specify a list of columns which will be included in the index as non-key columns.
 
+### TABLESPACE clause
+
+Specify the name of the [tablespace](../../../../../explore/ysql-language-features/going-beyond-sql/tablespaces/) that describes the placement configuration for this index. By default, indexes are placed in the `pg_default` tablespace, which spreads the tablets of the index evenly across the cluster.
+
 ### WHERE clause
 
-A [partial index](#partial-indexes) is an index that is built on a subset of a table and includes only rows that satisfy the condition specified in the `WHERE` clause. 
+A [partial index](#partial-indexes) is an index that is built on a subset of a table and includes only rows that satisfy the condition specified in the `WHERE` clause.
 It can be used to exclude NULL or common values from the index, or include just the rows of interest.
-This will speed up any writes to the table since rows containing the common column values don't need to be indexed. 
+This will speed up any writes to the table since rows containing the common column values don't need to be indexed.
 It will also reduce the size of the index, thereby improving the speed for read queries that use the index.
 
 #### *name*
@@ -186,7 +220,7 @@ yugabyte=# create index shipment_delivery on shipments(delivery_status, address,
 
 ## Troubleshooting
 
-If the following troubleshooting tips don't resolve your issue, please ask for help in our [community Slack](https://www.yugabyte.com/slack) or [file a GitHub issue](https://github.com/yugabyte/yugabyte-db/issues/new?title=Index+backfill+failure).
+If the following troubleshooting tips don't resolve your issue, please ask for help in our [community Slack]({{<slack-invite>}}) or [file a GitHub issue](https://github.com/yugabyte/yugabyte-db/issues/new?title=Index+backfill+failure).
 
 **If online `CREATE INDEX` fails**, it likely failed in the backfill step.
 In that case, the index exists but is not usable.

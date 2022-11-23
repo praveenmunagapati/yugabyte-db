@@ -9,38 +9,60 @@ menu:
     name: Java
     identifier: java-3
     weight: 550
-type: page
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 <ul class="nav nav-tabs-alt nav-tabs-yb">
   <li >
-    <a href="/latest/quick-start/build-apps/java/ysql-jdbc" class="nav-link">
+    <a href="../ysql-yb-jdbc/" class="nav-link">
+      <i class="icon-postgres" aria-hidden="true"></i>
+      YSQL - YB - JDBC
+    </a>
+  </li>
+  <li >
+    <a href="../ysql-jdbc/" class="nav-link">
       <i class="icon-postgres" aria-hidden="true"></i>
       YSQL - JDBC
     </a>
   </li>
   <li >
-    <a href="/latest/quick-start/build-apps/java/ysql-jdbc-ssl" class="nav-link">
+    <a href="../ysql-jdbc-ssl/" class="nav-link">
       <i class="icon-postgres" aria-hidden="true"></i>
       YSQL - JDBC SSL/TLS
     </a>
   </li>
   <li >
-    <a href="/latest/quick-start/build-apps/java/ysql-spring-data" class="nav-link active">
+    <a href="../ysql-hibernate/" class="nav-link">
+      <i class="icon-postgres" aria-hidden="true"></i>
+      YSQL - Hibernate
+    </a>
+  </li>
+  <li >
+    <a href="../ysql-sdyb/" class="nav-link">
+      <i class="icon-postgres" aria-hidden="true"></i>
+      YSQL - Spring Data YugabyteDB
+    </a>
+  </li>
+  <li >
+    <a href="../ysql-spring-data/" class="nav-link active">
       <i class="icon-postgres" aria-hidden="true"></i>
       YSQL - Spring Data JPA
     </a>
   </li>
+   <li>
+    <a href="../ysql-ebean/" class="nav-link">
+      <i class="icon-postgres" aria-hidden="true"></i>
+      YSQL - Ebean
+    </a>
+  </li>
   <li>
-    <a href="/latest/quick-start/build-apps/java/ycql" class="nav-link">
+    <a href="../ycql/" class="nav-link">
       <i class="icon-cassandra" aria-hidden="true"></i>
       YCQL
     </a>
   </li>
   <li>
-    <a href="/latest/quick-start/build-apps/java/ycql-4.6" class="nav-link">
+    <a href="../ycql-4.6/" class="nav-link">
       <i class="icon-cassandra" aria-hidden="true"></i>
       YCQL (4.6)
     </a>
@@ -58,7 +80,7 @@ This tutorial assumes that you have:
 ## Clone the "orm-examples" repository
 
 ```sh
-$ git clone https://github.com/yugabyte/orm-examples.git
+$ git clone https://github.com/YugabyteDB-Samples/orm-examples.git
 ```
 
 The [Using ORMs with YugabyteDB `orm-examples` repository](https://github.com/yugabyte/orm-examples) has a [Spring Boot](https://spring.io/projects/spring-boot) example that implements a simple REST API server. The scenario is that of an e-commerce application. Database access in this application is managed through [Spring Data JPA](https://spring.io/projects/spring-data-jpa), which internally uses Hibernate as the JPA provider. It consists of the following:
@@ -94,12 +116,12 @@ $ mvn spring-boot:run
 Create 2 users.
 
 ```sh
-$ curl --data '{ "firstName" : "John", "lastName" : "Smith", "email" : "jsmith@yb.com" }' \
+$ curl --data '{ "firstName" : "John", "lastName" : "Smith", "email" : "jsmith@example.com" }' \
    -v -X POST -H 'Content-Type:application/json' http://localhost:8080/users
 ```
 
 ```sh
-$ curl --data '{ "firstName" : "Tom", "lastName" : "Stewart", "email" : "tstewart@yb.com" }' \
+$ curl --data '{ "firstName" : "Tom", "lastName" : "Stewart", "email" : "tstewart@example.com" }' \
    -v -X POST -H 'Content-Type:application/json' http://localhost:8080/users
 ```
 
@@ -206,7 +228,7 @@ yugabyte=# SELECT * FROM orderline;
 ```
 
 ```output
- order_id                             | product_id | units 
+ order_id                             | product_id | units
 --------------------------------------+------------+-------
  45659918-bbfd-4a75-a202-6feff13e186b |          1 |     2
  f19b64ec-359a-47c2-9014-3c324510c52c |          1 |     2
@@ -229,17 +251,17 @@ $ curl http://localhost:8080/users
       "userId": 2,
       "firstName": "Tom",
       "lastName": "Stewart",
-      "email": "tstewart@yb.com"
+      "email": "tstewart@example.com"
     },
     {
       "userId": 1,
       "firstName": "John",
       "lastName": "Smith",
-      "email": "jsmith@yb.com"
+      "email": "jsmith@example.com"
     }
   ],
   ...
-}  
+}
 ```
 
 ```sh
@@ -263,7 +285,7 @@ $ curl http://localhost:8080/products
     }
   ],
   ...
-}  
+}
 ```
 
 ```sh
@@ -280,7 +302,7 @@ $ curl http://localhost:8080/orders
         "userId": 2,
         "firstName": "Tom",
         "lastName": "Stewart",
-        "email": "tstewart@yb.com"
+        "email": "tstewart@example.com"
       },
       "userId": null,
       "orderTotal": 25,
@@ -293,7 +315,7 @@ $ curl http://localhost:8080/orders
         "userId": 2,
         "firstName": "Tom",
         "lastName": "Stewart",
-        "email": "tstewart@yb.com"
+        "email": "tstewart@example.com"
       },
       "userId": null,
       "orderTotal": 15,
@@ -301,7 +323,7 @@ $ curl http://localhost:8080/orders
     }
   ],
   ...
-}  
+}
 ```
 
 ## Explore the source

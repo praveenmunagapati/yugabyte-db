@@ -13,10 +13,12 @@
 
 #include <gtest/gtest.h>
 
+#include "yb/master/master_backup.pb.h"
 #include "yb/master/master_snapshot_coordinator.h"
 #include "yb/master/restore_sys_catalog_state.h"
 
 #include "yb/util/oid_generator.h"
+#include "yb/util/result.h"
 #include "yb/util/test_macros.h"
 
 namespace yb {
@@ -30,14 +32,12 @@ void CheckMatch(
 }
 
 TEST(RestoreSysCatalogStateTest, Filter) {
-  ObjectIdGenerator oid_generator;
-
-  const NamespaceId kNamespaceId = oid_generator.Next();
-  const NamespaceId kWrongNamespaceId = oid_generator.Next();
+  const NamespaceId kNamespaceId = GenerateObjectId();
+  const NamespaceId kWrongNamespaceId = GenerateObjectId();
   const std::string kNamespaceName = "namespace";
   const std::string kWrongNamespaceName = "wrong namespace";
-  const TableId kTableId = oid_generator.Next();
-  const TableId kWrongTableId = oid_generator.Next();
+  const TableId kTableId = GenerateObjectId();
+  const TableId kWrongTableId = GenerateObjectId();
   const std::string kTableName = "table";
   const std::string kWrongTableName = "wrong table";
 
@@ -45,6 +45,16 @@ TEST(RestoreSysCatalogStateTest, Filter) {
       .snapshot_id = TxnSnapshotId::GenerateRandom(),
       .restore_at = HybridTime(),
       .restoration_id = TxnSnapshotRestorationId::GenerateRandom(),
+      .op_id = OpId(),
+      .write_time = {},
+      .term = 0,
+      .schedules = {},
+      .non_system_obsolete_tablets = {},
+      .non_system_obsolete_tables = {},
+      .non_system_objects_to_restore = {},
+      .existing_system_tables = {},
+      .restoring_system_tables = {},
+      .non_system_tablets_to_restore = {},
   };
   RestoreSysCatalogState state(&restoration);
   SysNamespaceEntryPB namespace_entry;

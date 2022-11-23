@@ -29,14 +29,14 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_COUNTDOWN_LATCH_H
-#define YB_UTIL_COUNTDOWN_LATCH_H
+#pragma once
 
 #include <atomic>
 
 #include "yb/util/condition_variable.h"
 #include "yb/util/monotime.h"
 #include "yb/util/mutex.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 
@@ -65,7 +65,7 @@ class CountDownLatch {
   // If the count is already zero, this returns immediately.
   void Wait() const;
 
-  // Waits for the count on the latch to reach zero, or until 'until' time is reached.
+  // Waits for the count on the latch to reach zero, or until 'when' time is reached.
   // Returns true if the count became zero, false otherwise.
   bool WaitUntil(MonoTime when) const;
   bool WaitUntil(CoarseTimePoint when) const;
@@ -96,7 +96,7 @@ class CountDownLatch {
 };
 
 // Utility class which calls latch->CountDown() in its destructor.
-class CountDownOnScopeExit {
+class NODISCARD_CLASS CountDownOnScopeExit {
  public:
   explicit CountDownOnScopeExit(CountDownLatch *latch) : latch_(latch) {}
   ~CountDownOnScopeExit() {
@@ -110,5 +110,3 @@ class CountDownOnScopeExit {
 };
 
 } // namespace yb
-
-#endif // YB_UTIL_COUNTDOWN_LATCH_H

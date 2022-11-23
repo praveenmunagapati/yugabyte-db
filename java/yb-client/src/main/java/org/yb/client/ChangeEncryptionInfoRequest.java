@@ -13,9 +13,9 @@
 
 package org.yb.client;
 
-import org.jboss.netty.buffer.ChannelBuffer;
+import io.netty.buffer.ByteBuf;
 import org.yb.annotations.InterfaceAudience;
-import org.yb.master.Master;
+import org.yb.master.MasterEncryptionOuterClass;
 import org.yb.util.Pair;
 
 import com.google.protobuf.Message;
@@ -32,10 +32,10 @@ class ChangeEncryptionInfoRequest extends YRpc<ChangeEncryptionInfoResponse> {
   }
 
   @Override
-  ChannelBuffer serialize(Message header) {
+  ByteBuf serialize(Message header) {
     assert header.isInitialized();
-    final Master.ChangeEncryptionInfoRequestPB.Builder builder =
-      Master.ChangeEncryptionInfoRequestPB.newBuilder()
+    final MasterEncryptionOuterClass.ChangeEncryptionInfoRequestPB.Builder builder =
+      MasterEncryptionOuterClass.ChangeEncryptionInfoRequestPB.newBuilder()
         .setEncryptionEnabled(this.encryptionEnabled)
         .setKeyPath(this.encryptionKeyFile);
     return toChannelBuffer(header, builder.build());
@@ -54,8 +54,8 @@ class ChangeEncryptionInfoRequest extends YRpc<ChangeEncryptionInfoResponse> {
   @Override
   Pair<ChangeEncryptionInfoResponse, Object> deserialize(
       CallResponse callResponse, String uuid) throws Exception {
-    final Master.ChangeEncryptionInfoResponsePB.Builder respBuilder =
-      Master.ChangeEncryptionInfoResponsePB.newBuilder();
+    final MasterEncryptionOuterClass.ChangeEncryptionInfoResponsePB.Builder respBuilder =
+      MasterEncryptionOuterClass.ChangeEncryptionInfoResponsePB.newBuilder();
     readProtobuf(callResponse.getPBMessage(), respBuilder);
     boolean hasError = respBuilder.hasError();
     ChangeEncryptionInfoResponse response =

@@ -13,10 +13,9 @@
 //
 //
 
-#ifndef YB_UTIL_FORMAT_H
-#define YB_UTIL_FORMAT_H
+#pragma once
 
-#include "yb/util/tostring.h"
+#include "yb/util/tostring.h" // for ToString
 
 namespace yb {
 
@@ -216,6 +215,12 @@ std::string Format(const char* format, const Args&... args) {
   return internal::FormatImpl(format, args...);
 }
 
-} // namespace yb
+inline std::string Format(std::string format) {
+  return format;
+}
 
-#endif // YB_UTIL_FORMAT_H
+inline std::string Format(const char* format) {
+  return format;
+}
+
+} // namespace yb

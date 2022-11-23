@@ -12,10 +12,9 @@
 // under the License.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_PGGATE_PG_SELECT_INDEX_H_
-#define YB_YQL_PGGATE_PG_SELECT_INDEX_H_
+#pragma once
 
-#include "yb/yql/pggate/pg_dml_read.h"
+#include "yb/yql/pggate/pg_select.h"
 
 namespace yb {
 namespace pggate {
@@ -24,26 +23,24 @@ namespace pggate {
 // SELECT FROM Secondary Index Table
 //--------------------------------------------------------------------------------------------------
 
-class PgSelectIndex : public PgDmlRead {
+class PgSelectIndex : public PgSelect {
  public:
   PgSelectIndex(PgSession::ScopedRefPtr pg_session,
                 const PgObjectId& table_id,
                 const PgObjectId& index_id,
-                const PgPrepareParameters *prepare_params);
-  virtual ~PgSelectIndex();
-
-  // Prepare query for secondary index. This function is called when Postgres layer is accessing
-  // the IndexTable directy (IndexOnlyScan).
-  CHECKED_STATUS Prepare();
+                const PgPrepareParameters *prepare_params,
+                bool is_region_local);
 
   // Prepare NESTED query for secondary index. This function is called when Postgres layer is
   // accessing the IndexTable via an outer select (Sequential or primary scans)
-  CHECKED_STATUS PrepareSubquery(PgsqlReadRequestPB *read_req);
+  Status PrepareSubquery(std::shared_ptr<LWPgsqlReadRequestPB> read_req);
 
-  CHECKED_STATUS PrepareQuery(PgsqlReadRequestPB *read_req);
+  Result<PgTableDescPtr> LoadTable() override;
+
+  bool UseSecondaryIndex() const override;
 
   // The output parameter "ybctids" are pointer to the data buffer in "ybctid_batch_".
-  virtual Result<bool> FetchYbctidBatch(const vector<Slice> **ybctids);
+  virtual Result<bool> FetchYbctidBatch(const std::vector<Slice> **ybctids);
 
   // Get next batch of ybctids from either PgGate::cache or server.
   Result<bool> GetNextYbctidBatch();
@@ -63,5 +60,3 @@ class PgSelectIndex : public PgDmlRead {
 
 }  // namespace pggate
 }  // namespace yb
-
-#endif // YB_YQL_PGGATE_PG_SELECT_INDEX_H_

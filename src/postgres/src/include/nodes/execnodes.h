@@ -584,29 +584,21 @@ typedef struct EState
 	 * YugaByte-specific fields
 	 */
 
-	bool es_yb_is_single_row_modify_txn; /* Is this query a single-row modify
-																				* and the only stmt in this txn. */
+	bool yb_es_is_single_row_modify_txn; /* Is this query a single-row modify
+										  * and the only stmt in this txn. */
+	bool yb_es_is_fk_check_disabled;	/* Is FK check disabled? */
 	TupleTableSlot *yb_conflict_slot; /* If a conflict is to be resolved when inserting data,
-																		 * we cache the conflict tuple here when processing and
-																		 * then free the slot after the conflict is resolved. */
+									   * we cache the conflict tuple here when processing and
+									   * then free the slot after the conflict is resolved. */
 	YBCPgExecParameters yb_exec_params;
 
 	/*
-	 * Whether we can batch updates - note that enabling this will cause batched
-	 * updates to not return a correct rows_affected_count, thus cannot be used
-	 * for plpgsql (which uses this value for GET DIAGNOSTICS...ROW_COUNT and
-	 * FOUND).
-	 * Currently only enabled for PGSQL functions / procedures.
-	 */
-	bool yb_can_batch_updates;
-
-	/*
-	 *  The read hybrid time used for this query. This value is initialized
+	 *  The in txn limit used for this query. This value is initialized
 	 *  to 0, and later updated by the first read operation initiated for this
 	 *  query. All later read operations are then ensured that they will never
 	 *  read any data written past this time.
 	 */
-	uint64_t yb_es_read_ht;
+	uint64_t yb_es_in_txn_limit_ht;
 } EState;
 
 /*
@@ -679,6 +671,15 @@ typedef struct YbPgExecOutParam {
 	int64_t status_code;
 } YbPgExecOutParam;
 
+typedef struct YbExprParamDesc {
+	NodeTag type;
+
+	int32_t attno;
+	int32_t typid;
+	int32_t typmod;
+	int32_t collid;
+} YbExprParamDesc;
+
 
 /* ----------------------------------------------------------------
  *				 Tuple Hash Tables
@@ -721,6 +722,12 @@ typedef struct TupleHashTableData
 	int			numCols;		/* number of columns in lookup key */
 	AttrNumber *keyColIdx;		/* attr numbers of key columns */
 	FmgrInfo   *tab_hash_funcs; /* hash functions for table datatype(s) */
+	ExprState  **yb_keyColExprs; /*
+								  * expressions that are input to hash
+								  * functions. If these are null, we
+								  * revert to using keyColIdx to know
+								  * what tuple attributes to hash.
+								  */
 	ExprState  *tab_eq_func;	/* comparator for table datatype(s) */
 	MemoryContext tablecxt;		/* memory context containing table */
 	MemoryContext tempcxt;		/* context for function evaluations */
@@ -729,6 +736,11 @@ typedef struct TupleHashTableData
 	/* The following fields are set transiently for each table search: */
 	TupleTableSlot *inputslot;	/* current input tuple's slot */
 	FmgrInfo   *in_hash_funcs;	/* hash functions for input datatype(s) */
+	AttrNumber *in_keyColIdx;	/* attr numbers of input key columns */
+	ExprState  **yb_in_keycolExprs; /*
+									 * equivalent of yb_keyColExprs for input
+									 * tuples
+									 */
 	ExprState  *cur_eq_func;	/* comparator for input vs. table */
 	uint32		hash_iv;		/* hash-function IV */
 	ExprContext *exprcontext;	/* expression context */
@@ -1120,7 +1132,8 @@ typedef struct ModifyTableState
 	TupleConversionMap **mt_per_subplan_tupconv_maps;
 
 	/* YB specific attributes. */
-	bool yb_mt_is_single_row_update_or_delete;
+	bool yb_fetch_target_tuple;	/* Perform initial scan to populate
+								 * the ybctid. */
 } ModifyTableState;
 
 /* ----------------
@@ -1266,6 +1279,16 @@ typedef struct SeqScanState
 } SeqScanState;
 
 /* ----------------
+ *	 SeqScanState information
+ * ----------------
+ */
+typedef struct YbSeqScanState
+{
+	ScanState	ss;				/* its first field is NodeTag */
+	// TODO handle;				/* size of parallel heap scan descriptor */
+} YbSeqScanState;
+
+/* ----------------
  *	 SampleScanState information
  * ----------------
  */
@@ -1392,6 +1415,12 @@ typedef struct IndexOnlyScanState
 	IndexScanDesc ioss_ScanDesc;
 	Buffer		ioss_VMBuffer;
 	Size		ioss_PscanLen;
+	/*
+	 * yb_indexqual_for_recheck is the modified version of indexqual.
+	 * It is used in tuple recheck step only.
+	 * In majority of cases it is NULL which means that indexqual will be used for tuple recheck.
+	 */
+	ExprState *yb_indexqual_for_recheck;
 } IndexOnlyScanState;
 
 /* ----------------
@@ -1754,6 +1783,49 @@ typedef struct JoinState
 	ExprState  *joinqual;		/* JOIN quals (in addition to ps.qual) */
 } JoinState;
 
+
+/*
+ * Batch state of batched NL Join. These are explained in the comment for
+ * ExecYbBatchedNestLoop in nodeYbBatchedNestLoop.c.
+ */
+typedef enum NLBatchStatus
+{
+	BNL_INIT,
+	BNL_NEWINNER,
+	BNL_MATCHING,
+	BNL_FLUSHING
+} NLBatchStatus;
+
+/* Struct to contain tuple and its matching info in a hash bucket*/
+typedef struct BucketTupleInfo
+{
+	MinimalTuple tuple;
+	bool matched;
+} BucketTupleInfo;
+
+/* Buckets of MinimalTuples stored in the hash table. */
+typedef struct NLBucketInfo
+{
+	ListCell *current; /* The current list element being iterated on. */
+	List *tuples;	   /* List of BucketTupleInfo in this bucket */
+} NLBucketInfo;
+
+struct YbBatchedNestLoopState;
+
+typedef bool (*FlushTupleFn_t)(struct YbBatchedNestLoopState *, ExprContext *);
+
+typedef bool (*GetNewOuterTupleFn_t)(struct YbBatchedNestLoopState *node,
+									 ExprContext *econtext);
+typedef void (*ResetBatchFn_t)(struct YbBatchedNestLoopState *node,
+							   ExprContext *econtext);
+typedef void (*RegisterOuterMatchFn_t)(struct YbBatchedNestLoopState *node,
+									   ExprContext *econtext);
+typedef void (*AddTupleToOuterBatchFn_t)(struct YbBatchedNestLoopState *node,
+										 TupleTableSlot *slot);
+
+typedef void (*FreeBatchFn_t)(struct YbBatchedNestLoopState *node);
+typedef void (*EndFn_t)(struct YbBatchedNestLoopState *node);
+
 /* ----------------
  *	 NestLoopState information
  *
@@ -1768,7 +1840,46 @@ typedef struct NestLoopState
 	bool		nl_NeedNewOuter;
 	bool		nl_MatchedOuter;
 	TupleTableSlot *nl_NullInnerTupleSlot;
+	Tuplestorestate *batchedtuplestorestate;
+	NLBatchStatus nl_currentstatus;
 } NestLoopState;
+
+typedef struct YbBatchedNestLoopState
+{
+	JoinState	js;				/* its first field is NodeTag */
+	TupleTableSlot *nl_NullInnerTupleSlot;
+
+	/* State for tuplestore batch strategy */
+	Tuplestorestate *bnl_tupleStoreState;
+	NLBatchStatus bnl_currentstatus;
+	List *bnl_batchMatchedInfo;
+	int bnl_batchTupNo;
+
+	/* State for hashing batch strategy */
+
+	/*
+	 * This hash table stores instance of NLBucketInfo, each of which
+	 * stores lists of tuples with the same hash value.
+	 */
+	TupleHashTable hashtable;
+	TupleTableSlot *hashslot;
+	bool hashiterinit;
+	TupleHashIterator hashiter;
+	BucketTupleInfo *current_ht_tuple;
+	TupleHashEntry current_hash_entry;
+	FmgrInfo *hashFunctions;
+	int numLookupAttrs;
+	AttrNumber *innerAttrs;
+
+	/* Function pointers to local join methods */
+	FlushTupleFn_t FlushTupleImpl;
+	GetNewOuterTupleFn_t GetNewOuterTupleImpl;
+	ResetBatchFn_t ResetBatchImpl;
+	RegisterOuterMatchFn_t RegisterOuterMatchImpl;
+	AddTupleToOuterBatchFn_t AddTupleToOuterBatchImpl;
+	FreeBatchFn_t FreeBatchImpl;
+	EndFn_t EndImpl;
+} YbBatchedNestLoopState;
 
 /* ----------------
  *	 MergeJoinState information

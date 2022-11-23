@@ -6,6 +6,7 @@ import static com.yugabyte.yw.models.TaskInfo.State.Success;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -18,6 +19,8 @@ import com.yugabyte.yw.common.RegexMatcher;
 import com.yugabyte.yw.forms.GFlagsUpgradeParams;
 import com.yugabyte.yw.models.TaskInfo;
 import com.yugabyte.yw.models.helpers.TaskType;
+
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -32,9 +35,9 @@ import play.libs.Json;
 @RunWith(MockitoJUnitRunner.class)
 public class GFlagsKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
 
-  @InjectMocks GFlagsKubernetesUpgrade gFlagsKubernetesUpgrade;
+  @InjectMocks private GFlagsKubernetesUpgrade gFlagsKubernetesUpgrade;
 
-  List<TaskType> UPGRADE_TASK_SEQUENCE =
+  private static final List<TaskType> UPGRADE_TASK_SEQUENCE =
       ImmutableList.of(
           TaskType.UpdateAndPersistGFlags,
           TaskType.KubernetesCommandExecutor,
@@ -50,21 +53,31 @@ public class GFlagsKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
           TaskType.KubernetesWaitForPod,
           TaskType.WaitForServer,
           TaskType.WaitForServerReady,
+          TaskType.ModifyBlackList,
+          TaskType.ModifyBlackList,
+          TaskType.WaitForLeaderBlacklistCompletion,
+          TaskType.KubernetesCommandExecutor,
+          TaskType.KubernetesWaitForPod,
+          TaskType.WaitForServer,
+          TaskType.WaitForServerReady,
+          TaskType.ModifyBlackList,
+          TaskType.ModifyBlackList,
+          TaskType.WaitForLeaderBlacklistCompletion,
+          TaskType.KubernetesCommandExecutor,
+          TaskType.KubernetesWaitForPod,
+          TaskType.WaitForServer,
+          TaskType.WaitForServerReady,
+          TaskType.ModifyBlackList,
+          TaskType.ModifyBlackList,
+          TaskType.WaitForLeaderBlacklistCompletion,
+          TaskType.KubernetesCommandExecutor,
+          TaskType.KubernetesWaitForPod,
+          TaskType.WaitForServer,
+          TaskType.WaitForServerReady,
+          TaskType.ModifyBlackList,
           TaskType.LoadBalancerStateChange,
-          TaskType.KubernetesCommandExecutor,
-          TaskType.KubernetesWaitForPod,
-          TaskType.WaitForServer,
-          TaskType.WaitForServerReady,
-          TaskType.KubernetesCommandExecutor,
-          TaskType.KubernetesWaitForPod,
-          TaskType.WaitForServer,
-          TaskType.WaitForServerReady,
-          TaskType.KubernetesCommandExecutor,
-          TaskType.KubernetesWaitForPod,
-          TaskType.WaitForServer,
-          TaskType.WaitForServerReady,
-          TaskType.LoadBalancerStateChange,
-          TaskType.UniverseUpdateSucceeded);
+          TaskType.UniverseUpdateSucceeded,
+          TaskType.ModifyBlackList);
 
   private TaskInfo submitTask(GFlagsUpgradeParams taskParams) {
     return submitTask(taskParams, TaskType.GFlagsKubernetesUpgrade, commissioner);
@@ -101,6 +114,8 @@ public class GFlagsKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
         Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
         Json.toJson(
             ImmutableMap.of(
                 "commandType",
@@ -111,11 +126,7 @@ public class GFlagsKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
             ImmutableMap.of("commandType", KubernetesWaitForPod.CommandType.WAIT_FOR_POD.name())),
         Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
-        Json.toJson(
-            ImmutableMap.of(
-                "commandType", KubernetesCommandExecutor.CommandType.HELM_UPGRADE.name())),
-        Json.toJson(
-            ImmutableMap.of("commandType", KubernetesWaitForPod.CommandType.WAIT_FOR_POD.name())),
+        Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
         Json.toJson(
@@ -123,6 +134,18 @@ public class GFlagsKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
                 "commandType", KubernetesCommandExecutor.CommandType.HELM_UPGRADE.name())),
         Json.toJson(
             ImmutableMap.of("commandType", KubernetesWaitForPod.CommandType.WAIT_FOR_POD.name())),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(
+            ImmutableMap.of(
+                "commandType", KubernetesCommandExecutor.CommandType.HELM_UPGRADE.name())),
+        Json.toJson(
+            ImmutableMap.of("commandType", KubernetesWaitForPod.CommandType.WAIT_FOR_POD.name())),
+        Json.toJson(ImmutableMap.of()),
+        Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
         Json.toJson(ImmutableMap.of()),
@@ -131,7 +154,7 @@ public class GFlagsKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
 
   @Test
   public void testGFlagUpgradeSingleAZ() {
-    setupUniverseSingleAZ(false);
+    setupUniverseSingleAZ(false, false);
     gFlagsKubernetesUpgrade.setUserTaskUUID(UUID.randomUUID());
 
     ArgumentCaptor<String> expectedYbSoftwareVersion = ArgumentCaptor.forClass(String.class);
@@ -156,16 +179,16 @@ public class GFlagsKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
             expectedNamespace.capture(),
             expectedOverrideFile.capture());
     verify(mockKubernetesManager, times(6))
-        .getPodStatus(
+        .getPodObject(
             expectedConfig.capture(), expectedNodePrefix.capture(), expectedPodName.capture());
     verify(mockKubernetesManager, times(1))
         .getPodInfos(
             expectedConfig.capture(), expectedNodePrefix.capture(), expectedNamespace.capture());
 
-    assertEquals(ybSoftwareVersionOld, expectedYbSoftwareVersion.getValue());
+    assertEquals(YB_SOFTWARE_VERSION_OLD, expectedYbSoftwareVersion.getValue());
     assertEquals(config, expectedConfig.getValue());
-    assertEquals(nodePrefix, expectedNodePrefix.getValue());
-    assertEquals(nodePrefix, expectedNamespace.getValue());
+    assertEquals(NODE_PREFIX, expectedNodePrefix.getValue());
+    assertEquals(NODE_PREFIX, expectedNamespace.getValue());
     assertThat(expectedOverrideFile.getValue(), RegexMatcher.matchesRegex(overrideFileRegex));
 
     List<TaskInfo> subTasks = taskInfo.getSubTasks();
@@ -177,7 +200,7 @@ public class GFlagsKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
 
   @Test
   public void testGFlagUpgradeMultiAZ() {
-    setupUniverseMultiAZ(false);
+    setupUniverseMultiAZ(false, false);
     gFlagsKubernetesUpgrade.setUserTaskUUID(UUID.randomUUID());
 
     ArgumentCaptor<String> expectedYbSoftwareVersion = ArgumentCaptor.forClass(String.class);
@@ -202,16 +225,16 @@ public class GFlagsKubernetesUpgradeTest extends KubernetesUpgradeTaskTest {
             expectedNamespace.capture(),
             expectedOverrideFile.capture());
     verify(mockKubernetesManager, times(6))
-        .getPodStatus(
+        .getPodObject(
             expectedConfig.capture(), expectedNodePrefix.capture(), expectedPodName.capture());
     verify(mockKubernetesManager, times(3))
         .getPodInfos(
             expectedConfig.capture(), expectedNodePrefix.capture(), expectedNamespace.capture());
 
-    assertEquals(ybSoftwareVersionOld, expectedYbSoftwareVersion.getValue());
+    assertEquals(YB_SOFTWARE_VERSION_OLD, expectedYbSoftwareVersion.getValue());
     assertEquals(config, expectedConfig.getValue());
-    assertTrue(expectedNodePrefix.getValue().contains(nodePrefix));
-    assertTrue(expectedNamespace.getValue().contains(nodePrefix));
+    assertTrue(expectedNodePrefix.getValue().contains(NODE_PREFIX));
+    assertTrue(expectedNamespace.getValue().contains(NODE_PREFIX));
     assertThat(expectedOverrideFile.getValue(), RegexMatcher.matchesRegex(overrideFileRegex));
 
     List<TaskInfo> subTasks = taskInfo.getSubTasks();

@@ -18,7 +18,6 @@
 // under the License.
 //
 
-#ifndef ROCKSDB_LITE
 
 #include "yb/rocksdb/db/db_impl.h"
 #include "yb/rocksdb/cache.h"
@@ -26,13 +25,15 @@
 #include "yb/rocksdb/utilities/memory_util.h"
 #include "yb/rocksdb/utilities/stackable_db.h"
 #include "yb/rocksdb/table/block_based_table_factory.h"
-#include "yb/util/string_util.h"
 #include "yb/rocksdb/util/testharness.h"
 #include "yb/rocksdb/util/testutil.h"
 
+#include "yb/util/string_util.h"
+#include "yb/util/test_util.h"
+
 namespace rocksdb {
 
-class MemoryTest : public testing::Test {
+class MemoryTest : public RocksDBTest {
  public:
   MemoryTest() : kDbDir(test::TmpDir() + "/memory_test"), rnd_(301) {
     assert(Env::Default()->CreateDirIfMissing(kDbDir).ok());
@@ -277,12 +278,3 @@ int main(int argc, char** argv) {
   return 0;
 #endif
 }
-
-#else
-#include <cstdio>
-
-int main(int argc, char** argv) {
-  printf("Skipped in RocksDBLite as utilities are not supported.\n");
-  return 0;
-}
-#endif  // !ROCKSDB_LITE

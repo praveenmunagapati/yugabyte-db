@@ -30,19 +30,30 @@
 // under the License.
 
 #include "yb/master/scoped_leader_shared_lock.h"
-#include "yb/master/catalog_manager.h"
+
 #include "yb/consensus/consensus.h"
-#include "yb/util/tsan_util.h"
 #include "yb/consensus/metadata.pb.h"
+
+#include "yb/master/catalog_manager.h"
+#include "yb/master/master.h"
 #include "yb/master/sys_catalog.h"
+
+#include "yb/tablet/tablet_peer.h"
+
+#include "yb/util/debug-util.h"
 #include "yb/util/shared_lock.h"
+#include "yb/util/status_format.h"
+#include "yb/util/tsan_util.h"
+#include "yb/util/flags.h"
+
+using std::string;
 
 using namespace std::literals;
 
 constexpr int32_t kMasterLogLockWarningMsDefault =
     ::yb::RegularBuildVsSanitizers<int32_t>(1000, 3000);
 
-DEFINE_int32(master_log_lock_warning_ms, kMasterLogLockWarningMsDefault,
+DEFINE_UNKNOWN_int32(master_log_lock_warning_ms, kMasterLogLockWarningMsDefault,
              "Print warnings if the master leader shared lock is held for longer than this amount "
              "of time. Note that this is a shared lock, so these warnings simply indicate "
              "long-running master operations that could delay system catalog loading by a new "
@@ -51,7 +62,7 @@ DEFINE_int32(master_log_lock_warning_ms, kMasterLogLockWarningMsDefault,
 constexpr int32_t kMasterLeaderLockStackTraceMsDefault =
     ::yb::RegularBuildVsSanitizers<int32_t>(3000, 9000);
 
-DEFINE_int32(master_leader_lock_stack_trace_ms, kMasterLeaderLockStackTraceMsDefault,
+DEFINE_UNKNOWN_int32(master_leader_lock_stack_trace_ms, kMasterLeaderLockStackTraceMsDefault,
              "Dump a stack trace if the master leader shared lock is held for longer than this "
              "of time. Also see master_log_lock_warning_ms.");
 
@@ -64,17 +75,15 @@ namespace yb {
 namespace master {
 
 ScopedLeaderSharedLock::ScopedLeaderSharedLock(
-    CatalogManager* catalog,
-    const char* file_name,
-    int line_number,
-    const char* function_name)
+    CatalogManager* catalog, const char* file_name, int line_number, const char* function_name)
     : catalog_(DCHECK_NOTNULL(catalog)),
       leader_shared_lock_(catalog->leader_lock_, std::try_to_lock),
       start_(std::chrono::steady_clock::now()),
+      leader_ready_term_(-1),
       file_name_(file_name),
       line_number_(line_number),
       function_name_(function_name) {
-  int64_t catalog_leader_ready_term;
+  bool catalog_loaded;
   {
     // Check if the catalog manager is running.
     std::lock_guard<simple_spinlock> l(catalog_->state_lock_);
@@ -83,7 +92,8 @@ ScopedLeaderSharedLock::ScopedLeaderSharedLock(
           "Catalog manager is not initialized. State: $0", catalog_->state_);
       return;
     }
-    catalog_leader_ready_term = catalog_->leader_ready_term_;
+    leader_ready_term_ = catalog_->leader_ready_term_;
+    catalog_loaded = catalog_->is_catalog_loaded_;
   }
 
   string uuid = catalog_->master_->fs_manager()->uuid();
@@ -110,23 +120,42 @@ ScopedLeaderSharedLock::ScopedLeaderSharedLock(
     leader_status_ = s;
     return;
   }
-  if (PREDICT_FALSE(catalog_leader_ready_term != cstate.current_term())) {
+  if (PREDICT_FALSE(leader_ready_term_ != cstate.current_term())) {
     // Normally we use LeaderNotReadyToServe to indicate that the leader has not replicated its
     // NO_OP entry or the previous leader's lease has not expired yet, and the handling logic is to
     // to retry on the same server.
-    leader_status_ = STATUS_SUBSTITUTE(LeaderNotReadyToServe,
+    leader_status_ = STATUS_SUBSTITUTE(
+        LeaderNotReadyToServe,
         "Leader not yet ready to serve requests: "
         "leader_ready_term_ = $0; cstate.current_term = $1",
-        catalog_leader_ready_term, cstate.current_term());
+        leader_ready_term_, cstate.current_term());
     return;
   }
   if (PREDICT_FALSE(!leader_shared_lock_.owns_lock())) {
-    leader_status_ = STATUS_SUBSTITUTE(ServiceUnavailable,
+    leader_status_ = STATUS_SUBSTITUTE(
+        ServiceUnavailable,
         "Couldn't get leader_lock_ in shared mode. Leader still loading catalog tables."
         "leader_ready_term_ = $0; cstate.current_term = $1",
-        catalog_leader_ready_term, cstate.current_term());
+        leader_ready_term_, cstate.current_term());
     return;
   }
+  if (!catalog_loaded) {
+    leader_status_ = STATUS_SUBSTITUTE(ServiceUnavailable, "Catalog manager is not loaded");
+    return;
+  }
+}
+
+ScopedLeaderSharedLock::ScopedLeaderSharedLock(
+    enterprise::CatalogManager* catalog,
+    const char* file_name,
+    int line_number,
+    const char* function_name)
+    : ScopedLeaderSharedLock(
+          static_cast<CatalogManager*>(catalog), file_name, line_number, function_name) {
+}
+
+ScopedLeaderSharedLock::~ScopedLeaderSharedLock() {
+  Unlock();
 }
 
 void ScopedLeaderSharedLock::Unlock() {
@@ -135,8 +164,11 @@ void ScopedLeaderSharedLock::Unlock() {
       decltype(leader_shared_lock_) lock;
       lock.swap(leader_shared_lock_);
     }
-    auto finish = std::chrono::steady_clock::now();
+    if (IsSanitizer()) {
+      return;
+    }
 
+    auto finish = std::chrono::steady_clock::now();
     bool need_stack_trace = finish > start_ + 1ms * FLAGS_master_leader_lock_stack_trace_ms;
     bool need_warning =
         need_stack_trace || (finish > start_ + 1ms * FLAGS_master_log_lock_warning_ms);
@@ -148,6 +180,8 @@ void ScopedLeaderSharedLock::Unlock() {
     }
   }
 }
+
+int64_t ScopedLeaderSharedLock::GetLeaderReadyTerm() const { return leader_ready_term_; }
 
 }  // namespace master
 }  // namespace yb

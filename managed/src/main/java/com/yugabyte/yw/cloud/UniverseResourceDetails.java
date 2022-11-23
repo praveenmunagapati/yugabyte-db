@@ -30,6 +30,7 @@ import com.yugabyte.yw.models.PriceComponentKey;
 import com.yugabyte.yw.models.Provider;
 import com.yugabyte.yw.models.Region;
 import com.yugabyte.yw.models.Universe;
+import com.yugabyte.yw.models.helpers.DeviceInfo;
 import com.yugabyte.yw.models.helpers.NodeDetails;
 import com.yugabyte.yw.models.helpers.ProviderAndRegion;
 import io.swagger.annotations.ApiModelProperty;
@@ -50,6 +51,7 @@ public class UniverseResourceDetails {
   public static final String GP3_FREE_PIOPS_PARAM = "yb.aws.storage.gp3_free_piops";
   public static final String GP3_FREE_THROUGHPUT_PARAM = "yb.aws.storage.gp3_free_throughput";
   public static final Logger LOG = LoggerFactory.getLogger(UniverseResourceDetails.class);
+  private static final double EPSILON = 1E-6;
 
   @ApiModelProperty(value = "Price per hour")
   public double pricePerHour = 0;
@@ -80,6 +82,9 @@ public class UniverseResourceDetails {
 
   @ApiModelProperty(value = "Azs")
   public HashSet<String> azList = new HashSet<>();
+
+  @ApiModelProperty(value = "Known pricing info")
+  public boolean pricingKnown = true;
 
   public void addCostPerHour(double price) {
     pricePerHour += price;
@@ -113,6 +118,10 @@ public class UniverseResourceDetails {
     this.numNodes += numNodes;
   }
 
+  public void setPricingKnown(boolean val) {
+    pricingKnown = val;
+  }
+
   public void addPrice(UniverseDefinitionTaskParams params, Context context) {
 
     // Calculate price
@@ -124,36 +133,42 @@ public class UniverseResourceDetails {
         userIntent = params.getClusterByUuid(nodeDetails.placementUuid).userIntent;
       }
       Provider provider = context.getProvider(UUID.fromString(userIntent.provider));
-      if (!nodeDetails.isActive()) {
-        continue;
-      }
       Region region = context.getRegion(provider.uuid, nodeDetails.cloudInfo.region);
 
       if (region == null) {
         continue;
       }
+      String instanceType = userIntent.getInstanceTypeForNode(nodeDetails);
       PriceComponent instancePrice =
-          context.getPriceComponent(provider.uuid, region.code, userIntent.instanceType);
+          context.getPriceComponent(provider.uuid, region.code, instanceType);
       if (instancePrice == null) {
         continue;
       }
+      if (Math.abs(instancePrice.priceDetails.pricePerHour - 0) < EPSILON) {
+        setPricingKnown(false);
+      }
+      if (!nodeDetails.isActive()) {
+        continue;
+      }
+
       hourlyPrice += instancePrice.priceDetails.pricePerHour;
+
+      DeviceInfo deviceInfo = userIntent.getDeviceInfoForNode(nodeDetails);
 
       // Add price of volumes if necessary
       // TODO: Remove aws check once GCP volumes are decoupled from "EBS" designation
       // TODO(wesley): gcp options?
-      if (userIntent.deviceInfo.storageType != null
-          && userIntent.providerType.equals(Common.CloudType.aws)) {
-        Integer numVolumes = userIntent.deviceInfo.numVolumes;
-        Integer diskIops = userIntent.deviceInfo.diskIops;
-        Integer volumeSize = userIntent.deviceInfo.volumeSize;
-        Integer throughput = userIntent.deviceInfo.throughput;
+      if (deviceInfo.storageType != null && userIntent.providerType.equals(Common.CloudType.aws)) {
+        Integer numVolumes = deviceInfo.numVolumes;
+        Integer diskIops = deviceInfo.diskIops;
+        Integer volumeSize = deviceInfo.volumeSize;
+        Integer throughput = deviceInfo.throughput;
         Integer billedDiskIops = null;
         Integer billedThroughput = null;
         PriceComponent sizePrice = null;
         PriceComponent piopsPrice = null;
         PriceComponent mibpsPrice = null;
-        switch (userIntent.deviceInfo.storageType) {
+        switch (deviceInfo.storageType) {
           case IO1:
             piopsPrice = PriceComponent.get(provider.uuid, region.code, IO1_PIOPS);
             sizePrice = PriceComponent.get(provider.uuid, region.code, IO1_SIZE);
@@ -208,6 +223,9 @@ public class UniverseResourceDetails {
   public static UniverseResourceDetails create(
       Collection<NodeDetails> nodes, UniverseDefinitionTaskParams params, Context context) {
     UniverseResourceDetails details = new UniverseResourceDetails();
+    details.gp3FreePiops = context.getConfig().getInt(GP3_FREE_PIOPS_PARAM);
+    details.gp3FreeThroughput = context.getConfig().getInt(GP3_FREE_THROUGHPUT_PARAM);
+
     for (Cluster cluster : params.clusters) {
       details.addNumNodes(cluster.userIntent.numNodes);
     }
@@ -223,6 +241,13 @@ public class UniverseResourceDetails {
           details.addVolumeCount(userIntent.deviceInfo.numVolumes);
           details.addVolumeSizeGB(
               userIntent.deviceInfo.volumeSize * userIntent.deviceInfo.numVolumes);
+
+          if (userIntent.deviceInfo.diskIops != null) {
+            details.gp3FreePiops = userIntent.deviceInfo.diskIops;
+          }
+          if (userIntent.deviceInfo.throughput != null) {
+            details.gp3FreeThroughput = userIntent.deviceInfo.throughput;
+          }
         }
         if (node.cloudInfo != null
             && node.cloudInfo.az != null
@@ -245,8 +270,6 @@ public class UniverseResourceDetails {
       }
     }
 
-    details.gp3FreePiops = context.getConfig().getInt(GP3_FREE_PIOPS_PARAM);
-    details.gp3FreeThroughput = context.getConfig().getInt(GP3_FREE_THROUGHPUT_PARAM);
     details.addPrice(params, context);
     return details;
   }
@@ -293,8 +316,7 @@ public class UniverseResourceDetails {
                               nodeDetails ->
                                   new InstanceTypeKey()
                                       .setProviderUuid(
-                                          UUID.fromString(
-                                              ud.getPrimaryCluster().userIntent.provider))
+                                          getProviderByPlacementUUID(ud, nodeDetails.placementUuid))
                                       .setInstanceTypeCode(nodeDetails.cloudInfo.instance_type)))
               .collect(Collectors.toSet());
 
@@ -317,7 +339,7 @@ public class UniverseResourceDetails {
                           .map(
                               nodeDetails ->
                                   new ProviderAndRegion(
-                                      UUID.fromString(ud.getPrimaryCluster().userIntent.provider),
+                                      getProviderByPlacementUUID(ud, nodeDetails.placementUuid),
                                       nodeDetails.getRegion())))
               .collect(Collectors.toSet());
 
@@ -330,6 +352,18 @@ public class UniverseResourceDetails {
           PriceComponent.findByProvidersAndRegions(providersAndRegions)
               .stream()
               .collect(Collectors.toMap(PriceComponent::getIdKey, Function.identity()));
+    }
+
+    private UUID getProviderByPlacementUUID(UniverseDefinitionTaskParams ud, UUID placementUuid) {
+      String providerUUIDStr =
+          ud.clusters
+              .stream()
+              .filter(c -> c.uuid.equals(placementUuid))
+              .findFirst()
+              .get()
+              .userIntent
+              .provider;
+      return UUID.fromString(providerUUIDStr);
     }
 
     public Provider getProvider(UUID uuid) {

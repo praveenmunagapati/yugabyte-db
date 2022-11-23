@@ -4,15 +4,25 @@ package com.yugabyte.yw.models.helpers;
 
 import static play.mvc.Http.Status.BAD_REQUEST;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
+import com.google.common.collect.ImmutableMultiset;
 import com.google.common.collect.Iterables;
 import com.jayway.jsonpath.Configuration;
 import com.jayway.jsonpath.JsonPath;
 import com.jayway.jsonpath.spi.json.JacksonJsonNodeJsonProvider;
 import com.jayway.jsonpath.spi.mapper.JacksonMappingProvider;
 import com.yugabyte.yw.common.PlatformServiceException;
+import com.yugabyte.yw.common.ShellResponse;
+import com.yugabyte.yw.common.utils.Pair;
+import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
+import com.yugabyte.yw.models.Universe;
+import com.yugabyte.yw.models.Users;
+import com.yugabyte.yw.models.extended.UserWithFeatures;
+import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
 import com.yugabyte.yw.models.paging.PagedQuery;
 import com.yugabyte.yw.models.paging.PagedResponse;
 import io.ebean.ExpressionList;
@@ -20,32 +30,48 @@ import io.ebean.Junction;
 import io.ebean.PagedList;
 import io.ebean.Query;
 import io.ebean.common.BeanList;
-import io.jsonwebtoken.lang.Collections;
+import java.lang.annotation.Annotation;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.time.temporal.TemporalUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
+import java.util.Random;
+import java.util.Scanner;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections.MapUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.security.crypto.encrypt.Encryptors;
+import org.springframework.security.crypto.encrypt.TextEncryptor;
 import play.libs.Json;
+import play.mvc.Http;
 
 @Slf4j
 public class CommonUtils {
 
   public static final String DEFAULT_YB_HOME_DIR = "/home/yugabyte";
+
+  private static final Pattern RELEASE_REGEX =
+      Pattern.compile("^(\\d+)\\.(\\d+)\\.(\\d+)\\.(\\d+).*$");
 
   private static final String maskRegex = "(?<!^.?).(?!.?$)";
 
@@ -61,6 +87,22 @@ public class CommonUtils {
           .mappingProvider(new JacksonMappingProvider())
           .build();
 
+  // Sensisitve field substrings
+  private static final List<String> sensitiveFieldSubstrings =
+      Arrays.asList(
+          "KEY", "SECRET", "CREDENTIALS", "API", "POLICY", "HC_VAULT_TOKEN", "vaultToken");
+  // Exclude following strings from being sensitive fields
+  private static final List<String> excludedFieldNames =
+      Arrays.asList(
+          // GCP KMS fields
+          "KEY_RING_ID",
+          "CRYPTO_KEY_ID",
+          // Azure KMS fields
+          "AZU_KEY_NAME",
+          "AZU_KEY_ALGORITHM",
+          "AZU_KEY_SIZE",
+          "KEYSPACETABLELIST");
+
   /**
    * Checks whether the field name represents a field with a sensitive data or not.
    *
@@ -69,12 +111,18 @@ public class CommonUtils {
    */
   public static boolean isSensitiveField(String fieldname) {
     String ucFieldname = fieldname.toUpperCase();
-    return isStrictlySensitiveField(ucFieldname)
-        || ucFieldname.contains("KEY")
-        || ucFieldname.contains("SECRET")
-        || ucFieldname.contains("CREDENTIALS")
-        || ucFieldname.contains("API")
-        || ucFieldname.contains("POLICY");
+    if (isStrictlySensitiveField(ucFieldname)) {
+      return true;
+    }
+
+    // Needed for GCP KMS UI - more specifically listKMSConfigs()
+    // Can add more exclusions if required
+    if (excludedFieldNames.contains(ucFieldname)) {
+      return false;
+    }
+
+    // Check if any of sensitiveFieldSubstrings are substrings in ucFieldname and mark as sensitive
+    return sensitiveFieldSubstrings.stream().anyMatch(sfs -> ucFieldname.contains(sfs));
   }
 
   /**
@@ -107,11 +155,19 @@ public class CommonUtils {
   }
 
   public static Map<String, String> maskConfigNew(Map<String, String> config) {
-    return processDataNew(
-        config, CommonUtils::isSensitiveField, (key, value) -> getMaskedValue(key, value));
+    return processDataNew(config, CommonUtils::isSensitiveField, CommonUtils::getMaskedValue);
   }
 
-  private static String getMaskedValue(String key, String value) {
+  public static Map<String, String> maskAllFields(Map<String, String> config) {
+    return processDataNew(
+        config,
+        (String s) -> {
+          return true;
+        },
+        CommonUtils::getMaskedValue);
+  }
+
+  public static String getMaskedValue(String key, String value) {
     return isStrictlySensitiveField(key) || (value == null) || value.length() < 5
         ? MASKED_FIELD_VALUE
         : value.replaceAll(maskRegex, "*");
@@ -166,6 +222,57 @@ public class CommonUtils {
             });
   }
 
+  public static Map<String, String> encryptProviderConfig(
+      Map<String, String> config, UUID customerUUID, String providerCode) {
+    if (MapUtils.isNotEmpty(config)) {
+      try {
+        final ObjectMapper mapper = new ObjectMapper();
+        final String salt = generateSalt(customerUUID, providerCode);
+        final TextEncryptor encryptor = Encryptors.delux(customerUUID.toString(), salt);
+        final String encryptedConfig = encryptor.encrypt(mapper.writeValueAsString(config));
+        Map<String, String> encryptMap = new HashMap<>();
+        encryptMap.put("encrypted", encryptedConfig);
+        return encryptMap;
+      } catch (Exception e) {
+        final String errMsg =
+            String.format(
+                "Could not encrypt provider configuration for customer %s",
+                customerUUID.toString());
+        log.error(errMsg, e);
+      }
+    }
+    return new HashMap<>();
+  }
+
+  public static Map<String, String> decryptProviderConfig(
+      Map<String, String> config, UUID customerUUID, String providerCode) {
+    if (MapUtils.isNotEmpty(config)) {
+      try {
+        final ObjectMapper mapper = new ObjectMapper();
+        final String encryptedConfig = config.get("encrypted");
+        final String salt = generateSalt(customerUUID, providerCode);
+        final TextEncryptor encryptor = Encryptors.delux(customerUUID.toString(), salt);
+        final String decryptedConfig = encryptor.decrypt(encryptedConfig);
+        return mapper.readValue(decryptedConfig, new TypeReference<Map<String, String>>() {});
+      } catch (Exception e) {
+        final String errMsg =
+            String.format(
+                "Could not decrypt provider configuration for customer %s",
+                customerUUID.toString());
+        log.error(errMsg, e);
+      }
+    }
+    return new HashMap<>();
+  }
+
+  public static String generateSalt(UUID customerUUID, String providerCode) {
+    final String kpValue = String.valueOf(providerCode.hashCode());
+    final String saltBase = "%s%s";
+    final String salt =
+        String.format(saltBase, customerUUID.toString().replace("-", ""), kpValue.replace("-", ""));
+    return salt.length() % 2 == 0 ? salt : salt + "0";
+  }
+
   private static ObjectNode processData(
       String path,
       JsonNode data,
@@ -178,7 +285,7 @@ public class CommonUtils {
     for (Iterator<Entry<String, JsonNode>> it = result.fields(); it.hasNext(); ) {
       Entry<String, JsonNode> entry = it.next();
       if (entry.getValue().isObject()) {
-        result.put(
+        result.set(
             entry.getKey(),
             processData(path + "." + entry.getKey(), entry.getValue(), selector, getter));
       }
@@ -211,7 +318,7 @@ public class CommonUtils {
   /** Recursively merges second JsonNode into first JsonNode. ArrayNodes will be overwritten. */
   public static void deepMerge(JsonNode node1, JsonNode node2) {
     if (node1 == null || node1.size() == 0 || node2 == null || node2.size() == 0) {
-      throw new PlatformServiceException(BAD_REQUEST, "Cannot merge empty nodes.");
+      return;
     }
 
     if (!node1.isObject() || !node2.isObject()) {
@@ -255,7 +362,7 @@ public class CommonUtils {
 
   public static <T> ExpressionList<T> appendInClause(
       ExpressionList<T> query, String field, Collection<?> values) {
-    if (!Collections.isEmpty(values)) {
+    if (!CollectionUtils.isEmpty(values)) {
       if (values.size() > DB_IN_CLAUSE_TO_WARN) {
         log.warn(
             "Querying for {} entries in field {} - may affect performance", values.size(), field);
@@ -269,9 +376,21 @@ public class CommonUtils {
     return query;
   }
 
+  public static <T> ExpressionList<T> appendLikeClause(
+      ExpressionList<T> query, String field, Collection<String> values) {
+    if (!CollectionUtils.isEmpty(values)) {
+      Junction<T> orExpr = query.or();
+      for (String value : values) {
+        orExpr.icontains(field, value);
+      }
+      query.endOr();
+    }
+    return query;
+  }
+
   public static <T> ExpressionList<T> appendNotInClause(
       ExpressionList<T> query, String field, Collection<?> values) {
-    if (!Collections.isEmpty(values)) {
+    if (!CollectionUtils.isEmpty(values)) {
       for (List<?> batch : Iterables.partition(values, CommonUtils.DB_MAX_IN_CLAUSE_ITEMS)) {
         query.notIn(field, batch);
       }
@@ -417,12 +536,212 @@ public class CommonUtils {
   }
 
   public static long getDurationSeconds(Date startTime, Date endTime) {
-    Duration duration = Duration.between(startTime.toInstant(), endTime.toInstant());
+    return getDurationSeconds(startTime.toInstant(), endTime.toInstant());
+  }
+
+  public static long getDurationSeconds(Instant startTime, Instant endTime) {
+    Duration duration = Duration.between(startTime, endTime);
     return duration.getSeconds();
+  }
+
+  /**
+   * Returns map with common entries (both key and value equals in all maps) from the list of input
+   * maps. Basically it calculates count of key-value pairs in all the incoming maps and builds new
+   * map from the ones, where count == maps.size().
+   *
+   * @param maps incoming maps
+   * @param <K> Map key type
+   * @param <V> Map value type
+   * @return Map with common entries.
+   */
+  public static <K, V> Map<K, V> getMapCommonElements(List<Map<K, V>> maps) {
+    if (CollectionUtils.isEmpty(maps)) {
+      return Collections.emptyMap();
+    }
+    int mapsCount = maps.size();
+    Map<Pair<K, V>, Long> pairCount =
+        maps.stream()
+            .flatMap(map -> map.entrySet().stream())
+            .map(entry -> new Pair<>(entry.getKey(), entry.getValue()))
+            .collect(Collectors.groupingBy(Function.identity(), Collectors.counting()));
+    return pairCount
+        .entrySet()
+        .stream()
+        .filter(entry -> entry.getValue() == mapsCount)
+        .map(Map.Entry::getKey)
+        .collect(Collectors.toMap(Pair::getFirst, Pair::getSecond));
+  }
+
+  public static boolean isReleaseEqualOrAfter(String thresholdRelease, String actualRelease) {
+    return compareReleases(thresholdRelease, actualRelease, false, true, true);
+  }
+
+  public static boolean isReleaseBefore(String thresholdRelease, String actualRelease) {
+    return compareReleases(thresholdRelease, actualRelease, true, false, false);
+  }
+
+  public static boolean isReleaseBetween(
+      String minRelease, String maxRelease, String actualRelease) {
+    return isReleaseEqualOrAfter(minRelease, actualRelease)
+        && isReleaseBefore(maxRelease, actualRelease);
+  }
+
+  private static boolean compareReleases(
+      String thresholdRelease,
+      String actualRelease,
+      boolean beforeMatches,
+      boolean afterMatches,
+      boolean equalMatches) {
+    Matcher thresholdMatcher = RELEASE_REGEX.matcher(thresholdRelease);
+    Matcher actualMatcher = RELEASE_REGEX.matcher(actualRelease);
+    if (!thresholdMatcher.matches()) {
+      throw new IllegalArgumentException(
+          "Threshold release " + thresholdRelease + " does not match release pattern");
+    }
+    if (!actualMatcher.matches()) {
+      log.warn(
+          "Actual release {} does not match release pattern - handle as latest release",
+          actualRelease);
+      return afterMatches;
+    }
+    for (int i = 1; i < 5; i++) {
+      int thresholdPart = Integer.parseInt(thresholdMatcher.group(i));
+      int actualPart = Integer.parseInt(actualMatcher.group(i));
+      if (actualPart > thresholdPart) {
+        return afterMatches;
+      }
+      if (actualPart < thresholdPart) {
+        return beforeMatches;
+      }
+    }
+    // Equal releases.
+    return equalMatches;
   }
 
   @FunctionalInterface
   private interface TriFunction<A, B, C, R> {
     R apply(A a, B b, C c);
+  }
+
+  /**
+   * Finds if the annotation class is present on the given class or its super classes.
+   *
+   * @param clazz the given class.
+   * @param annotationClass the annotation class.
+   * @return the optional of annotation.
+   */
+  public static <T extends Annotation> Optional<T> isAnnotatedWith(
+      Class<?> clazz, Class<T> annotationClass) {
+    if (clazz == null) {
+      return Optional.empty();
+    }
+    T annotation = clazz.getAnnotation(annotationClass);
+    if (annotation != null) {
+      return Optional.of(annotation);
+    }
+    return isAnnotatedWith(clazz.getSuperclass(), annotationClass);
+  }
+
+  /**
+   * Prints the stack for called function
+   *
+   * @return printable string of stack information.
+   */
+  public static String getStackTraceHere() {
+    String rVal;
+    rVal = "***Stack trace Here****:\n";
+    StackTraceElement[] elements = Thread.currentThread().getStackTrace();
+    int depth = elements.length;
+    if (depth > 10) depth = 10; // limit stack trace length
+    for (int i = 2; i < depth; i++) {
+      StackTraceElement s = elements[i];
+      rVal += "\tat " + s.getClassName() + "." + s.getMethodName();
+      rVal += "(" + s.getFileName() + ":" + s.getLineNumber() + ")\n";
+    }
+    return rVal;
+  }
+
+  public static NodeDetails getARandomLiveTServer(Universe universe) {
+    UniverseDefinitionTaskParams.Cluster primaryCluster =
+        universe.getUniverseDetails().getPrimaryCluster();
+    List<NodeDetails> tserverLiveNodes =
+        universe
+            .getUniverseDetails()
+            .getNodesInCluster(primaryCluster.uuid)
+            .stream()
+            .filter(nodeDetails -> nodeDetails.isTserver)
+            .filter(nodeDetails -> nodeDetails.state == NodeState.Live)
+            .collect(Collectors.toList());
+    if (tserverLiveNodes.isEmpty()) {
+      throw new IllegalStateException(
+          "No live TServers found for Universe UUID: " + universe.universeUUID);
+    }
+    return tserverLiveNodes.get(new Random().nextInt(tserverLiveNodes.size()));
+  }
+
+  public static NodeDetails getServerToRunYsqlQuery(Universe universe) {
+    // Prefer the master leader since that will result in a faster query.
+    // If the leader does not have a tserver process though, select any random tserver.
+    NodeDetails nodeToUse = universe.getMasterLeaderNode();
+    if (nodeToUse == null || !nodeToUse.isTserver) {
+      nodeToUse = getARandomLiveTServer(universe);
+    }
+    return nodeToUse;
+  }
+
+  /**
+   * This method extracts the json from shell response where the shell executes a SQL Query that
+   * aggregates the response as JSON e.g. select jsonb_agg() The resultant shell output has json
+   * response on line number 3
+   */
+  public static String extractJsonisedSqlResponse(ShellResponse shellResponse) {
+    String data = null;
+    if (shellResponse.message != null && !shellResponse.message.isEmpty()) {
+      Scanner scanner = new Scanner(shellResponse.message);
+      int i = 0;
+      while (scanner.hasNextLine()) {
+        data = new String(scanner.nextLine());
+        if (i++ == 3) {
+          break;
+        }
+      }
+      scanner.close();
+    }
+    return data;
+  }
+
+  /**
+   * Compares two collections ignoring items order. Different size of collections gives inequality
+   * of collections.
+   */
+  public static <T> boolean isEqualIgnoringOrder(Collection<T> x, Collection<T> y) {
+    if ((x == null) || (y == null)) {
+      return x == y;
+    }
+
+    if (x.size() != y.size()) {
+      return false;
+    }
+
+    return ImmutableMultiset.copyOf(x).equals(ImmutableMultiset.copyOf(y));
+  }
+
+  /**
+   * Generates log message containing state information of universe and running status of scheduler.
+   */
+  public static String generateStateLogMsg(Universe universe, boolean alreadyRunning) {
+    String stateLogMsg =
+        String.format(
+            "alreadyRunning={} backupInProgress={} updateInProgress={} universePaused={}",
+            alreadyRunning,
+            universe.getUniverseDetails().backupInProgress,
+            universe.getUniverseDetails().updateInProgress,
+            universe.getUniverseDetails().universePaused);
+    return stateLogMsg;
+  }
+
+  /** Get the user sending the API request from the HTTP context. */
+  public static Users getUserFromContext(Http.Context ctx) {
+    return ((UserWithFeatures) ctx.args.get("user")).getUser();
   }
 }

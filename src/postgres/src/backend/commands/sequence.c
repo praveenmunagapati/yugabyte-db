@@ -150,6 +150,14 @@ DefineSequence(ParseState *pstate, CreateSeqStmt *seq)
 		RangeVarGetAndCheckCreationNamespace(seq->sequence, NoLock, &seqoid);
 		if (OidIsValid(seqoid))
 		{
+			/*
+			 * If we are in an extension script, insist that the pre-existing
+			 * object be a member of the extension, to avoid security risks.
+			 */
+			ObjectAddressSet(address, RelationRelationId, seqoid);
+			checkMembershipInCurrentExtension(&address);
+
+			/* OK to skip */
 			ereport(NOTICE,
 					(errcode(ERRCODE_DUPLICATE_TABLE),
 					 errmsg("relation \"%s\" already exists, skipping",
@@ -225,7 +233,7 @@ DefineSequence(ParseState *pstate, CreateSeqStmt *seq)
 	{
 		HandleYBStatus(YBCInsertSequenceTuple(MyDatabaseId,
 											  seqoid,
-											  yb_catalog_cache_version,
+											  YbGetCatalogCacheVersion(),
 											  seqdataform.last_value,
 											  false /* is_called */));
 	}
@@ -291,13 +299,7 @@ ResetSequence(Oid seq_relid)
 	Form_pg_sequence pgsform;
 	int64		startv;
 
-	/*
-	 * Read the old sequence.  This does a bit more work than really
-	 * necessary, but it's simple, and we do want to double-check that it's
-	 * indeed a sequence.
-	 */
 	init_sequence(seq_relid, &elm, &seq_rel);
-	(void) read_seq_tuple(seq_rel, &buf, &seqdatatuple);
 
 	pgstuple = SearchSysCache1(SEQRELID, ObjectIdGetDatum(seq_relid));
 	if (!HeapTupleIsValid(pgstuple))
@@ -306,35 +308,65 @@ ResetSequence(Oid seq_relid)
 	startv = pgsform->seqstart;
 	ReleaseSysCache(pgstuple);
 
-	/*
-	 * Copy the existing sequence tuple.
-	 */
-	tuple = heap_copytuple(&seqdatatuple);
+	if (IsYugaByteEnabled())
+	{
+		bool skipped = false;
+		HandleYBStatus(YBCUpdateSequenceTuple(MyDatabaseId,
+											  seq_relid,
+											  YbGetCatalogCacheVersion(),
+											  startv /* last_val */,
+											  false /* is_called */,
+											  &skipped));
+		if (skipped)
+		{
+			/*
+			 * The only reason a conditional update could have failed is if the sequence
+			 * got deleted while we were processing this reset statement.
+			 */
+			ereport(ERROR,
+					(errmsg("sequence \"%s\" does not exist, skipping",
+							seq_rel->rd_rel->relname.data)));
+		}
+	}
+	else
+	{
+		/*
+		 * Read the old sequence.  This does a bit more work than really
+		 * necessary, but it's simple, and we do want to double-check that it's
+		 * indeed a sequence.
+		 */
+		(void) read_seq_tuple(seq_rel, &buf, &seqdatatuple);
 
-	/* Now we're done with the old page */
-	UnlockReleaseBuffer(buf);
+		/*
+		 * Copy the existing sequence tuple.
+		 */
+		tuple = heap_copytuple(&seqdatatuple);
 
-	/*
-	 * Modify the copied tuple to execute the restart (compare the RESTART
-	 * action in AlterSequence)
-	 */
-	seq = (Form_pg_sequence_data) GETSTRUCT(tuple);
-	seq->last_value = startv;
-	seq->is_called = false;
-	seq->log_cnt = 0;
+		/* Now we're done with the old page */
+		UnlockReleaseBuffer(buf);
 
-	/*
-	 * Create a new storage file for the sequence.  We want to keep the
-	 * sequence's relfrozenxid at 0, since it won't contain any unfrozen XIDs.
-	 * Same with relminmxid, since a sequence will never contain multixacts.
-	 */
-	RelationSetNewRelfilenode(seq_rel, seq_rel->rd_rel->relpersistence,
-							  InvalidTransactionId, InvalidMultiXactId);
+		/*
+		 * Modify the copied tuple to execute the restart (compare the RESTART
+		 * action in AlterSequence)
+		 */
+		seq = (Form_pg_sequence_data) GETSTRUCT(tuple);
+		seq->last_value = startv;
+		seq->is_called = false;
+		seq->log_cnt = 0;
 
-	/*
-	 * Insert the modified tuple into the new storage file.
-	 */
-	fill_seq_with_data(seq_rel, tuple);
+		/*
+		 * Create a new storage file for the sequence.  We want to keep the
+		 * sequence's relfrozenxid at 0, since it won't contain any unfrozen XIDs.
+		 * Same with relminmxid, since a sequence will never contain multixacts.
+		 */
+		RelationSetNewRelfilenode(seq_rel, seq_rel->rd_rel->relpersistence,
+								InvalidTransactionId, InvalidMultiXactId);
+
+		/*
+		 * Insert the modified tuple into the new storage file.
+		 */
+		fill_seq_with_data(seq_rel, tuple);
+	}
 
 	/* Clear local cache so that we don't think we have cached numbers */
 	/* Note that we do not change the currval() state */
@@ -474,7 +506,7 @@ AlterSequence(ParseState *pstate, AlterSeqStmt *stmt)
 	{
 		HandleYBStatus(YBCReadSequenceTuple(MyDatabaseId,
 											relid,
-											yb_catalog_cache_version,
+											YbGetCatalogCacheVersion(),
 											&last_val,
 											&is_called));
 
@@ -514,7 +546,7 @@ AlterSequence(ParseState *pstate, AlterSeqStmt *stmt)
 				bool skipped = false;
 				HandleYBStatus(YBCUpdateSequenceTuple(MyDatabaseId,
 													  ObjectIdGetDatum(relid),
-													  yb_catalog_cache_version,
+													  YbGetCatalogCacheVersion(),
 													  newdataform->last_value /* last_val */,
 													  newdataform->is_called /* is_called */,
 													  &skipped));
@@ -608,7 +640,7 @@ YBReadSequenceTuple(Relation seqrel)
     bool is_called;
     HandleYBStatus(YBCReadSequenceTuple(MyDatabaseId,
                                         relid,
-                                        yb_catalog_cache_version,
+                                        YbGetCatalogCacheVersion(),
                                         &last_val,
                                         &is_called));
     seqdataform.last_value = last_val;
@@ -759,7 +791,7 @@ retry:
 		bool is_called;
 		HandleYBStatus(YBCReadSequenceTuple(MyDatabaseId,
 											relid,
-											yb_catalog_cache_version,
+											YbGetCatalogCacheVersion(),
 											&last_val,
 											&is_called));
 		seq_data.last_value = last_val;
@@ -908,7 +940,7 @@ check_bounds:
 		 */
 		HandleYBStatus(YBCUpdateSequenceTupleConditionally(MyDatabaseId,
 														   relid,
-														   yb_catalog_cache_version,
+														   YbGetCatalogCacheVersion(),
 														   last /* last_val */,
 														   true /* is_called */,
 														   seq->last_value /* expected_last_val */,
@@ -1154,7 +1186,7 @@ do_setval(Oid relid, int64 next, bool iscalled)
 	{
     HandleYBStatus(YBCUpdateSequenceTuple(MyDatabaseId,
                                           relid,
-                                          yb_catalog_cache_version,
+                                          YbGetCatalogCacheVersion(),
                                           next,
                                           iscalled,
                                           NULL));
@@ -1816,7 +1848,7 @@ init_params(ParseState *pstate, List *options, bool for_identity,
 	}
 
 	Datum cacheOptionOrLastCache = Int64GetDatumFast(seqform->seqcache);
-	Datum cacheFlag = Int64GetDatumFast(YBCGetSequenceCacheMinval());
+	Datum cacheFlag = Int64GetDatumFast(*YBCGetGFlags()->ysql_sequence_cache_minval);
 	Datum computedCacheValue = (cacheOptionOrLastCache > cacheFlag) ? cacheOptionOrLastCache : cacheFlag;
 
 	if (cache_value != NULL && cacheOptionOrLastCache < cacheFlag)

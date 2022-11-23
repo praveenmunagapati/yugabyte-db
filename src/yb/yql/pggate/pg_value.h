@@ -12,11 +12,12 @@
 // under the License.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_PGGATE_PG_VALUE_H_
-#define YB_YQL_PGGATE_PG_VALUE_H_
+#pragma once
 
-#include "yb/client/client.h"
-#include "yb/common/ql_value.h"
+#include "yb/common/common_fwd.h"
+
+#include "yb/util/status_fwd.h"
+
 #include "yb/yql/pggate/ybc_pg_typedefs.h"
 
 namespace yb {
@@ -37,9 +38,7 @@ Status PgValueFromPB(const YBCPgTypeEntity *type_entity,
 Status PgValueToPB(const YBCPgTypeEntity *type_entity,
                    uint64_t datum,
                    bool is_null,
-                   QLValue* ql_value);
+                   QLValuePB* ql_value);
 
 }  // namespace pggate
 }  // namespace yb
-
-#endif // YB_YQL_PGGATE_PG_VALUE_H_

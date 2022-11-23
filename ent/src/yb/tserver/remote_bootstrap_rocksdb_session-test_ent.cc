@@ -12,6 +12,11 @@
 
 #include "yb/tserver/remote_bootstrap_session-test.h"
 
+#include "yb/consensus/log.h"
+
+#include "yb/tablet/tablet.h"
+#include "yb/tablet/tablet_metadata.h"
+#include "yb/tablet/tablet_peer.h"
 #include "yb/tablet/tablet_snapshots.h"
 #include "yb/tablet/operations/snapshot_operation.h"
 
@@ -19,25 +24,26 @@ namespace yb {
 namespace tserver {
 
 using std::string;
+using std::vector;
 
 using yb::tablet::Tablet;
 
 static const string kSnapshotId = "0123456789ABCDEF0123456789ABCDEF";
 
-class RemoteBootstrapRocksDBTest : public RemoteBootstrapTest {
+class RemoteBootstrapRocksDBTest : public RemoteBootstrapSessionTest {
  public:
-  RemoteBootstrapRocksDBTest() : RemoteBootstrapTest(YQL_TABLE_TYPE) {}
+  RemoteBootstrapRocksDBTest() : RemoteBootstrapSessionTest(YQL_TABLE_TYPE) {}
 
   void InitSession() override {
     CreateSnapshot();
-    RemoteBootstrapTest::InitSession();
+    RemoteBootstrapSessionTest::InitSession();
   }
 
   void CreateSnapshot() {
     LOG(INFO) << "Creating Snapshot " << kSnapshotId << " ...";
-    TabletSnapshotOpRequestPB request;
-    request.set_snapshot_id(kSnapshotId);
-    tablet::SnapshotOperation operation(tablet().get(), &request);
+    tablet::SnapshotOperation operation(tablet());
+    auto& request = *operation.AllocateRequest();
+    request.ref_snapshot_id(kSnapshotId);
     operation.set_hybrid_time(tablet()->clock()->Now());
     operation.set_op_id(tablet_peer_->log()->GetLatestEntryOpId());
     ASSERT_OK(tablet()->snapshots().Create(&operation));

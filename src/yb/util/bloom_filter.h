@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_BLOOM_FILTER_H
-#define YB_UTIL_BLOOM_FILTER_H
+#pragma once
 
 #include "yb/gutil/hash/city.h"
 #include "yb/gutil/macros.h"
@@ -140,11 +139,11 @@ class BloomFilterBuilder {
   // Return an estimate of the false positive rate.
   double false_positive_rate() const;
 
-  int n_bytes() const {
+  size_t n_bytes() const {
     return n_bits_ / 8;
   }
 
-  int n_bits() const {
+  size_t n_bits() const {
     return n_bits_;
   }
 
@@ -230,7 +229,7 @@ inline bool BloomFilter::MayContainKey(const BloomKeyProbe &probe) const {
   // Basic unrolling by 2s gives a small benefit here since the two bit positions
   // can be calculated in parallel -- it's a 50% chance that the first will be
   // set even if it's a bloom miss, in which case we can parallelize the load.
-  int rem_hashes = n_hashes_;
+  auto rem_hashes = n_hashes_;
   while (rem_hashes >= 2) {
     uint32_t bitpos1 = PickBit(h, n_bits_);
     h = probe.MixHash(h);
@@ -257,5 +256,3 @@ inline bool BloomFilter::MayContainKey(const BloomKeyProbe &probe) const {
 }
 
 } // namespace yb
-
-#endif // YB_UTIL_BLOOM_FILTER_H

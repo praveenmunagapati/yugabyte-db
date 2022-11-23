@@ -26,14 +26,16 @@
 #include "yb/rocksdb/port/port.h"
 #include "yb/rocksdb/util/autovector.h"
 #include "yb/rocksdb/util/sync_point.h"
-#include "yb/rocksdb/util/testharness.h"
-#include "yb/rocksdb/util/testutil.h"
+#include <gtest/gtest.h>
 #include "yb/rocksdb/util/thread_local.h"
+#include "yb/rocksdb/util/testutil.h"
 #include "yb/util/tostring.h"
+
+using std::vector;
 
 namespace rocksdb {
 
-class ThreadLocalTest : public testing::Test {
+class ThreadLocalTest : public RocksDBTest {
  public:
   ThreadLocalTest() : env_(Env::Default()) {}
 
@@ -518,18 +520,14 @@ TEST_F(ThreadLocalTest, DISABLED_MainThreadDiesFirst) {
   // Triggers the initialization of singletons.
   Env::Default();
 
-#ifndef ROCKSDB_LITE
   try {
-#endif  // ROCKSDB_LITE
     std::thread th(&AccessThreadLocal, nullptr);
     th.detach();
     TEST_SYNC_POINT("MainThreadDiesFirst:End");
-#ifndef ROCKSDB_LITE
   } catch (const std::system_error& ex) {
     std::cerr << "Start thread: " << ex.code() << std::endl;
     ASSERT_TRUE(false);
   }
-#endif  // ROCKSDB_LITE
 }
 
 }  // namespace rocksdb

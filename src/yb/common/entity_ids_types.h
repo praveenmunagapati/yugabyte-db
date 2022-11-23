@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_COMMON_ENTITY_IDS_TYPES_H
-#define YB_COMMON_ENTITY_IDS_TYPES_H
+#pragma once
 
 #include <string>
 
@@ -27,6 +26,7 @@ using UDTypeName = std::string;
 using RoleName = std::string;
 
 using NamespaceId = std::string;
+using ObjectId = std::string;
 using TableId = std::string;
 using UDTypeId = std::string;
 using CDCStreamId = std::string;
@@ -50,5 +50,3 @@ using FlushRequestId = std::string;
 using RedisConfigKey = std::string;
 
 }  // namespace yb
-
-#endif  // YB_COMMON_ENTITY_IDS_TYPES_H

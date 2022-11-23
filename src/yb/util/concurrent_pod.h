@@ -11,8 +11,10 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_CONCURRENT_POD_H
-#define YB_UTIL_CONCURRENT_POD_H
+#pragma once
+
+#include "yb/gutil/dynamic_annotations.h"
+#include "yb/util/monotime.h"
 
 namespace yb {
 
@@ -53,5 +55,3 @@ class ConcurrentPod {
 };
 
 } // namespace yb
-
-#endif // YB_UTIL_CONCURRENT_POD_H

@@ -1,52 +1,19 @@
 ---
-title: Prometheus Integration
-headerTitle: Prometheus Integration
-linkTitle: Prometheus Integration
+title: Prometheus integration
+headerTitle: Prometheus integration
+linkTitle: Prometheus integration
 description: Learn about exporting YugabyteDB metrics and monitoring the cluster with Prometheus.
 menu:
   stable:
     identifier: observability-1-macos
     parent: explore-observability
-    weight: 240
-isTocNested: true
-showAsideToc: true
+    weight: 235
+type: docs
 ---
-
- <ul class="nav nav-tabs-alt nav-tabs-yb">
-
-  <li >
-    <a href="/latest/explore/observability/prometheus-integration/macos" class="nav-link active">
-      <i class="fab fa-apple" aria-hidden="true"></i>
-      macOS
-    </a>
-  </li>
-
-  <li >
-    <a href="/latest/explore/observability/prometheus-integration/linux" class="nav-link">
-      <i class="fab fa-linux" aria-hidden="true"></i>
-      Linux
-    </a>
-  </li>
-
-  <li >
-    <a href="/latest/explore/observability/prometheus-integration/docker" class="nav-link">
-      <i class="fab fa-docker" aria-hidden="true"></i>
-      Docker
-    </a>
-  </li>
-<!--
-  <li >
-    <a href="/latest/explore/observability-kubernetes" class="nav-link">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
-      Kubernetes
-    </a>
-  </li>
--->
-</ul>
 
 You can monitor your local YugabyteDB cluster with a local instance of [Prometheus](https://prometheus.io/), a popular standard for time-series monitoring of cloud native infrastructure. YugabyteDB services and APIs expose metrics in the Prometheus format at the `/prometheus-metrics` endpoint. For details on the metrics targets for YugabyteDB, see [Prometheus monitoring](../../../../reference/configuration/default-ports/#prometheus-monitoring).
 
-This tutorial uses the [yugabyted](../../../../reference/configuration/yugabyted) cluster management utility.
+This tutorial uses the [yugabyted](../../../../reference/configuration/yugabyted/) cluster management utility.
 
 ## Prerequisite
 
@@ -240,4 +207,4 @@ $ ./bin/yugabyted destroy \
 
 ## What's next?
 
-You can [setup Grafana](https://prometheus.io/docs/visualization/grafana/) and import the [YugabyteDB dashboard](https://grafana.com/grafana/dashboards/12620 "YugabyteDB dashboard on grafana.com") for better visualization of the metrics being collected by Prometheus.
+Set up [Grafana dashboards](../../grafana-dashboard/grafana/) for better visualization of the metrics being collected by Prometheus.

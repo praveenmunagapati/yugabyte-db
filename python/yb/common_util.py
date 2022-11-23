@@ -14,15 +14,19 @@
 This module provides common utility functions.
 """
 
+import atexit
 import itertools
 import logging
 import os
 import re
-import sys
+import shutil
 import json
 import subprocess
 import shlex
 import io
+import platform
+import argparse
+import uuid
 
 import typing
 from typing import (
@@ -69,7 +73,7 @@ def set_thirdparty_dir(thirdparty_dir: str) -> None:
 
 
 def sorted_grouped_by(
-        arr: List[_GroupElementType],
+        arr: Iterable[_GroupElementType],
         key_fn: Callable[[_GroupElementType], _GroupKeyType]
         ) -> List[Tuple[_GroupKeyType, List[_GroupElementType]]]:
     """
@@ -81,7 +85,7 @@ def sorted_grouped_by(
 
 
 def group_by(
-        arr: List[_GroupElementType],
+        arr: Iterable[_GroupElementType],
         key_fn: Callable[[_GroupElementType], _GroupKeyType]
         ) -> Dict[_GroupKeyType, List[_GroupElementType]]:
     """
@@ -113,6 +117,17 @@ def init_env(verbose: bool) -> None:
 
 def get_build_type_from_build_root(build_root: str) -> str:
     return os.path.basename(build_root).split('-')[0]
+
+
+def is_lto_build_root(build_root: str) -> bool:
+    """
+    >>> is_lto_build_root('build/release-clang14-full-lto-ninja')
+    True
+    >>> is_lto_build_root('build/debug-clang13-dynamic-ninja')
+    False
+    """
+    build_root_base_name = os.path.basename(build_root)
+    return '-thin-lto-' in build_root_base_name or '-full-lto' in build_root_base_name
 
 
 def get_compiler_type_from_build_root(build_root: str) -> str:
@@ -229,8 +244,15 @@ def get_yb_src_root_from_build_root(
     return yb_src_root
 
 
+def ensure_yb_src_root_from_build_root(build_dir: str, verbose: bool = False) -> str:
+    yb_src_root = get_yb_src_root_from_build_root(
+        build_dir=build_dir, verbose=verbose, must_succeed=True)
+    assert yb_src_root is not None
+    return yb_src_root
+
+
 def is_macos() -> bool:
-    return sys.platform == 'darwin'
+    return platform.system() == 'Darwin'
 
 
 def write_json_file(
@@ -378,8 +400,182 @@ def write_yaml_file(content: Any, output_file_path: str) -> None:
         yaml.dump(content, output_file)
 
 
+def write_file(content: str, output_file_path: str) -> None:
+    with open(output_file_path, 'w') as output_file:
+        output_file.write(content)
+
+
+def make_parent_dir(path: str) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+
+
 def to_yaml_str(content: Any) -> str:
     out = io.StringIO()
     yaml = get_ruamel_yaml_instance()
     yaml.dump(content, out)
     return out.getvalue()
+
+
+def get_target_arch() -> str:
+    return os.environ['YB_TARGET_ARCH']
+
+
+def check_arch() -> None:
+    if not is_macos():
+        return
+    target_arch = get_target_arch()
+    actual_arch = platform.machine()
+    if target_arch and actual_arch != target_arch:
+        raise ValueError(
+                f"YB_TARGET_ARCH is set to {target_arch} but we are running on the "
+                f"{actual_arch} architecture.")
+
+
+def is_macos_arm64() -> bool:
+    return is_macos() and get_target_arch() == 'arm64'
+
+
+# From https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse
+# To be used for boolean arguments.
+def arg_str_to_bool(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    if v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    raise argparse.ArgumentTypeError('Boolean value expected, got: %s' % v)
+
+
+g_home_dir: Optional[str] = None
+
+
+def get_home_dir() -> str:
+    global g_home_dir
+    if g_home_dir is not None:
+        return g_home_dir
+    g_home_dir = os.path.realpath(os.path.expanduser('~'))
+    return g_home_dir
+
+
+def get_relative_path_or_none(abs_path: str, relative_to: str) -> Optional[str]:
+    """
+    If the given path starts with another directory path, return the relative path, or else None.
+    """
+    if not relative_to.endswith('/'):
+        relative_to += '/'
+    if abs_path.startswith(relative_to):
+        return abs_path[len(relative_to):]
+    return None
+
+
+K = TypeVar('K')
+V = TypeVar('V')
+
+
+def append_to_list_in_dict(dest: Dict[K, List[V]], key: K, new_item: V) -> None:
+    """
+    Append the given element to the list that the given key in the given dict points to. If the key
+    does not point to anything, create a new list at that key.
+    """
+    if key in dest:
+        dest[key].append(new_item)
+    else:
+        dest[key] = [new_item]
+
+
+def optional_message_to_prefix(message: str) -> str:
+    message = message.strip()
+    if message == '':
+        return ''
+    if message.endswith((':', '.')):
+        return message + ' '
+    return message + ': '
+
+
+def set_to_str_one_element_per_line(s: Set[Any]) -> str:
+    '''
+    >>> print(set_to_str_one_element_per_line({1}))
+    {1}
+    >>> print(set_to_str_one_element_per_line({1, 2}))
+    {
+        1,
+        2
+    }
+    >>> print(set_to_str_one_element_per_line({'a', 'b', 'c'}))
+    {
+        a,
+        b,
+        c
+    }
+    '''
+    if not s:
+        return '{}'
+    elements = sorted(s)
+    if len(elements) == 1:
+        return '{%s}' % str(elements[0])
+    return '{\n    %s\n}' % (
+        ',\n    '.join(
+            [str(element) for element in elements]
+        )
+    )
+
+
+def assert_sets_equal(a: Set[Any], b: Set[Any], message: str = '') -> None:
+    a = set(a)
+    b = set(b)
+    if a != b:
+        raise AssertionError(
+            f"{optional_message_to_prefix(message)}"
+            f"Sets are not equal: {set_to_str_one_element_per_line(a)} vs. "
+            f"{set_to_str_one_element_per_line(b)}. "
+            f"Elements only in the first set: {set_to_str_one_element_per_line(a - b)}. "
+            f"Elements only in the second set: {set_to_str_one_element_per_line(b - a)}.")
+
+
+def assert_set_contains_all(a: Set[Any], b: Set[Any], message: str = '') -> None:
+    a = set(a)
+    b = set(b)
+    d = b - a
+    if d:
+        raise AssertionError(
+            f"{optional_message_to_prefix(message)}"
+            f"First set does not contain the second: {set_to_str_one_element_per_line(a)} vs. "
+            f"{set_to_str_one_element_per_line(b)}. "
+            f"Elements in the second set but not in the first: "
+            f"{set_to_str_one_element_per_line(d)}.")
+
+
+def create_temp_dir() -> str:
+    """
+    Create a temporary directory and return its path.
+    The directory is automatically deleted at program exit.
+    """
+    tmp_dir = os.path.join(YB_SRC_ROOT, "build", "yb_release_tmp_{}".format(str(uuid.uuid4())))
+    try:
+        os.mkdir(tmp_dir)
+    except OSError as e:
+        logging.error("Could not create directory at '{}'".format(tmp_dir))
+        raise e
+
+    atexit.register(lambda: shutil.rmtree(tmp_dir))
+    return tmp_dir
+
+
+def init_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(filename)s:%(lineno)d] %(asctime)s %(levelname)s: %(message)s")
+
+
+def create_symlink(src: str, dst: str) -> None:
+    logging.info("Creating symbolic link %s -> %s", dst, src)
+    if os.path.islink(dst):
+        existing_link_src = os.readlink(dst)
+        if existing_link_src == src:
+            logging.info("Symlink %s already exists and points to %s", dst, src)
+            return
+        raise ValueError(
+                "Symlink %s already exists and points to %s instead of %s" % (
+                    dst, existing_link_src, src))
+    os.symlink(src, dst)

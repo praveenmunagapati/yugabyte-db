@@ -12,11 +12,9 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_MATH_UTIL_H_
-#define YB_UTIL_MATH_UTIL_H_
+#pragma once
 
 #include <limits>
-#include <type_traits>
 #include <vector>
 
 namespace yb {
@@ -64,5 +62,3 @@ T fit_bounds(const T& value, const T& min, const T& max) {
 }
 
 }  // namespace yb
-
-#endif // YB_UTIL_MATH_UTIL_H_

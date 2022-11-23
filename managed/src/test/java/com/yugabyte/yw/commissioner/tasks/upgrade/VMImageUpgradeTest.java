@@ -2,6 +2,7 @@
 
 package com.yugabyte.yw.commissioner.tasks.upgrade;
 
+import static com.yugabyte.yw.models.TaskInfo.State.Success;
 import static org.junit.Assert.assertEquals;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -67,24 +68,27 @@ public class VMImageUpgradeTest extends UpgradeTaskTest {
     }
   }
 
-  @InjectMocks VMImageUpgrade vmImageUpgrade;
+  @InjectMocks private VMImageUpgrade vmImageUpgrade;
 
-  List<TaskType> UPGRADE_TASK_SEQUENCE =
+  private static final List<TaskType> UPGRADE_TASK_SEQUENCE =
       ImmutableList.of(
           TaskType.AnsibleClusterServerCtl,
           TaskType.AnsibleClusterServerCtl,
           TaskType.ReplaceRootVolume,
           TaskType.AnsibleSetupServer,
           TaskType.AnsibleConfigureServers,
+          TaskType.AnsibleConfigureServers,
           TaskType.AnsibleClusterServerCtl,
           TaskType.WaitForServer,
           TaskType.WaitForServerReady,
+          TaskType.AnsibleConfigureServers,
           TaskType.AnsibleClusterServerCtl,
           TaskType.WaitForServer,
           TaskType.WaitForServerReady,
           TaskType.WaitForEncryptionKeyInMemory,
           TaskType.UpdateNodeDetails);
 
+  @Override
   @Before
   public void setUp() {
     super.setUp();
@@ -120,7 +124,7 @@ public class VMImageUpgradeTest extends UpgradeTaskTest {
             node.isMaster = true;
             node.isTserver = true;
             node.cloudInfo = new CloudSpecificInfo();
-            node.cloudInfo.private_ip = "1.2.3." + idx;
+            node.cloudInfo.private_ip = "10.0.0." + idx;
             node.cloudInfo.az = az4.code;
             node.azUuid = az4.uuid;
             universeDetails.nodeDetailsSet.add(node);
@@ -178,12 +182,25 @@ public class VMImageUpgradeTest extends UpgradeTaskTest {
     assertTaskType(createRootVolumeTasks, TaskType.CreateRootVolumes);
     assertEquals(expectedRootVolumeCreationTasks, createRootVolumeTasks.size());
 
+    /*
+     * Leader blacklisting may add ModifyBlackList task to subTasks.
+     * Task details for ModifyBlacklist task do not contain the required
+     * keys being asserted here. So, remove task types of ModifyBlackList
+     * from subTasks before asserting for required keys.
+     */
+    createRootVolumeTasks =
+        createRootVolumeTasks
+            .stream()
+            .filter(t -> t.getTaskType() != TaskType.ModifyBlackList)
+            .collect(Collectors.toList());
     createRootVolumeTasks.forEach(
         task -> {
           JsonNode details = task.getTaskDetails();
-          UUID region = UUID.fromString(details.get("region").get("uuid").asText());
+          UUID azUuid = UUID.fromString(details.get("azUuid").asText());
+          AvailabilityZone zone =
+              AvailabilityZone.find.query().fetch("region").where().idEq(azUuid).findOne();
           String machineImage = details.get("machineImage").asText();
-          assertEquals(taskParams.machineImages.get(region), machineImage);
+          assertEquals(taskParams.machineImages.get(zone.region.uuid), machineImage);
 
           String azUUID = details.get("azUuid").asText();
           if (azUUID.equals(az4.uuid.toString())) {
@@ -226,6 +243,6 @@ public class VMImageUpgradeTest extends UpgradeTaskTest {
     createVolumeOutput.forEach(
         (key, value) -> assertEquals(value.size(), (int) replaceRootVolumeParams.get(key)));
     assertEquals(100.0, taskInfo.getPercentCompleted(), 0);
-    assertEquals(TaskInfo.State.Success, taskInfo.getTaskState());
+    assertEquals(Success, taskInfo.getTaskState());
   }
 }

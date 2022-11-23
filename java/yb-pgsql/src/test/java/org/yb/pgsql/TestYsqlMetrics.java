@@ -43,36 +43,36 @@ public class TestYsqlMetrics extends BasePgSQLTest {
 
     // Select uses txn.
     verifyStatementMetric(statement, "SELECT * FROM test",
-                          SELECT_STMT_METRIC, 1, 1, 1, true);
+                          SELECT_STMT_METRIC, 1, 0, 1, true);
 
     // Non-txn insert.
     verifyStatementMetric(statement, "INSERT INTO test VALUES (1, 1)",
-                          INSERT_STMT_METRIC, 1, 0, 1, true);
+                          INSERT_STMT_METRIC, 1, 1, 1, true);
     // Txn insert.
     verifyStatementMetric(statement, "BEGIN",
                           BEGIN_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "INSERT INTO test VALUES (2, 2)",
-                          INSERT_STMT_METRIC, 1, 1, 0, true);
+                          INSERT_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "END",
                           COMMIT_STMT_METRIC, 1, 0, 1, true);
 
     // Limit query on complex view (issue #3811).
     verifyStatementMetric(statement, "SELECT * FROM information_schema.key_column_usage LIMIT 1",
-                          SELECT_STMT_METRIC, 1, 1, 1, true);
+                          SELECT_STMT_METRIC, 1, 0, 1, true);
 
     // Non-txn update.
     verifyStatementMetric(statement, "UPDATE test SET v = 2 WHERE k = 1",
-                          UPDATE_STMT_METRIC, 1, 0, 1, true);
+                          UPDATE_STMT_METRIC, 1, 1, 1, true);
     // Txn update.
     verifyStatementMetric(statement, "UPDATE test SET v = 3",
-                          UPDATE_STMT_METRIC, 1, 1, 1, true);
+                          UPDATE_STMT_METRIC, 1, 0, 1, true);
 
     // Non-txn delete.
     verifyStatementMetric(statement, "DELETE FROM test WHERE k = 2",
-                          DELETE_STMT_METRIC, 1, 0, 1, true);
+                          DELETE_STMT_METRIC, 1, 1, 1, true);
     // Txn delete.
     verifyStatementMetric(statement, "DELETE FROM test",
-                          DELETE_STMT_METRIC, 1, 1, 1, true);
+                          DELETE_STMT_METRIC, 1, 0, 1, true);
 
     // Invalid statement should not update metrics.
     verifyStatementMetric(statement, "INSERT INTO invalid_table VALUES (1)",
@@ -82,9 +82,9 @@ public class TestYsqlMetrics extends BasePgSQLTest {
     verifyStatementMetric(statement, "BEGIN",
                           BEGIN_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "INSERT INTO test VALUES (3, 3)",
-                          INSERT_STMT_METRIC, 1, 1, 0, true);
+                          INSERT_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "INSERT INTO test VALUES (4, 4)",
-                          INSERT_STMT_METRIC, 1, 1, 0, true);
+                          INSERT_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "END",
                           COMMIT_STMT_METRIC, 1, 0, 1, true);
 
@@ -110,13 +110,13 @@ public class TestYsqlMetrics extends BasePgSQLTest {
     verifyStatementMetric(statement, "BEGIN",
                           BEGIN_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "INSERT INTO test VALUES (5, 5)",
-                          INSERT_STMT_METRIC, 1, 1, 0, true);
+                          INSERT_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "CREATE TABLE test2 (a int)",
                           OTHER_STMT_METRIC, 1, 0, 1, true);
     verifyStatementMetric(statement, "INSERT INTO test VALUES (6, 6)",
-                          INSERT_STMT_METRIC, 1, 1, 0, true);
+                          INSERT_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "UPDATE test SET k = 600 WHERE k = 6",
-                          UPDATE_STMT_METRIC, 1, 1, 0, true);
+                          UPDATE_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "ALTER TABLE test2 ADD COLUMN b INT",
                           OTHER_STMT_METRIC, 1, 0, 1, true);
     verifyStatementMetric(statement, "DROP TABLE test2",
@@ -128,13 +128,13 @@ public class TestYsqlMetrics extends BasePgSQLTest {
     verifyStatementMetric(statement, "BEGIN",
                           BEGIN_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "INSERT INTO test VALUES (7, 7)",
-                          INSERT_STMT_METRIC, 1, 1, 0, true);
+                          INSERT_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "CREATE TABLE test2 (a int)",
                           OTHER_STMT_METRIC, 1, 0, 1, true);
     verifyStatementMetric(statement, "INSERT INTO test VALUES (8, 8)",
-                          INSERT_STMT_METRIC, 1, 1, 0, true);
+                          INSERT_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "UPDATE test SET k = 800 WHERE k = 8",
-                          UPDATE_STMT_METRIC, 1, 1, 0, true);
+                          UPDATE_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "ALTER TABLE test2 ADD COLUMN b INT",
                           OTHER_STMT_METRIC, 1, 0, 1, true);
     verifyStatementMetric(statement, "DROP TABLE test2",
@@ -150,7 +150,7 @@ public class TestYsqlMetrics extends BasePgSQLTest {
     verifyStatementMetric(statement, "BEGIN",
                           BEGIN_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "INSERT INTO test VALUES (9, 9)",
-                          INSERT_STMT_METRIC, 1, 1, 0, true);
+                          INSERT_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "END",
                           COMMIT_STMT_METRIC, 1, 0, 1, true);
 
@@ -158,7 +158,7 @@ public class TestYsqlMetrics extends BasePgSQLTest {
     verifyStatementMetric(statement, "BEGIN",
                           BEGIN_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "DELETE FROM test WHERE k = 9;",
-                          DELETE_STMT_METRIC, 1, 1, 0, true);
+                          DELETE_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "BEGIN",
                           BEGIN_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "END",
@@ -180,7 +180,7 @@ public class TestYsqlMetrics extends BasePgSQLTest {
 
     // Empty transaction block with DML execution prior to BEGIN.
     verifyStatementMetric(statement, "INSERT INTO test VALUES (10, 10)",
-                          INSERT_STMT_METRIC, 1, 0, 1, true);
+                          INSERT_STMT_METRIC, 1, 1, 1, true);
     verifyStatementMetric(statement, "BEGIN",
                           BEGIN_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "END",
@@ -198,7 +198,7 @@ public class TestYsqlMetrics extends BasePgSQLTest {
     verifyStatementMetric(statement, "BEGIN",
                           BEGIN_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "INSERT INTO test VALUES (11, 11)",
-                          INSERT_STMT_METRIC, 1, 1, 0, true);
+                          INSERT_STMT_METRIC, 1, 0, 0, true);
     verifyStatementMetric(statement, "COMMIT",
                           COMMIT_STMT_METRIC, 1, 0, 1, true);
     verifyStatementMetric(statement, "COMMIT",
@@ -230,12 +230,12 @@ public class TestYsqlMetrics extends BasePgSQLTest {
 
       verifyStatementMetricRows(
         stmt, "INSERT INTO test VALUES (6, 6), (7, 7)",
-        SINGLE_SHARD_TRANSACTIONS_METRIC, 1, 2);
+        SINGLE_SHARD_TRANSACTIONS_METRIC, 0, 0);
 
       // Single row transaction.
       verifyStatementMetricRows(
         stmt, "INSERT INTO test VALUES (8, 8)",
-        SINGLE_SHARD_TRANSACTIONS_METRIC, 0, 0);
+        SINGLE_SHARD_TRANSACTIONS_METRIC, 1, 1);
 
       verifyStatementMetricRows(
         stmt, "DELETE FROM test",
@@ -420,7 +420,8 @@ public class TestYsqlMetrics extends BasePgSQLTest {
       AggregatedValue stat = getStatementStat(query);
       assertEquals(1, stat.count);
       while(result.next()) {
-        if(result.isLast()) {
+        final String row = result.getString(1);
+        if(row.contains("Execution Time")) {
           double query_time = Double.parseDouble(result.getString(1).replaceAll("[^\\d.]", ""));
           // As stat.total_time indicates total time of EXPLAIN query,
           // actual query total time is a little bit less.
@@ -429,6 +430,143 @@ public class TestYsqlMetrics extends BasePgSQLTest {
         }
       }
     }
+  }
+
+  /**
+   * This test does memory stats verification in EXPLAIN ANALYZE's output.
+   * First, it does a rough validation on the stats by comparing queries that consume different
+   * amounts of memory and validating their max memory outputs.
+   * Second, it does a more accurate validation on the stats against the sorting memory, to validate
+   * that max memory is slightly higher than sorting's memory.
+   * It also does basic tests to ensure the newly added cutomized logic
+   * for memory stats doesn't break existing EXPLAIN ANALYZE's execution for DDLs.
+   */
+  @Test
+  public void testExplainMaxMemory() throws Exception {
+    try (Statement statement = connection.createStatement()) {
+      statement.execute("CREATE TABLE tst (c1 INT);");
+      statement.execute("PREPARE demo(int) AS "
+        + "SELECT m1 FROM "
+        + "(SELECT MAX(c1) AS m1 FROM "
+        + "(SELECT * FROM tst LIMIT $1 "
+        + ") AS t0 "
+        + "GROUP BY c1) AS t1 "
+        + "ORDER BY m1;"
+      );
+
+      // Verify INSERT output
+      {
+        final boolean hasRs = statement.execute(
+                "EXPLAIN ANALYZE INSERT INTO tst SELECT s FROM generate_series(1, 1000000) s;");
+        assertTrue(hasRs);
+        final ResultSet insertResult = statement.getResultSet();
+        final long maxMemInsert = findMaxMemInExplain(insertResult);
+        assertTrue(maxMemInsert != 0);
+      }
+
+      // Verify that the absolute and relative values of the max memory output are within
+      // expectation.
+      {
+        final long maxMem_1 = runExplainAnalyze(statement, 1);
+        final long maxMem_1K = runExplainAnalyze(statement, 1000);
+        final long maxMem_1M = runExplainAnalyze(statement, 1000 * 1000);
+        assertTrue(maxMem_1 < maxMem_1K && maxMem_1K < maxMem_1M);
+      }
+
+      // Verify that there is no memory leakage in the tracking system.
+      // If the tracking logic is not accurate and has errors, it will accumulate and shows in the
+      // output.
+      {
+        final long maxMemSimpleStart = runExplainAnalyze(statement, 1000);
+
+        final String query = buildExplainAnalyzeDemoQuery(1000);
+        int loopN = 100;
+        while (loopN-- > 0) {
+          statement.executeQuery(query);
+        }
+
+        final long maxMemSimpleEnd = runExplainAnalyze(statement, 1000);
+        assertEquals(maxMemSimpleEnd, maxMemSimpleStart);
+      }
+
+      // Run an accurate max-memory validation by including a single memory consumption operator
+      // like ORDER BY, which dominates the memory consumption during execution. The operator's
+      // memory consumption should be roughly equal to (or smaller than) the max memory consumption.
+      {
+        // Set the work_mem to a high value so that the memory doesn't get capped during testing.
+        statement.execute("SET work_mem=\"1000MB\";");
+        final ResultSet queryRs =
+          statement.executeQuery("EXPLAIN ANALYZE SELECT c1 FROM tst ORDER BY c1 LIMIT 1000000;");
+        final long sortMemKb = findSortMemUsageInExplain(queryRs);
+        final long maxMemKb = findMaxMemInExplain(queryRs);
+        assertTrue(maxMemKb > 0 && sortMemKb > 0);
+        // Validate that the max memory usage is within the expected range.
+        assertTrue(maxMemKb < sortMemKb * 1.1 && maxMemKb >= sortMemKb);
+      }
+
+      // The following tests only verifies EXPLAIN ANALYZE can be properly executed
+      // as the actual output values are highly platform dependent.
+      statement.execute("EXPLAIN ANALYZE UPDATE tst SET c1 = c1 + 1 WHERE c1 < 1000;");
+      statement.execute("EXPLAIN ANALYZE DELETE FROM tst WHERE c1 < 1000;");
+
+      statement.execute("BEGIN;");
+      statement.execute("EXPLAIN ANALYZE DECLARE decl CURSOR FOR SELECT * FROM tst limit 1000;");
+      statement.execute("END;");
+
+      statement.execute("EXPLAIN ANALYZE VALUES (1), (2), (3);");
+      statement.execute(
+        "EXPLAIN ANALYZE CREATE TABLE cre_tst AS SELECT * FROM tst limit 100;");
+      statement.execute(
+        "EXPLAIN ANALYZE CREATE MATERIALIZED VIEW cre_view AS SELECT * FROM tst limit 100;");
+    }
+  }
+
+  /**
+   * Validate the EXPLAIN ANALYZE output, and return maximum memory consumption found.
+   **/
+  private long runExplainAnalyze(Statement statement, final int limit) throws Exception {
+    final String explainQuery = buildExplainAnalyzeDemoQuery(limit);
+    final ResultSet result = statement.executeQuery(explainQuery);
+    return findMaxMemInExplain(result);
+  }
+
+  private final String buildExplainAnalyzeDemoQuery(final int limit) {
+    return "explain analyze execute demo(" + limit + ");";
+  }
+
+  /**
+   * Find the max memory in the EXPLAIN ANALYZE output in kilo-bytes. Throws exception if there is
+   * no max mem found.
+   */
+  private long findMaxMemInExplain(final ResultSet result) throws Exception {
+    while(result.next()) {
+      final String row = result.getString(1);
+      if (row.contains("Peak Memory Usage")) {
+        final String[] tks = row.split(" ");
+        long maxMem = Long.valueOf(tks[tks.length - 2]);
+        return maxMem;
+      }
+    }
+
+    throw new Exception("No max memory consumption found in the EXPLAIN output.");
+  }
+
+  /**
+   * Find the sort memory in the EXPLAIN ANALYZE output in kilo-bytes. Throws exception if there is
+   * no memory usage found.
+   */
+  private long findSortMemUsageInExplain(final ResultSet result) throws Exception {
+    while(result.next()) {
+      final String row = result.getString(1);
+      if (row.contains("Sort Method") && row.contains("Memory")) {
+        final String[] tks = row.split(" ");
+        final String kbs = tks[tks.length - 1];
+        final long memKb = Long.valueOf(kbs.replace("kB", ""));
+        return memKb;
+      }
+    }
+
+    throw new Exception("No sort memory consumption found in the EXPLAIN ANALYZE output.");
   }
 
   private void testStatement(Statement statement,

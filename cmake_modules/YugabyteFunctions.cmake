@@ -10,7 +10,124 @@
 # or implied.  See the License for the specific language governing permissions and limitations
 # under the License.
 
-# Various CMake functions. This should eventually be organized and refactored.
+# Various CMake macros and functions. This should eventually be organized and refactored.
+
+# -------------------------------------------------------------------------------------------------
+# Auxiliary macros for implementing other macros and functions.
+# -------------------------------------------------------------------------------------------------
+
+macro(set_in_current_and_parent_scope var_name var_value)
+  set(${var_name} "${var_value}")
+  if (NOT "${CMAKE_CURRENT_FUNCTION}" STREQUAL "")
+    set(${var_name} "${var_value}" PARENT_SCOPE)
+  endif()
+endmacro()
+
+macro(set_in_global_scope var_name var_value)
+  if("${CMAKE_CURRENT_FUNCTION}" STREQUAL "")
+    set(${var_name} "${var_value}")
+  else()
+    set(${var_name} "${var_value}" PARENT_SCOPE)
+  endif()
+endmacro()
+
+macro(assert_vars_defined var_names)
+  foreach(var_name IN LISTS var_names)
+    if(NOT DEFINED ${var_name})
+      message(FATAL_ERROR "Variable ${var_name} is not defined")
+    endif()
+  endforeach()
+endmacro()
+
+# -------------------------------------------------------------------------------------------------
+# Macros and functions for adding and manipulating compiler and linker flags.
+# -------------------------------------------------------------------------------------------------
+
+# This macro can be executed either from the top-level scope or from a function one level deep from
+# the top level scope.
+macro(ADD_CXX_FLAGS FLAGS)
+  if ($ENV{YB_VERBOSE})
+    message("Adding C++ flags: ${FLAGS}")
+  endif()
+  set_in_global_scope(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FLAGS}")
+endmacro()
+
+# Linker flags applied to both executables and shared libraries. We append this both to
+# CMAKE_EXE_LINKER_FLAGS and CMAKE_SHARED_LINKER_FLAGS after we finish making changes to this.
+# These flags apply to both YB and RocksDB parts of the codebase.
+#
+# This is an internal macro that modifies variables at the parent scope, which is really the parent
+# scope of the functions calling it, i.e. function caller's scope.
+macro(_ADD_LINKER_FLAGS_MACRO FLAGS)
+  if ($ENV{YB_VERBOSE})
+    message("Adding to linker flags: ${FLAGS}")
+  endif()
+
+  # We must set these variables in both current and parent scope, because this macro can be called
+  # multiple times from the same function.
+  set_in_current_and_parent_scope(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${FLAGS}")
+  set_in_current_and_parent_scope(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${FLAGS}")
+endmacro()
+
+macro(ADD_EXE_LINKER_FLAGS FLAGS)
+  if ($ENV{YB_VERBOSE})
+    message("Adding executable linking flags: ${FLAGS}")
+  endif()
+  set_in_current_and_parent_scope(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${FLAGS}")
+endmacro()
+
+function(ADD_LINKER_FLAGS FLAGS)
+  _ADD_LINKER_FLAGS_MACRO("${FLAGS}")
+endfunction()
+
+function(ADD_GLOBAL_RPATH_ENTRY RPATH_ENTRY)
+  _CHECK_LIB_DIR("${RPATH_ENTRY}" "rpath entry")
+  message("Adding a global rpath entry: ${RPATH_ENTRY}")
+  _ADD_LINKER_FLAGS_MACRO("-Wl,-rpath,${RPATH_ENTRY}")
+endfunction()
+
+# This is similar to ADD_GLOBAL_RPATH_ENTRY but also adds an -L<dir> linker flag.
+function(ADD_GLOBAL_RPATH_ENTRY_AND_LIB_DIR DIR_PATH)
+  _CHECK_LIB_DIR("${DIR_PATH}" "library directory and rpath entry")
+  message("Adding a library directory and global rpath entry: ${DIR_PATH}")
+  _ADD_LINKER_FLAGS_MACRO("-L${DIR_PATH}")
+  _ADD_LINKER_FLAGS_MACRO("-Wl,-rpath,${DIR_PATH}")
+endfunction()
+
+# Checks for redundant compiler or linker arguments in the given variable. Removes duplicate
+# arguments and stores the result back in the same variable. If the
+# YB_DEBUG_DUPLICATE_COMPILER_ARGS environment variable is set to 1, prints detailed debug output.
+function(yb_deduplicate_arguments args_var_name)
+  set(debug OFF)
+  if("$ENV{YB_DEBUG_DUPLICATE_COMPILER_ARGS}" STREQUAL "1")
+    set(debug ON)
+  endif()
+  separate_arguments(args_list UNIX_COMMAND "${${args_var_name}}")
+  if(debug)
+    message("Deduplicating ${args_var_name}:")
+  endif()
+  set(deduplicated_args "")
+  foreach(arg IN LISTS args_list)
+    if(arg IN_LIST deduplicated_args)
+      if(debug)
+        message("    DUPLICATE argument     : ${arg}")
+      endif()
+    else()
+      if(debug)
+        message("    Non-duplicate argument : ${arg}")
+      endif()
+      list(APPEND deduplicated_args "${arg}")
+    endif()
+  endforeach()
+  list(JOIN "${deduplicated_args}" " " joined_deduplicated_args)
+  set("${args_var_name}" PARENT_SCOPE "${joined_deduplicated_args}")
+endfunction()
+
+# -------------------------------------------------------------------------------------------------
+
+macro(yb_initialize_constants)
+  set(BUILD_SUPPORT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build-support")
+endmacro()
 
 function(CHECK_YB_COMPILER_PATH COMPILER_PATH)
   if(NOT "${COMPILER_PATH}" MATCHES "/compiler-wrappers/(cc|c[+][+])$" AND
@@ -93,20 +210,13 @@ function(DETECT_BREW)
   # TODO: consolidate Linuxbrew detection logic between here and detect_brew in common-build-env.sh.
   # As of 10/2020 we only check the compiler version here but not in detect_brew.
   set(USING_LINUXBREW FALSE)
-  if(NOT APPLE AND
-     # In practice, we only use Linuxbrew with Clang 7.x.
-     (NOT IS_CLANG OR "${COMPILER_VERSION}" VERSION_LESS "8.0.0") AND
-     # In practice, we only use Linuxbrew with GCC 5.x.
-     (NOT IS_GCC OR "${COMPILER_VERSION}" VERSION_LESS "6.0.0") AND
-     # Only a few compiler types could be used with Linuxbrew. The "clang7" compiler type is
-     # explicitly NOT included.
-     ("${YB_COMPILE_TYPE}" MATCHES "^(gcc|gcc5|clang)$"))
+  if(NOT APPLE)
+    set(LINUXBREW_DIR "$ENV{YB_LINUXBREW_DIR}")
     message("Trying to detect whether we should use Linuxbrew. "
             "IS_CLANG=${IS_CLANG}, "
             "IS_GCC=${IS_GCC}, "
             "COMPILER_VERSION=${COMPILER_VERSION}, "
             "LINUXBREW_DIR=${LINUXBREW_DIR}")
-    set(LINUXBREW_DIR "$ENV{YB_LINUXBREW_DIR}")
     if("${LINUXBREW_DIR}" STREQUAL "")
       if(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/linuxbrew_path.txt")
         file(STRINGS "${CMAKE_CURRENT_BINARY_DIR}/linuxbrew_path.txt" LINUXBREW_DIR)
@@ -134,34 +244,6 @@ function(DETECT_BREW)
   set(LINUXBREW_LIB_DIR "${LINUXBREW_DIR}/lib" PARENT_SCOPE)
 endfunction()
 
-# Ensures that the YB_COMPILER_TYPE environment variable matches the auto-detected compiler family.
-# Also this sets the convienience variables IS_GCC and IS_CLANG.
-function(INIT_COMPILER_TYPE_FROM_BUILD_ROOT)
-  get_filename_component(BUILD_ROOT_BASENAME "${CMAKE_CURRENT_BINARY_DIR}" NAME)
-
-  if ("$ENV{YB_COMPILER_TYPE}" STREQUAL "")
-    # TODO: deduplicate this.
-    string(REGEX MATCH "^.*-zapcc-.*$" RE_MATCH_RESULT "${BUILD_ROOT_BASENAME}")
-    if (NOT "${RE_MATCH_RESULT}" STREQUAL "")
-      set(ENV{YB_COMPILER_TYPE} "zapcc")
-    else()
-      string(REGEX MATCH "^.*-gcc-.*$" RE_MATCH_RESULT "${BUILD_ROOT_BASENAME}")
-      if (NOT "${RE_MATCH_RESULT}" STREQUAL "")
-        set(ENV{YB_COMPILER_TYPE} "gcc")
-      else()
-        string(REGEX MATCH "^.*-clang-.*$" RE_MATCH_RESULT "${BUILD_ROOT_BASENAME}")
-        if (NOT "${RE_MATCH_RESULT}" STREQUAL "")
-          set(ENV{YB_COMPILER_TYPE} "clang")
-        endif()
-      endif()
-    endif()
-  endif()
-
-  message("YB_COMPILER_TYPE env var: $ENV{YB_COMPILER_TYPE}")
-  # Make sure we can use $ENV{YB_COMPILER_TYPE} and ${YB_COMPILER_TYPE} interchangeably.
-  SET(YB_COMPILER_TYPE "$ENV{YB_COMPILER_TYPE}" PARENT_SCOPE)
-endfunction()
-
 # Makes sure that we are using a supported compiler family.
 function(EXPECT_COMPILER_TYPE_TO_BE_SET)
   if (NOT DEFINED YB_COMPILER_TYPE OR "${YB_COMPILER_TYPE}" STREQUAL "")
@@ -175,62 +257,26 @@ function(VALIDATE_COMPILER_TYPE)
     set(ENV{YB_COMPILER_TYPE} "${COMPILER_FAMILY}")
   endif()
 
-  if ("$ENV{YB_COMPILER_TYPE}" STREQUAL "zapcc")
-    if (NOT "${COMPILER_FAMILY}" STREQUAL "clang")
-      message(FATAL_ERROR
-              "Compiler type is zapcc but the compiler family is '${COMPILER_FAMILY}' "
-              "(expected to be clang)")
-    endif()
-  endif()
-
-  if("${YB_COMPILER_TYPE}" MATCHES "^gcc.*$" AND NOT "${COMPILER_FAMILY}" STREQUAL "gcc")
+  if(NOT "${YB_COMPILER_TYPE}" MATCHES "^${COMPILER_FAMILY}([0-9]*)$")
     message(FATAL_ERROR
             "Compiler type '${YB_COMPILER_TYPE}' does not match the compiler family "
             "'${COMPILER_FAMILY}'.")
   endif()
 
-  if(("${YB_COMPILER_TYPE}" STREQUAL "gcc8" AND NOT "${COMPILER_VERSION}" MATCHES "^8[.].*$") OR
-     ("${YB_COMPILER_TYPE}" STREQUAL "gcc9" AND NOT "${COMPILER_VERSION}" MATCHES "^9[.].*$"))
+  # On macOS, we use the compiler type of simply "clang", without a major version suffix.
+  # On Linux, we validate that the major version in the compiler type matches the actual one.
+  if(NOT "${YB_COMPILER_TYPE}" STREQUAL "clang" AND
+     NOT "${COMPILER_VERSION}" MATCHES "^${CMAKE_MATCH_1}[.].*$")
     message(FATAL_ERROR
-            "Invalid compiler version '${COMPILER_VERSION}' for compiler type "
-            "'${YB_COMPILER_TYPE}'.")
+            "Compiler version ${COMPILER_VERSION} does not match the major version "
+            "${CMAKE_MATCH_1} from the compiler type ${YB_COMPILER_TYPE}.")
   endif()
 
-  if (NOT "${COMPILER_FAMILY}" STREQUAL "gcc" AND
-      NOT "${COMPILER_FAMILY}" STREQUAL "clang")
+  if (NOT IS_GCC AND
+      NOT IS_CLANG)
     message(FATAL_ERROR "Unknown compiler family: ${COMPILER_FAMILY} (expected 'gcc' or 'clang').")
   endif()
-
-  set(IS_CLANG FALSE PARENT_SCOPE)
-  if ("${COMPILER_FAMILY}" STREQUAL "clang")
-    set(IS_CLANG TRUE PARENT_SCOPE)
-  endif()
-
-  set(IS_GCC FALSE PARENT_SCOPE)
-  if ("${COMPILER_FAMILY}" STREQUAL "gcc")
-    set(IS_GCC TRUE PARENT_SCOPE)
-  endif()
 endfunction()
-
-# Linker flags applied to both executables and shared libraries. We append this both to
-# CMAKE_EXE_LINKER_FLAGS and CMAKE_SHARED_LINKER_FLAGS after we finish making changes to this.
-# These flags apply to both YB and RocksDB parts of the codebase.
-#
-# This is an internal macro that modifies variables at the parent scope, which is really the parent
-# scope of the functions calling it, i.e. function caller's scope.
-macro(_ADD_LINKER_FLAGS_MACRO FLAGS)
-  if ($ENV{YB_VERBOSE})
-    message("Adding to linker flags: ${FLAGS}")
-  endif()
-
-  # We must set these variables in both current and parent scope, because this macro can be called
-  # multiple times from the same function.
-  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${FLAGS}")
-  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${FLAGS}" PARENT_SCOPE)
-
-  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${FLAGS}")
-  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${FLAGS}" PARENT_SCOPE)
-endmacro()
 
 # Check if the given directory is not an empty string and also warn if it does not exist.
 function(_CHECK_LIB_DIR DIR_PATH DESCRIPTION)
@@ -243,24 +289,6 @@ function(_CHECK_LIB_DIR DIR_PATH DESCRIPTION)
       "Adding a non-existent ${DESCRIPTION} '${DIR_PATH}'. "
       "This might be OK in case the directory is created during the build.")
   endif()
-endfunction()
-
-function(ADD_LINKER_FLAGS FLAGS)
-  _ADD_LINKER_FLAGS_MACRO("${FLAGS}")
-endfunction()
-
-function(ADD_GLOBAL_RPATH_ENTRY RPATH_ENTRY)
-  _CHECK_LIB_DIR("${RPATH_ENTRY}" "rpath entry")
-  message("Adding a global rpath entry: ${RPATH_ENTRY}")
-  _ADD_LINKER_FLAGS_MACRO("-Wl,-rpath,${RPATH_ENTRY}")
-endfunction()
-
-# This is similar to ADD_GLOBAL_RPATH_ENTRY but also adds an -L<dir> linker flag.
-function(ADD_GLOBAL_RPATH_ENTRY_AND_LIB_DIR DIR_PATH)
-  _CHECK_LIB_DIR("${DIR_PATH}" "library directory and rpath entry")
-  message("Adding a library directory and global rpath entry: ${DIR_PATH}")
-  _ADD_LINKER_FLAGS_MACRO("-L${DIR_PATH}")
-  _ADD_LINKER_FLAGS_MACRO("-Wl,-rpath,${DIR_PATH}")
 endfunction()
 
 # CXX_YB_COMMON_FLAGS are flags that are common across the 'src/yb' portion of the codebase (but do
@@ -279,20 +307,6 @@ endfunction()
 #     can result in subtle bad code generation.  This has a small perf hit but worth it to avoid
 #     hard to debug crashes.
 
-function(ADD_CXX_FLAGS FLAGS)
-  if ($ENV{YB_VERBOSE})
-    message("Adding C++ flags: ${FLAGS}")
-  endif()
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FLAGS}" PARENT_SCOPE)
-endfunction()
-
-function(ADD_EXE_LINKER_FLAGS FLAGS)
-  if ($ENV{YB_VERBOSE})
-    message("Adding executable linking flags: ${FLAGS}")
-  endif()
-  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${FLAGS}" PARENT_SCOPE)
-endfunction()
-
 function(YB_INCLUDE_EXTENSIONS)
   file(RELATIVE_PATH CUR_REL_LIST_FILE "${YB_SRC_ROOT}" "${CMAKE_CURRENT_LIST_FILE}")
   get_filename_component(CUR_REL_LIST_NAME_NO_EXT "${CUR_REL_LIST_FILE}" NAME_WE)
@@ -307,6 +321,9 @@ function(YB_INCLUDE_EXTENSIONS)
 endfunction()
 
 function(yb_remember_dependency target)
+  if("${ARGN}" STREQUAL "")
+    message(FATAL_ERROR "yb_remember_dependency() called with no arguments")
+  endif()
   # We use \\n instead of a real newline as this is stored in the CMake cache, and some versions
   # of CMake can't parse their own cache in case some values have newlines.
   set(YB_ALL_DEPS "${YB_ALL_DEPS}\\n${target}: ${ARGN}" CACHE INTERNAL "All dependencies" FORCE)
@@ -366,6 +383,22 @@ function(add_executable name)
   if (NOT "$ENV{YB_DISABLE_LATEST_SYMLINK}" STREQUAL "1")
     add_dependencies(${name} latest_symlink)
   endif()
+
+  if("${YB_TCMALLOC_ENABLED}" STREQUAL "1")
+    # Link every executable with gperftools's tcmalloc static library.
+    # The other relevant library, libprofiler, will be linked by the libraries that need it.
+    #
+    # We need to ensure that all symbols from the tcmalloc library are retained. This is done
+    # differently depending on the OS.
+    target_link_libraries(${name} "${TCMALLOC_STATIC_LIB_LD_FLAGS}")
+  endif()
+
+  yb_process_pch(${name})
+endfunction()
+
+function(add_library name)
+  _add_library("${name}" ${ARGN})
+  yb_process_pch(${name})
 endfunction()
 
 macro(YB_SETUP_CLANG)
@@ -375,7 +408,7 @@ macro(YB_SETUP_CLANG)
   # so that the annotations in the header actually take effect.
   ADD_CXX_FLAGS("-D_GLIBCXX_EXTERN_TEMPLATE=0")
 
-  set(LIBCXX_DIR "${YB_THIRDPARTY_DIR}/installed/${THIRDPARTY_INSTRUMENTATION_TYPE}/libcxx")
+  set(LIBCXX_DIR "${YB_THIRDPARTY_INSTALLED_DIR}/${THIRDPARTY_INSTRUMENTATION_TYPE}/libcxx")
   if(NOT EXISTS "${LIBCXX_DIR}")
     message(FATAL_ERROR "libc++ directory does not exist: '${LIBCXX_DIR}'")
   endif()
@@ -390,15 +423,50 @@ macro(YB_SETUP_CLANG)
   # the Linuxbrew include directory too.
   include_directories(SYSTEM "${LIBCXX_INCLUDE_DIR}")
 
+  if(NOT APPLE)
+    execute_process(COMMAND "${CMAKE_CXX_COMPILER}" -print-search-dirs
+                    OUTPUT_VARIABLE CLANG_PRINT_SEARCH_DIRS_OUTPUT)
+
+    if ("${CLANG_PRINT_SEARCH_DIRS_OUTPUT}" MATCHES ".*libraries: =([^:]+)(:.*|$)" )
+      # We get a directory like this:
+      # .../yb-llvm-v12.0.1-yb-1-1639783720-bdb147e6-almalinux8-x86_64/lib/clang/12.0.1
+      set(CLANG_LIB_DIR "${CMAKE_MATCH_1}")
+      set(CLANG_RUNTIME_LIB_DIR "${CLANG_LIB_DIR}/lib/linux")
+      if(NOT EXISTS "${CLANG_RUNTIME_LIB_DIR}")
+        set(CLANG_RUNTIME_LIB_DIR
+            "${CLANG_LIB_DIR}/lib/${CMAKE_SYSTEM_PROCESSOR}-unknown-linux-gnu")
+        if(NOT EXISTS "${CLANG_RUNTIME_LIB_DIR}")
+          message(FATAL_ERROR
+                  "Failed to determine Clang runtime library directory inside of "
+                  "${CLANG_RUNTIME_LIB_DIR}/lib")
+        endif()
+      endif()
+    else()
+      message(FATAL_ERROR
+              "Could not parse the output of 'clang -print-search-dirs': "
+              "${CLANG_PRINT_SEARCH_DIRS_OUTPUT}")
+    endif()
+    if(USING_LINUXBREW)
+      set(CLANG_INCLUDE_DIR "${CLANG_LIB_DIR}/include")
+      if(NOT EXISTS "${CLANG_INCLUDE_DIR}")
+        message(FATAL_ERROR "Clang include directory '${CLANG_INCLUDE_DIR}' does not exist")
+      endif()
+      ADD_CXX_FLAGS("-isystem ${CLANG_INCLUDE_DIR}")
+    endif()
+
+    if ("${COMPILER_VERSION}" VERSION_GREATER_EQUAL "12.0.0")
+      ADD_LINKER_FLAGS("-fuse-ld=lld")
+      ADD_LINKER_FLAGS("-lunwind")
+    endif()
+  endif()
+
   ADD_CXX_FLAGS("-nostdinc++")
+  if(USING_LINUXBREW)
+    ADD_CXX_FLAGS("-nostdinc")
+  endif()
   ADD_LINKER_FLAGS("-L${LIBCXX_DIR}/lib")
   if(NOT EXISTS "${LIBCXX_DIR}/lib")
     message(FATAL_ERROR "libc++ library directory does not exist: '${LIBCXX_DIR}/lib'")
-  endif()
-
-  if("${COMPILER_VERSION}" MATCHES "^7[.]*" AND NOT USING_LINUXBREW)
-    # A special linker flag needed only with the Clang 7 build not using Linuxbrew.
-    ADD_LINKER_FLAGS("-lgcc_s")
   endif()
 endmacro()
 
@@ -411,7 +479,7 @@ macro(YB_SETUP_SANITIZER)
       "Build type: ${YB_BUILD_TYPE}.")
   endif()
 
-  if("${COMPILER_FAMILY}" STREQUAL "clang")
+  if(IS_CLANG)
     message("Using instrumented libc++ (build type: ${YB_BUILD_TYPE})")
     YB_SETUP_CLANG("${YB_BUILD_TYPE}")
   else()
@@ -420,11 +488,10 @@ macro(YB_SETUP_SANITIZER)
   endif()
 
   if("${YB_BUILD_TYPE}" STREQUAL "asan")
-    if("${COMPILER_FAMILY}" STREQUAL "clang" AND
+    if(IS_CLANG AND
        "${COMPILER_VERSION}" VERSION_GREATER_EQUAL "10.0.0" AND
        NOT APPLE)
-      # TODO: see if we can use static libasan instead (requires third-party changes).
-      ADD_CXX_FLAGS("-shared-libasan")
+      ADD_CXX_FLAGS("-mllvm -asan-use-private-alias=1")
       ADD_LINKER_FLAGS("-lunwind")
 
       # TODO: this is mostly needed because we depend on the ASAN runtime shared library and that
@@ -432,20 +499,13 @@ macro(YB_SETUP_SANITIZER)
       # dependency on libc++ so it gets resolved using our rpath.
       ADD_LINKER_FLAGS("-lc++")
 
-      execute_process(
-        COMMAND "${CMAKE_CXX_COMPILER}" -print-search-dirs
-        OUTPUT_VARIABLE CLANG_PRINT_SEARCH_DIRS_OUTPUT)
-      if ("${CLANG_PRINT_SEARCH_DIRS_OUTPUT}" MATCHES ".*libraries: =([^:]+)(:.*|$)" )
-        set(CLANG_RUNTIME_LIB_DIR "${CMAKE_MATCH_1}/lib/linux")
-        if(NOT EXISTS "${CLANG_RUNTIME_LIB_DIR}")
-          message(FATAL_ERROR "Clang runtime directory does not exist: ${CLANG_RUNTIME_LIB_DIR}")
-        endif()
-        ADD_GLOBAL_RPATH_ENTRY("${CLANG_RUNTIME_LIB_DIR}")
-      else()
-        message(FATAL_ERROR
-                "Could not parse the output of 'clang -print-search-dirs': "
-                "${CLANG_PRINT_SEARCH_DIRS_OUTPUT}")
+      if("${CLANG_RUNTIME_LIB_DIR}" STREQUAL "")
+        message(FATAL_ERROR "CLANG_RUNTIME_LIB_DIR is not set")
       endif()
+      if(NOT EXISTS "${CLANG_RUNTIME_LIB_DIR}")
+        message(FATAL_ERROR "Clang runtime directory does not exist: ${CLANG_RUNTIME_LIB_DIR}")
+      endif()
+      ADD_GLOBAL_RPATH_ENTRY("${CLANG_RUNTIME_LIB_DIR}")
     endif()
 
     ADD_CXX_FLAGS("-fsanitize=address")
@@ -453,7 +513,7 @@ macro(YB_SETUP_SANITIZER)
 
     # Compile and link against the thirdparty ASAN instrumented libstdcxx.
     ADD_EXE_LINKER_FLAGS("-fsanitize=address")
-    if("${COMPILER_FAMILY}" STREQUAL "gcc")
+    if(IS_GCC)
       ADD_EXE_LINKER_FLAGS("-lubsan -ldl")
       ADD_CXX_FLAGS("-Wno-error=maybe-uninitialized")
     endif()
@@ -468,7 +528,7 @@ macro(YB_SETUP_SANITIZER)
 
     # Compile and link against the thirdparty TSAN instrumented libstdcxx.
     ADD_EXE_LINKER_FLAGS("-fsanitize=thread")
-    if("${COMPILER_FAMILY}" STREQUAL "clang" AND
+    if(IS_CLANG AND
        "${COMPILER_VERSION}" VERSION_GREATER_EQUAL "10.0.0")
       # To avoid issues with missing libunwind symbols:
       # https://gist.githubusercontent.com/mbautin/5bc53ed2d342eab300aec7120eb42996/raw
@@ -497,6 +557,82 @@ function(SHOW_FOUND_BOOST_DETAILS BOOST_LIBRARY_TYPE)
   message("    Boost_LIB_DIAGNOSTIC_DEFINITIONS: ${Boost_LIB_DIAGNOSTIC_DEFINITIONS}")
 endfunction()
 
+# Setup target to use precompiled headers.
+function(yb_process_pch target)
+  if("${YB_PCH_PREFIX}" STREQUAL "" OR NOT ${YB_PCH_ON})
+    return()
+  endif()
+
+  set(pch_file_property "PCH_FILE_FOR_${YB_PCH_PREFIX}")
+  get_property(pch_file GLOBAL PROPERTY "${pch_file_property}")
+
+  if ("${pch_file}" STREQUAL "")
+    _add_library(${YB_PCH_PREFIX}_pch SHARED)
+    get_target_property(build_dir ${YB_PCH_PREFIX}_pch BINARY_DIR)
+    set(pch_dir "${build_dir}/CMakeFiles/${YB_PCH_PREFIX}_pch.dir")
+    set(pch_file "${pch_dir}/${YB_PCH_PREFIX}_pch.h.pch")
+    set(pch_cc_file "${build_dir}/${YB_PCH_PREFIX}_pch.cc")
+    set(pch_h_file_copy "${pch_dir}/${YB_PCH_PREFIX}_pch.h")
+
+    get_target_property(source_dir ${target} SOURCE_DIR)
+    set(pch_h_file "${source_dir}/${YB_PCH_PATH}${YB_PCH_PREFIX}_pch.h")
+
+    message("Generating PCH for ${YB_PCH_PREFIX}: ${pch_file}")
+    set_property(GLOBAL PROPERTY "${pch_file_property}" "${pch_file}")
+
+    if(NOT EXISTS "${pch_cc_file}")
+      file(MAKE_DIRECTORY "${build_dir}")
+      file(TOUCH "${pch_cc_file}")
+    endif()
+    # This file is only required by CLion, so could be out of date.
+    if(NOT EXISTS "${pch_h_file_copy}")
+      file(MAKE_DIRECTORY "${pch_dir}")
+      file(COPY "${pch_h_file}" DESTINATION "${pch_dir}")
+    endif()
+    target_sources(${YB_PCH_PREFIX}_pch PRIVATE "${pch_cc_file}")
+
+    set_source_files_properties(
+        "${YB_PCH_PREFIX}_pch.cc" PROPERTIES
+        COMPILE_FLAGS "-yb-pch ${source_dir}/${YB_PCH_PATH}${YB_PCH_PREFIX}_pch.h")
+
+    if (NOT "${YB_PCH_DEP_LIBS}" STREQUAL "")
+      target_link_libraries(${YB_PCH_PREFIX}_pch PUBLIC "${YB_PCH_DEP_LIBS}")
+    endif()
+    target_link_libraries(${YB_PCH_PREFIX}_pch PUBLIC "${YB_BASE_LIBS}")
+
+    # Intermediate target is required to make sure that PCH file generated before any dependent
+    # binary source file compilation.
+    add_custom_target(${YB_PCH_PREFIX}_pch_proxy DEPENDS "${pch_h_file}")
+    add_dependencies(${YB_PCH_PREFIX}_pch_proxy "${YB_PCH_PREFIX}_pch")
+  endif()
+
+  yb_use_pch(${target} ${YB_PCH_PREFIX})
+endfunction()
+
+function(yb_use_pch target prefix)
+  if(NOT ${YB_PCH_ON})
+    return()
+  endif()
+
+  set(pch_file_property "PCH_FILE_FOR_${prefix}")
+  get_property(pch_file GLOBAL PROPERTY "${pch_file_property}")
+
+  if ("${pch_file}" STREQUAL "")
+    message(FATAL_ERROR "PCH file not set for ${prefix}")
+  endif()
+
+  set(use_pch_flags "-Xclang -include-pch -Xclang ${pch_file}")
+  get_target_property(compile_flags ${target} COMPILE_FLAGS)
+  if (NOT ${compile_flags} STREQUAL "compile_flags-NOTFOUND")
+    set(compile_flags "${compile_flags} ${use_pch_flags}")
+  else()
+    set(compile_flags "${use_pch_flags}")
+  endif ()
+  set_target_properties(${target} PROPERTIES COMPILE_FLAGS "${compile_flags}")
+  target_link_libraries(${target} ${prefix}_pch)
+  add_dependencies(${target} ${prefix}_pch_proxy)
+endfunction()
+
 # A wrapper around add_library() for YugabyteDB libraries.
 #
 # Required arguments:
@@ -521,12 +657,10 @@ function(ADD_YB_LIBRARY LIB_NAME)
   endif()
 
   add_library(${LIB_NAME} ${ARG_SRCS})
-  if(ARG_COMPILE_FLAGS)
-    set_target_properties(${LIB_NAME}
-      PROPERTIES COMPILE_FLAGS ${ARG_COMPILE_FLAGS})
+
+  if(ARG_DEPS)
+    target_link_libraries(${LIB_NAME} ${ARG_DEPS})
   endif()
-  target_link_libraries(${LIB_NAME} ${ARG_DEPS})
-  yb_remember_dependency(${LIB_NAME} ${ARG_DEPS})
   if(ARG_NONLINK_DEPS)
     add_dependencies(${LIB_NAME} ${ARG_NONLINK_DEPS})
   endif()
@@ -550,20 +684,51 @@ function(ADD_POSTGRES_SHARED_LIBRARY LIB_NAME SHARED_LIB_PATH)
           "${SHARED_LIB_PATH} (invoked from ${CMAKE_CURRENT_LIST_FILE})")
 endfunction()
 
-function(parse_build_root_basename)
-  get_filename_component(YB_BUILD_ROOT_BASENAME "${CMAKE_CURRENT_BINARY_DIR}" NAME)
-  string(REPLACE "-" ";" YB_BUILD_ROOT_BASENAME_COMPONENTS ${YB_BUILD_ROOT_BASENAME})
-  list(LENGTH YB_BUILD_ROOT_BASENAME_COMPONENTS YB_BUILD_ROOT_BASENAME_COMPONENTS_LENGTH)
-  if(YB_BUILD_ROOT_BASENAME_COMPONENTS_LENGTH LESS 3 OR
-     YB_BUILD_ROOT_BASENAME_COMPONENTS_LENGTH GREATER 4)
-    message(
-        FATAL_ERROR
-        "Wrong number of components of the build root basename: "
-        "${YB_BUILD_ROOT_BASENAME_COMPONENTS_LENGTH}. Expected 3 or 4 components. "
-        "Basename: ${YB_BUILD_ROOT_BASENAME}")
+# To be invoked from functions that are themselves invoked from the global scope.
+macro(detect_lto_type_from_linking_type)
+  if("${CMAKE_CURRENT_FUNCTION}" STREQUAL "")
+    message(FATAL_ERROR "The detect_lto_type_from_linking_type must be invoked from a function")
   endif()
-  list(GET YB_BUILD_ROOT_BASENAME_COMPONENTS 0 YB_BUILD_TYPE)
-  set(YB_BUILD_TYPE "${YB_BUILD_TYPE}" PARENT_SCOPE)
+  if ("${YB_LINKING_TYPE}" STREQUAL "")
+    message(FATAL_ERROR "YB_LINKING_TYPE is not set")
+  endif()
+  # Set the YB_LTO_ENABLED variable in the parent scope of the calling function (this is a macro).
+  if("${YB_LINKING_TYPE}" MATCHES "^(.*)-lto$")
+    set(YB_LTO_ENABLED ON PARENT_SCOPE)
+    message("Enabling ${CMAKE_MATCH_1} LTO based on linking type: ${YB_LINKING_TYPE}")
+    set(YB_LTO_TYPE "${CMAKE_MATCH_1}" PARENT_SCOPE)
+  else()
+    set(YB_LTO_ENABLED OFF PARENT_SCOPE)
+    set(YB_LTO_TYPE "" PARENT_SCOPE)
+  endif()
+endmacro()
+
+function(parse_build_root_basename)
+  if ("${BUILD_SUPPORT_DIR}" STREQUAL "")
+    message(FATAL_ERROR "BUILD_SUPPORT_DIR is not set in parse_build_root_basename")
+  endif()
+  get_filename_component(YB_BUILD_ROOT_BASENAME "${CMAKE_CURRENT_BINARY_DIR}" NAME)
+
+  EXEC_PROGRAM("${BUILD_SUPPORT_DIR}/show_build_root_name_regex.sh"
+               OUTPUT_VARIABLE BUILD_ROOT_BASENAME_RE)
+  string(REGEX MATCH "${BUILD_ROOT_BASENAME_RE}" RE_MATCH_RESULT "${YB_BUILD_ROOT_BASENAME}")
+  if("$ENV{YB_DEBUG_BUILD_ROOT_BASENAME_PARSING}" STREQUAL "1")
+    message("Parsing build root basename: ${YB_BUILD_ROOT_BASENAME}")
+    message("Regular expression: ${BUILD_ROOT_BASENAME_RE}")
+    message("Capture groups (note that some components are repeated with and without a leading "
+            "dash):")
+    foreach(MATCH_INDEX RANGE 1 9)
+      message("    CMAKE_MATCH_${MATCH_INDEX}=${CMAKE_MATCH_${MATCH_INDEX}}")
+    endforeach()
+  endif()
+
+  set(YB_BUILD_TYPE "${CMAKE_MATCH_1}" PARENT_SCOPE)
+
+  # -----------------------------------------------------------------------------------------------
+  # YB_COMPILER_TYPE
+  # -----------------------------------------------------------------------------------------------
+
+  set(YB_COMPILER_TYPE_FROM_BUILD_ROOT_BASENAME "${CMAKE_MATCH_2}")
   if(NOT "${YB_COMPILER_TYPE}" STREQUAL "" AND
      NOT "${YB_COMPILER_TYPE}" STREQUAL "${YB_COMPILER_TYPE_FROM_BUILD_ROOT_BASENAME}")
     message(
@@ -573,7 +738,6 @@ function(parse_build_root_basename)
         "different: '${YB_COMPILER_TYPE_FROM_BUILD_ROOT_BASENAME}'.")
   endif()
 
-  list(GET YB_BUILD_ROOT_BASENAME_COMPONENTS 1 YB_COMPILER_TYPE_FROM_BUILD_ROOT_BASENAME)
   if(NOT "$ENV{YB_COMPILER_TYPE}" STREQUAL "" AND
      NOT "$ENV{YB_COMPILER_TYPE}" STREQUAL "${YB_COMPILER_TYPE_FROM_BUILD_ROOT_BASENAME}")
     message(
@@ -582,15 +746,201 @@ function(parse_build_root_basename)
         "the value auto-detected from the build root basename '${YB_BUILD_ROOT_BASENAME}' is "
         "different: '${YB_COMPILER_TYPE_FROM_BUILD_ROOT_BASENAME}'.")
   endif()
+
   set(YB_COMPILER_TYPE "${YB_COMPILER_TYPE_FROM_BUILD_ROOT_BASENAME}" PARENT_SCOPE)
   set(ENV{YB_COMPILER_TYPE} "${YB_COMPILER_TYPE_FROM_BUILD_ROOT_BASENAME}")
 
-  list(GET YB_BUILD_ROOT_BASENAME_COMPONENTS 2 YB_LINKING_TYPE)
-  if(NOT "${YB_LINKING_TYPE}" MATCHES "^(static|dynamic)$")
+  # -----------------------------------------------------------------------------------------------
+  # YB_USING_LINUXBREW_FROM_BUILD_ROOT
+  # -----------------------------------------------------------------------------------------------
+
+  if (NOT "${CMAKE_MATCH_3}" STREQUAL "-linuxbrew" AND
+      NOT "${CMAKE_MATCH_3}" STREQUAL "")
+    message(FATAL_ERROR
+            "Invalid value of the 3rd capture group for build root basename"
+            "'${YB_BUILD_ROOT_BASENAME}': either '-linuxbrew' or an empty string.")
+  endif()
+
+  if ("${CMAKE_MATCH_3}" STREQUAL "-linuxbrew")
+    set(YB_USING_LINUXBREW_FROM_BUILD_ROOT ON PARENT_SCOPE)
+  else()
+    set(YB_USING_LINUXBREW_FROM_BUILD_ROOT OFF PARENT_SCOPE)
+  endif()
+
+  # -----------------------------------------------------------------------------------------------
+  # YB_LINKING_TYPE
+  # -----------------------------------------------------------------------------------------------
+
+  set(YB_LINKING_TYPE "${CMAKE_MATCH_5}")
+  if(NOT "${YB_LINKING_TYPE}" MATCHES "^(dynamic|thin-lto|full-lto)$")
     message(
         FATAL_ERROR
         "Invalid linking type from the build root basename '${YB_BUILD_ROOT_BASENAME}': "
-        "'${YB_LINKING_TYPE}'. Expected 'static' or 'dynamic'.")
+        "'${YB_LINKING_TYPE}'. Expected 'dynamic', 'thin-lto', or 'full-lto'.")
   endif()
   set(YB_LINKING_TYPE "${YB_LINKING_TYPE}" PARENT_SCOPE)
+  detect_lto_type_from_linking_type()
+
+  set(OPTIONAL_DASH_NINJA "${CMAKE_MATCH_8}")
+  if(NOT "${OPTIONAL_DASH_NINJA}" STREQUAL "" AND
+     NOT "${OPTIONAL_DASH_NINJA}" STREQUAL "-ninja")
+    message(FATAL_ERROR
+            "Invalid value of the 8th capture group for build root basename"
+            "'${YB_BUILD_ROOT_BASENAME}': either '-ninja' or an empty string.")
+  endif()
+
+  set(YB_TARGET_ARCH_FROM_BUILD_ROOT "${CMAKE_MATCH_7}")
+  if (NOT "${YB_TARGET_ARCH_FROM_BUILD_ROOT}" STREQUAL "" AND
+      NOT "${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "${YB_TARGET_ARCH_FROM_BUILD_ROOT}")
+    message(
+        FATAL_ERROR
+        "Target architecture inferred from build root is '${YB_TARGET_ARCH_FROM_BUILD_ROOT}', "
+        "but CMAKE_SYSTEM_PROCESSOR is ${CMAKE_SYSTEM_PROCESSOR}")
+  endif()
+endfunction()
+
+macro(configure_macos_sdk)
+  if(APPLE AND "${YB_COMPILER_TYPE}" MATCHES "^clang[0-9]+$")
+    if(NOT "${MACOS_SDK_DIR}" STREQUAL "" AND
+       NOT "${MACOS_SDK_VERSION}" STREQUAL "")
+      message("Using cached macOS SDK directory ${MACOS_SDK_DIR}, version ${MACOS_SDK_VERSION}")
+    else()
+      set(MACOS_SDK_BASE_DIR "/Library/Developer/CommandLineTools/SDKs")
+
+      file(GLOB MACOS_SDK_DIRS "${MACOS_SDK_BASE_DIR}/*")
+      set(MACOS_SDK_DIR "")
+      set(MACOS_SDK_VERSION "")
+      foreach(MACOS_SDK_CANDIDATE_DIR ${MACOS_SDK_DIRS})
+        get_filename_component(
+          MACOS_SDK_CANDIDATE_DIR_NAME "${MACOS_SDK_CANDIDATE_DIR}" NAME)
+        if("${MACOS_SDK_CANDIDATE_DIR_NAME}" MATCHES "^MacOSX([0-9.]+)[.]sdk$")
+          set(MACOS_SDK_CANDIDATE_VERSION "${CMAKE_MATCH_1}")
+          if ("${MACOS_SDK_VERSION}" STREQUAL "" OR
+              "${MACOS_SDK_CANDIDATE_VERSION}" VERSION_GREATER "${MACOS_SDK_VERSION}")
+            set(MACOS_SDK_DIR "${MACOS_SDK_CANDIDATE_DIR}")
+            set(MACOS_SDK_VERSION "${MACOS_SDK_CANDIDATE_VERSION}")
+          endif()
+        endif()
+      endforeach()
+      if("${MACOS_SDK_VERSION}" STREQUAL "")
+        message(FATAL_ERROR "Did not find a macOS SDK at ${MACOS_SDK_BASE_DIR}")
+      endif()
+      message("Using macOS SDK version ${MACOS_SDK_VERSION} at ${MACOS_SDK_DIR}")
+      # CMake's INTERNAL type of cache variables implies FORCE, overwriting existing entries.
+      # https://cmake.org/cmake/help/latest/command/set.html
+      set(MACOS_SDK_DIR "${MACOS_SDK_DIR}" CACHE INTERNAL "macOS SDK directory")
+      set(MACOS_SDK_VERSION "${MACOS_SDK_VERSION}" CACHE INTERNAL "macOS SDK version")
+    endif()
+    set(MACOS_SDK_INCLUDE_DIR "${MACOS_SDK_DIR}/usr/include")
+    INCLUDE_DIRECTORIES(SYSTEM "${MACOS_SDK_INCLUDE_DIR}")
+    ADD_LINKER_FLAGS("-L${MACOS_SDK_DIR}/usr/lib")
+  endif()
+endmacro()
+
+function(add_latest_symlink_target)
+  # Provide a 'latest' symlink to this build directory if the "blessed" multi-build layout is
+  # detected:
+  #
+  # build/
+  # build/<first build directory>
+  # build/<second build directory>
+  # ...
+  set(LATEST_BUILD_SYMLINK_PATH "${YB_BUILD_ROOT_PARENT}/latest")
+  if (NOT "$ENV{YB_DISABLE_LATEST_SYMLINK}" STREQUAL "1")
+    message("LATEST SYMLINK PATH: ${LATEST_BUILD_SYMLINK_PATH}")
+    if ("${CMAKE_CURRENT_BINARY_DIR}" STREQUAL "${LATEST_BUILD_SYMLINK_PATH}")
+      message(FATAL_ERROR
+              "Should not run cmake inside the build/latest symlink. "
+              "First change directories into the destination of the symlink.")
+    endif()
+
+    add_custom_target(latest_symlink ALL
+      "${BUILD_SUPPORT_DIR}/create_latest_symlink.sh"
+      "${CMAKE_CURRENT_BINARY_DIR}"
+      "${LATEST_BUILD_SYMLINK_PATH}"
+      COMMENT "Recreating the 'latest' symlink at '${LATEST_BUILD_SYMLINK_PATH}'")
+  endif()
+endfunction()
+
+# -------------------------------------------------------------------------------------------------
+# LTO support
+# -------------------------------------------------------------------------------------------------
+
+function(enable_lto_if_needed)
+  if(NOT DEFINED COMPILER_FAMILY)
+    message(FATAL_ERROR "COMPILER_FAMILY not defined")
+  endif()
+  if(NOT DEFINED USING_LINUXBREW)
+    message(FATAL_ERROR "USING_LINUXBREW not defined")
+  endif()
+  if(NOT DEFINED YB_BUILD_TYPE)
+    message(FATAL_ERROR "YB_BUILD_TYPE not defined")
+  endif()
+
+  detect_lto_type_from_linking_type()
+  if(YB_LTO_ENABLED)
+    ADD_CXX_FLAGS("-flto=${YB_LTO_TYPE} -fuse-ld=lld")
+    # In LTO mode, yb-master / yb-tserver executables are generated with LTO, but we first generate
+    # yb-master-dynamic and yb-tserver-dynamic binaries that are dynamically linked.
+    set_in_current_and_parent_scope(YB_DYNAMICALLY_LINKED_EXE_SUFFIX "-dynamic" PARENT_SCOPE)
+  else()
+    message("Not enabling LTO: "
+            "YB_BUILD_TYPE=${YB_BUILD_TYPE}, "
+            "YB_LINKING_TYPE=${YB_LINKING_TYPE}, "
+            "COMPILER_FAMILY=${COMPILER_FAMILY}, "
+            "USING_LINUXBREW=${USING_LINUXBREW}, "
+            "APPLE=${APPLE}")
+    # In non-LTO builds, yb-master / yb-tserver executables themselves are dynamically linked to
+    # other YB libraries.
+    set_in_current_and_parent_scope(YB_DYNAMICALLY_LINKED_EXE_SUFFIX "")
+  endif()
+
+  # Only set these in parent scope.
+  set(YB_MASTER_DYNAMIC_EXE_NAME "yb-master${YB_DYNAMICALLY_LINKED_EXE_SUFFIX}" PARENT_SCOPE)
+  set(YB_TSERVER_DYNAMIC_EXE_NAME "yb-tserver${YB_DYNAMICALLY_LINKED_EXE_SUFFIX}" PARENT_SCOPE)
+endfunction()
+
+function(yb_add_lto_target original_exe_name output_exe_name symlink_as_names)
+  assert_vars_defined(YB_LTO_ENABLED YB_DYNAMICALLY_LINKED_EXE_SUFFIX)
+  if(NOT YB_LTO_ENABLED)
+    return()
+  endif()
+
+  if("$ENV{YB_SKIP_FINAL_LTO_LINK}" STREQUAL "1")
+    message("Skipping adding LTO target ${output_exe_name} because the YB_SKIP_FINAL_LTO_LINK"
+            "environment variable is set to 1")
+    return()
+  endif()
+
+  set(dynamic_exe_name "${original_exe_name}${YB_DYNAMICALLY_LINKED_EXE_SUFFIX}")
+  message("Adding LTO target: ${output_exe_name} "
+          "(LTO equivalent of ${dynamic_exe_name})")
+  set(output_executable_path "${EXECUTABLE_OUTPUT_PATH}/${output_exe_name}")
+
+  set(cmd_args
+      "${BUILD_SUPPORT_DIR}/dependency_graph"
+      "--build-root=${YB_BUILD_ROOT}"
+      # Use $$ to escape $.
+      "--file-regex=^.*/${dynamic_exe_name}$$"
+      # Allow LTO linking in parallel with the rest of the build.
+      --incomplete-build
+      "--lto-output-path=${output_executable_path}"
+      "--never-run-build")
+
+  foreach(symlink_name IN LISTS symlink_as_names)
+    list(APPEND cmd_args "--symlink-as=${symlink_name}")
+  endforeach()
+  list(APPEND cmd_args "link-whole-program")
+
+  message("Command for generating LTO target ${output_exe_name}: ${cmd_args}")
+  add_custom_command(
+    OUTPUT "${output_executable_path}"
+    COMMAND ${cmd_args}
+    DEPENDS "${dynamic_exe_name}"
+  )
+
+  add_custom_target("${output_exe_name}" ALL DEPENDS "${output_executable_path}")
+
+  # We need to build the corresponding non-LTO executable first, such as yb-master or yb-tserver.
+  add_dependencies("${output_exe_name}" "${dynamic_exe_name}")
 endfunction()

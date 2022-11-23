@@ -15,11 +15,19 @@
 //--------------------------------------------------------------------------------------------------
 
 #include "yb/common/index.h"
+
 #include "yb/common/common.pb.h"
-#include "yb/util/status.h"
+#include "yb/common/index_column.h"
+#include "yb/common/schema.h"
+
+#include "yb/gutil/casts.h"
+
+#include "yb/util/compare_util.h"
+#include "yb/util/result.h"
 
 using std::vector;
 using std::unordered_map;
+using std::string;
 using google::protobuf::RepeatedField;
 using google::protobuf::RepeatedPtrField;
 using google::protobuf::uint32;
@@ -28,29 +36,29 @@ namespace yb {
 
 // When DocDB receive messages from older clients, those messages won't have "column_name" and
 // "colexpr" attributes.
-IndexInfo::IndexColumn::IndexColumn(const IndexInfoPB::IndexColumnPB& pb)
+IndexColumn::IndexColumn(const IndexInfoPB::IndexColumnPB& pb)
     : column_id(ColumnId(pb.column_id())),
       column_name(pb.column_name()), // Default to empty.
       indexed_column_id(ColumnId(pb.indexed_column_id())),
       colexpr(pb.colexpr()) /* Default to empty message */ {
 }
 
-void IndexInfo::IndexColumn::ToPB(IndexInfoPB::IndexColumnPB* pb) const {
+void IndexColumn::ToPB(IndexInfoPB::IndexColumnPB* pb) const {
   pb->set_column_id(column_id);
   pb->set_column_name(column_name);
   pb->set_indexed_column_id(indexed_column_id);
   pb->mutable_colexpr()->CopyFrom(colexpr);
 }
 
-std::string IndexInfo::IndexColumn::ToString() const {
+std::string IndexColumn::ToString() const {
   return YB_STRUCT_TO_STRING(column_id, column_name, indexed_column_id, colexpr);
 }
 
 namespace {
 
-vector<IndexInfo::IndexColumn> IndexColumnFromPB(
+vector<IndexColumn> IndexColumnFromPB(
     const RepeatedPtrField<IndexInfoPB::IndexColumnPB>& columns) {
-  vector<IndexInfo::IndexColumn> cols;
+  vector<IndexColumn> cols;
   cols.reserve(columns.size());
   for (const auto& column : columns) {
     cols.emplace_back(column);
@@ -85,7 +93,7 @@ IndexInfo::IndexInfo(const IndexInfoPB& pb)
       use_mangled_column_name_(pb.use_mangled_column_name()),
       where_predicate_spec_(pb.has_where_predicate_spec() ?
         std::make_shared<IndexInfoPB::WherePredicateSpecPB>(pb.where_predicate_spec()) : nullptr) {
-  for (const IndexInfo::IndexColumn &index_col : columns_) {
+  for (const auto& index_col : columns_) {
     // Mark column as covered if the index column is the column itself.
     // Do not mark a column as covered when indexing by an expression of that column.
     // - When an expression such as "jsonb->>'field'" is used, then the "jsonb" column should not
@@ -100,6 +108,13 @@ IndexInfo::IndexInfo(const IndexInfoPB& pb)
   }
 }
 
+IndexInfo::IndexInfo() = default;
+
+IndexInfo::IndexInfo(const IndexInfo& rhs) = default;
+IndexInfo::IndexInfo(IndexInfo&& rhs) = default;
+
+IndexInfo::~IndexInfo() = default;
+
 void IndexInfo::ToPB(IndexInfoPB* pb) const {
   pb->set_table_id(table_id_);
   pb->set_indexed_table_id(indexed_table_id_);
@@ -109,8 +124,8 @@ void IndexInfo::ToPB(IndexInfoPB* pb) const {
   for (const auto& column : columns_) {
     column.ToPB(pb->add_columns());
   }
-  pb->set_hash_column_count(hash_column_count_);
-  pb->set_range_column_count(range_column_count_);
+  pb->set_hash_column_count(narrow_cast<uint32_t>(hash_column_count_));
+  pb->set_range_column_count(narrow_cast<uint32_t>(range_column_count_));
   for (const auto& id : indexed_hash_column_ids_) {
     pb->add_indexed_hash_column_ids(id);
   }
@@ -120,10 +135,13 @@ void IndexInfo::ToPB(IndexInfoPB* pb) const {
   pb->set_index_permissions(index_permissions_);
   pb->set_backfill_error_message(backfill_error_message_);
   pb->set_use_mangled_column_name(use_mangled_column_name_);
+  if (where_predicate_spec_) {
+    pb->mutable_where_predicate_spec()->CopyFrom(*where_predicate_spec_);
+  }
 }
 
 vector<ColumnId> IndexInfo::index_key_column_ids() const {
-  unordered_map<ColumnId, ColumnId> map;
+  std::unordered_map<ColumnId, ColumnId, boost::hash<ColumnId>> map;
   for (const auto& column : columns_) {
     map[column.indexed_column_id] = column.column_id;
   }
@@ -191,7 +209,7 @@ int32_t IndexInfo::IsExprCovered(const string& expr_name) const {
 // Check for dependency is used for DDL operations, so it does not need to be fast. As a result,
 // the dependency list does not need to be cached in a member id list for fast access.
 bool IndexInfo::CheckColumnDependency(ColumnId column_id) const {
-  for (const IndexInfo::IndexColumn &index_col : columns_) {
+  for (const auto& index_col : columns_) {
     // The protobuf data contains IDs of all columns that this index is referencing.
     // Examples:
     // 1. Index by column
@@ -206,15 +224,17 @@ bool IndexInfo::CheckColumnDependency(ColumnId column_id) const {
     }
   }
 
-  for (auto indexed_col_id : where_predicate_spec_->column_ids()) {
-    if (indexed_col_id == column_id) return true;
+  if (where_predicate_spec_) {
+    for (auto indexed_col_id : where_predicate_spec_->column_ids()) {
+      if (ColumnId(indexed_col_id) == column_id) return true;
+    }
   }
 
   return false;
 }
 
-int32_t IndexInfo::FindKeyIndex(const string& key_expr_name) const {
-  for (int32_t idx = 0; idx < key_column_count(); idx++) {
+boost::optional<size_t> IndexInfo::FindKeyIndex(const string& key_expr_name) const {
+  for (size_t idx = 0; idx < key_column_count(); idx++) {
     const auto& col = columns_[idx];
     if (!col.column_name.empty() && key_expr_name.find(col.column_name) != key_expr_name.npos) {
       // Return the found key column that is referenced by the expression.
@@ -222,7 +242,21 @@ int32_t IndexInfo::FindKeyIndex(const string& key_expr_name) const {
     }
   }
 
-  return -1;
+  return boost::none;
+}
+
+std::string IndexInfo::ToString() const {
+  IndexInfoPB pb;
+  ToPB(&pb);
+  return pb.ShortDebugString();
+}
+
+const IndexColumn& IndexInfo::column(const size_t idx) const {
+  return columns_[idx];
+}
+
+bool IndexInfo::TEST_Equals(const IndexInfo& lhs, const IndexInfo& rhs) {
+  return lhs.ToString() == rhs.ToString();
 }
 
 IndexMap::IndexMap(const google::protobuf::RepeatedPtrField<IndexInfoPB>& indexes) {
@@ -249,6 +283,14 @@ Result<const IndexInfo*> IndexMap::FindIndex(const TableId& index_id) const {
     return STATUS(NotFound, Format("Index id $0 not found", index_id));
   }
   return &itr->second;
+}
+
+bool IndexMap::TEST_Equals(const IndexMap& lhs, const IndexMap& rhs) {
+  // We can't use std::unordered_map's == because IndexInfo does not define ==.
+  using MapType = std::unordered_map<TableId, IndexInfo>;
+  return util::MapsEqual(static_cast<const MapType&>(lhs),
+                         static_cast<const MapType&>(rhs),
+                         &IndexInfo::TEST_Equals);
 }
 
 }  // namespace yb

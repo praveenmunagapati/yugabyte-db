@@ -30,13 +30,11 @@
 // under the License.
 //
 // Utility methods for dealing with file paths.
-#ifndef YB_UTIL_PATH_UTIL_H
-#define YB_UTIL_PATH_UTIL_H
+#pragma once
 
 #include <string>
 
-#include "yb/util/status.h"
-#include "yb/util/env.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 
@@ -83,4 +81,3 @@ Status SetupRootDir(
 Status CheckODirectTempFileCreationInDir(Env* env, const std::string& dir_path);
 
 } // namespace yb
-#endif /* YB_UTIL_PATH_UTIL_H */

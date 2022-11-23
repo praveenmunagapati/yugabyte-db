@@ -17,7 +17,6 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef ROCKSDB_LITE
 
 #include "yb/rocksdb/tools/sst_dump_tool_imp.h"
 
@@ -30,6 +29,7 @@
 #include <sstream>
 #include <vector>
 
+#include "yb/rocksdb/db/filename.h"
 #include "yb/rocksdb/db/memtable.h"
 #include "yb/rocksdb/db/write_batch_internal.h"
 #include "yb/rocksdb/db.h"
@@ -53,15 +53,25 @@
 
 #include "yb/docdb/docdb_debug.h"
 
-using yb::docdb::EntryToString;
+#include "yb/util/status_log.h"
+
 using yb::docdb::StorageDbType;
+
 namespace rocksdb {
 
 using std::dynamic_pointer_cast;
+using std::unique_ptr;
+using std::shared_ptr;
+
+std::string DocDBKVFormatter::Format(
+    const yb::Slice&, const yb::Slice&, yb::docdb::StorageDbType) const {
+  CHECK(false) << "unimplemented";
+  return "";
+}
 
 SstFileReader::SstFileReader(
     const std::string& file_path, bool verify_checksum, OutputFormat output_format,
-    const DocDBKVFormatter& formatter)
+    const DocDBKVFormatter* formatter)
     : file_name_(file_path),
       read_num_(0),
       verify_checksum_(verify_checksum),
@@ -71,6 +81,9 @@ SstFileReader::SstFileReader(
       internal_comparator_(std::make_shared<InternalKeyComparator>(BytewiseComparator())) {
   fprintf(stdout, "Process %s\n", file_path.c_str());
   init_result_ = GetTableReader(file_name_);
+}
+
+SstFileReader::~SstFileReader() {
 }
 
 extern const uint64_t kBlockBasedTableMagicNumber;
@@ -178,10 +191,10 @@ uint64_t SstFileReader::CalculateCompressedTableSize(
   table_options.block_size = block_size;
   BlockBasedTableFactory block_based_tf(table_options);
   unique_ptr<TableBuilder> table_builder;
-  table_builder.reset(block_based_tf.NewTableBuilder(
+  table_builder = block_based_tf.NewTableBuilder(
       tb_options,
       TablePropertiesCollectorFactory::Context::kUnknownColumnFamily,
-      dest_writer.get()));
+      dest_writer.get());
   unique_ptr<InternalIterator> iter(table_reader_->NewIterator(ReadOptions()));
   for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
     if (!iter->status().ok()) {
@@ -361,7 +374,7 @@ Status SstFileReader::ReadSequential(bool print_kv,
           auto storage_type =
               (output_format_ == OutputFormat::kDecodedRegularDB ? StorageDbType::kRegular
                                                                  : StorageDbType::kIntents);
-          fprintf(stdout, "%s\n", docdb_kv_formatter_.Format(key, value, storage_type).c_str());
+          fprintf(stdout, "%s", docdb_kv_formatter_->Format(key, value, storage_type).c_str());
           break;
       }
     }
@@ -578,11 +591,16 @@ int SSTDumpTool::Run(int argc, char** argv) {
         fprintf(stdout, "# deleted keys: %" PRIu64 "\n",
                 rocksdb::GetDeletedKeys(
                     table_properties->user_collected_properties));
+        fprintf(stdout,
+                "  User collected properties:\n"
+                "  ------------------------------\n");
+        for (const auto& prop : table_properties->user_collected_properties) {
+          fprintf(
+              stdout, "  %s: %s\n", prop.first.c_str(), Slice(prop.second).ToDebugString().c_str());
+        }
       }
     }
   }
   return 0;
 }
 }  // namespace rocksdb
-
-#endif  // ROCKSDB_LITE

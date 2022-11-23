@@ -30,27 +30,37 @@
 # under the License.
 #
 
-YB_INCLUDE_EXTENSIONS()
+set(YB_PCH_PREFIX master)
+set(YB_PCH_DEP_LIBS opid_proto)
 
 YRPC_GENERATE(
   MASTER_YRPC_SRCS MASTER_YRPC_HDRS MASTER_YRPC_TGTS
   SOURCE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..
   BINARY_ROOT ${CMAKE_CURRENT_BINARY_DIR}/../..
-  PROTO_FILES master.proto)
+  PROTO_FILES
+      master_admin.proto master_client.proto master_cluster.proto master_dcl.proto
+      master_encryption.proto master_heartbeat.proto master_replication.proto
+      master_backup.proto
+  MESSAGES_PROTO_FILES
+      master_ddl.proto
+  NO_SERVICE_MESSAGES_PROTO_FILES
+      catalog_entity_info.proto master_types.proto)
 set(MASTER_YRPC_LIBS
   consensus_metadata_proto
   yrpc
   protobuf
+  encryption_proto
+  rpc_base_proto
   rpc_header_proto
   tablet_proto
   tserver_proto
-  wire_protocol_proto
-  yb_pgwrapper
   cdc_consumer_proto)
 ADD_YB_LIBRARY(master_proto
   SRCS ${MASTER_YRPC_SRCS}
   DEPS ${MASTER_YRPC_LIBS}
   NONLINK_DEPS ${MASTER_YRPC_TGTS})
+
+YB_INCLUDE_EXTENSIONS()
 
 set(MASTER_PROTO_LIBS
   master_proto
@@ -61,7 +71,8 @@ include_directories(${YB_BUILD_ROOT}/postgres/include/server)
 set(MASTER_SRCS
   async_flush_tablets_task.cc
   async_rpc_tasks.cc
-  call_home.cc
+  auto_flags_orchestrator.cc
+  master_call_home.cc
   backfill_index.cc
   catalog_manager.cc
   catalog_manager_util.cc
@@ -75,9 +86,16 @@ set(MASTER_SRCS
   permissions_manager.cc
   flush_manager.cc
   master.cc
+  master_admin_service.cc
+  master_client_service.cc
+  master_cluster_service.cc
+  master_dcl_service.cc
+  master_ddl_service.cc
+  master_encryption_service.cc
+  master_heartbeat_service.cc
+  master_replication_service.cc
   master_options.cc
   master_service_base.cc
-  master_service.cc
   master_tablet_service.cc
   master_tserver.cc
   master-path-handlers.cc
@@ -96,9 +114,11 @@ set(MASTER_SRCS
   tablet_split_manager.cc
   ts_descriptor.cc
   ts_manager.cc
+  util/yql_vtable_helpers.cc
+  xcluster/xcluster_safe_time_service.cc
+  xcluster/xcluster_consumer_metrics.cc
   yql_virtual_table.cc
   yql_vtable_iterator.cc
-  util/yql_vtable_helpers.cc
   yql_auth_roles_vtable.cc
   yql_auth_role_permissions_vtable.cc
   yql_auth_resource_role_permissions_index.cc
@@ -117,6 +137,7 @@ set(MASTER_SRCS
   yql_views_vtable.cc
   yql_partitions_vtable.cc
   ysql_transaction_ddl.cc
+  ysql_tablegroup_manager.cc
   ysql_tablespace_manager.cc
   ${MASTER_SRCS_EXTENSIONS})
 
@@ -170,7 +191,8 @@ ADD_YB_LIBRARY(master_util
 
 # A library with common code shared between master tests.
 set(MASTER_TEST_COMMON_SRCS
-  master-test_base.cc)
+  master-test_base.cc
+  master-test-util.cc)
 add_library(master_test_common ${MASTER_TEST_COMMON_SRCS})
 target_link_libraries(master_test_common
   master ${MASTER_PROTO_LIBS} yb_client ${YB_MIN_TEST_LIBS})
@@ -188,13 +210,47 @@ ADD_YB_TEST(catalog_manager-test)
 ADD_YB_TEST(flush_manager-test)
 ADD_YB_TEST(master-test)
 ADD_YB_TEST(sys_catalog-test)
+ADD_YB_TEST(xcluster/xcluster_safe_time_service-test)
 
 foreach(ADDITIONAL_TEST ${MASTER_ADDITIONAL_TESTS})
   ADD_YB_TEST(${ADDITIONAL_TEST})
 endforeach(ADDITIONAL_TEST)
 
-# Actual master executable
-add_executable(yb-master master_main.cc)
-target_link_libraries(yb-master
-  master
-  ${YB_BASE_LIBS})
+# Actual master executable. In LTO mode, can also act as the tablet server if executed through a
+# symlink named as the tablet server executable.
+add_executable("${YB_MASTER_DYNAMIC_EXE_NAME}" master_main.cc)
+set(YB_MASTER_EXE_DEPS
+    master
+    ${YB_BASE_LIBS})
+if(NOT DEFINED YB_LTO_ENABLED)
+  message(FATAL_ERROR "YB_LTO_ENABLED is not defined")
+endif()
+if(YB_LTO_ENABLED)
+  # In LTO mode, the master executable can also function as the tablet server.
+  list(APPEND YB_MASTER_EXE_DEPS tserver_main_impl)
+endif()
+target_link_libraries(
+  "${YB_MASTER_DYNAMIC_EXE_NAME}"
+  ${YB_MASTER_EXE_DEPS})
+
+# Generate master_flags.xml
+set(MASTER_FLAGS_METADATA_FILE ${YB_BUILD_ROOT}/master_flags.xml)
+add_custom_command(TARGET "${YB_MASTER_DYNAMIC_EXE_NAME}" POST_BUILD
+  COMMAND "${BUILD_SUPPORT_DIR}/gen_flags_metadata_wrapper"
+    "--program_name" "${YB_MASTER_DYNAMIC_EXE_NAME}"
+    "--output_file_path" "${MASTER_FLAGS_METADATA_FILE}"
+    "--dynamically_linked_exe_suffix=${YB_DYNAMICALLY_LINKED_EXE_SUFFIX}"
+  BYPRODUCTS "${MASTER_FLAGS_METADATA_FILE}")
+
+# Generate auto_flags.json
+set(AUTO_FLAGS_FILE ${YB_BUILD_ROOT}/auto_flags.json)
+list(APPEND GEN_AUTO_FLAGS_COMMAND "${BUILD_SUPPORT_DIR}/gen_auto_flags"
+  "--program_list" "${YB_MASTER_DYNAMIC_EXE_NAME},${YB_TSERVER_DYNAMIC_EXE_NAME}"
+  "--dynamically_linked_exe_suffix=${YB_DYNAMICALLY_LINKED_EXE_SUFFIX}"
+  "--output_file_path" "${AUTO_FLAGS_FILE}"
+  "--previous_auto_flags_file" "${YB_SRC_ROOT}/src/yb/previous_auto_flags.json")
+add_custom_target(
+  gen_auto_flags_json ALL
+  COMMAND ${GEN_AUTO_FLAGS_COMMAND}
+  BYPRODUCTS "${AUTO_FLAGS_FILE}"
+  DEPENDS "${YB_MASTER_DYNAMIC_EXE_NAME}" "${YB_TSERVER_DYNAMIC_EXE_NAME}")

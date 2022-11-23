@@ -1,6 +1,9 @@
 // Copyright YugaByte Inc.
 
 import { connect } from 'react-redux';
+import { browserHistory, withRouter } from 'react-router';
+import { toast } from 'react-toastify';
+
 import { DeleteUniverse } from '../';
 import {
   deleteUniverse,
@@ -22,6 +25,8 @@ const mapDispatchToProps = (dispatch) => {
       dispatch(deleteUniverseReadReplica(clusterUUID, universeUUID, isForceDelete)).then(
         (response) => {
           dispatch(deleteUniverseReadReplicaResponse(response.payload));
+          toast.success('Deletion is in progress');
+          browserHistory.push(`/universes/universeUUID/tasks`);
         }
       );
     },
@@ -40,4 +45,4 @@ function mapStateToProps(state) {
   };
 }
 
-export default connect(mapStateToProps, mapDispatchToProps)(DeleteUniverse);
+export default withRouter(connect(mapStateToProps, mapDispatchToProps)(DeleteUniverse));

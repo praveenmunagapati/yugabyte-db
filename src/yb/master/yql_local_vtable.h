@@ -11,10 +11,8 @@
 // under the License.
 //
 
-#ifndef YB_MASTER_YQL_LOCAL_VTABLE_H
-#define YB_MASTER_YQL_LOCAL_VTABLE_H
+#pragma once
 
-#include "yb/master/master.h"
 #include "yb/master/yql_virtual_table.h"
 
 namespace yb {
@@ -34,4 +32,3 @@ class LocalVTable : public YQLVirtualTable {
 
 }  // namespace master
 }  // namespace yb
-#endif // YB_MASTER_YQL_LOCAL_VTABLE_H

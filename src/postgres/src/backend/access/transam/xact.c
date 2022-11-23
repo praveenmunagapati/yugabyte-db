@@ -194,6 +194,8 @@ typedef struct TransactionStateData
 	struct TransactionStateData *parent;	/* back link to parent */
 	bool		ybDataSent; /* Whether some tuples have been transmitted to
 				             * frontend as part of this execution */
+  bool		ybDataSentForCurrQuery; /* Whether any data has been sent to frontend
+																	 * as part of current query's execution */
 	bool		isYBTxnWithPostgresRel; /* does the current transaction
 				                         * operate on a postgres table? */
 	List		*YBPostponedDdlOps; /* We postpone execution of non-revertable
@@ -231,6 +233,7 @@ static TransactionStateData TopTransactionStateData = {
 	0,							/* parallelModeLevel */
 	NULL,						/* link to parent state block */
 	false,						/* ybDataSent */
+	false,						/* ybDataSentForCurrQuery */
 	false,						/* isYBTxnWithPostgresRel */
 	NULL,						/* YBPostponedDdlOps */
 };
@@ -304,7 +307,6 @@ typedef struct SubXactCallbackItem
 } SubXactCallbackItem;
 
 static SubXactCallbackItem *SubXact_callbacks = NULL;
-
 
 /* local function prototypes */
 static void AssignTransactionId(TransactionState s);
@@ -792,6 +794,14 @@ GetCurrentTransactionNestLevel(void)
 	return s->nestingLevel;
 }
 
+const char*
+GetCurrentTransactionName(void)
+{
+	TransactionState s = CurrentTransactionState;
+
+	return s->name;
+}
+
 
 /*
  *	TransactionIdIsCurrentTransactionId
@@ -1007,6 +1017,7 @@ void YBMarkDataSent(void)
 {
 	TransactionState s = CurrentTransactionState;
 	s->ybDataSent = true;
+	s->ybDataSentForCurrQuery = true;
 }
 
 /*
@@ -1016,6 +1027,12 @@ void YBMarkDataNotSent(void)
 {
 	TransactionState s = CurrentTransactionState;
 	s->ybDataSent = false;
+}
+
+void YBMarkDataNotSentForCurrQuery(void)
+{
+	TransactionState s = CurrentTransactionState;
+	s->ybDataSentForCurrQuery = false;
 }
 
 /*
@@ -1028,6 +1045,15 @@ bool YBIsDataSent(void)
 	TransactionState s = CurrentTransactionState;
 	// Ignoring "idle" transaction state, a leftover from a previous transaction
 	return s->blockState != TBLOCK_DEFAULT && s->ybDataSent;
+}
+
+/*
+ * Whether some data has been transmitted to frontend as part of this query.
+ */
+bool YBIsDataSentForCurrQuery(void)
+{
+	TransactionState s = CurrentTransactionState;
+	return s->ybDataSentForCurrQuery;
 }
 
 /* ----------------------------------------------------------------
@@ -1871,6 +1897,7 @@ YBStartTransaction(TransactionState s)
 {
 	s->isYBTxnWithPostgresRel = !IsYugaByteEnabled();
 	s->ybDataSent             = false;
+	s->ybDataSentForCurrQuery = false;
 	s->YBPostponedDdlOps      = NULL;
 
 	if (IsYugaByteEnabled())
@@ -1879,13 +1906,38 @@ YBStartTransaction(TransactionState s)
 	}
 }
 
+/*
+ * The isolation level in Postgres code (i.e., XactIsoLevel) maps to a certain
+ * isolation level as seen by pggate. This function returns the mapped isolation
+ * level that pggate layer is supposed to see.
+ */
+int YBGetEffectivePggateIsolationLevel() {
+	int mapped_pg_isolation_level = XactIsoLevel;
+
+	// For the txn manager, logic for XACT_READ_UNCOMMITTED is same as
+	// XACT_READ_COMMITTED.
+	if (mapped_pg_isolation_level == XACT_READ_UNCOMMITTED)
+		mapped_pg_isolation_level = XACT_READ_COMMITTED;
+
+	// If READ COMMITTED mode is not on, XACT_READ_COMMITTED maps to
+	// XACT_REPEATABLE_READ.
+	if ((mapped_pg_isolation_level == XACT_READ_COMMITTED) &&
+			!IsYBReadCommitted())
+		mapped_pg_isolation_level = XACT_REPEATABLE_READ;
+
+	return mapped_pg_isolation_level;
+}
+
 void
 YBInitializeTransaction(void)
 {
 	if (YBTransactionsEnabled())
 	{
 		HandleYBStatus(YBCPgBeginTransaction());
-		HandleYBStatus(YBCPgSetTransactionIsolationLevel(XactIsoLevel));
+
+		HandleYBStatus(
+			YBCPgSetTransactionIsolationLevel(YBGetEffectivePggateIsolationLevel()));
+		HandleYBStatus(YBCPgEnableFollowerReads(YBReadFromFollowersEnabled(), YBFollowerReadStalenessMs()));
 		HandleYBStatus(YBCPgSetTransactionReadOnly(XactReadOnly));
 		HandleYBStatus(YBCPgSetTransactionDeferrable(XactDeferrable));
 	}
@@ -2098,9 +2150,10 @@ CommitTransaction(void)
 
 	/*
 	 * Do pre-commit processing that involves calling user-defined code, such
-	 * as triggers.  Since closing cursors could queue trigger actions,
-	 * triggers could open cursors, etc, we have to keep looping until there's
-	 * nothing left to do.
+	 * as triggers.  SECURITY_RESTRICTED_OPERATION contexts must not queue an
+	 * action that would run here, because that would bypass the sandbox.
+	 * Since closing cursors could queue trigger actions, triggers could open
+	 * cursors, etc, we have to keep looping until there's nothing left to do.
 	 */
 	for (;;)
 	{
@@ -2127,15 +2180,15 @@ CommitTransaction(void)
 	 */
 	YBCCommitTransaction();
 
-	CallXactCallbacks(is_parallel_worker ? XACT_EVENT_PARALLEL_PRE_COMMIT
-					  : XACT_EVENT_PRE_COMMIT);
-
 	/*
 	 * The remaining actions cannot call any user-defined code, so it's safe
 	 * to start shutting down within-transaction services.  But note that most
 	 * of this stuff could still throw an error, which would switch us into
 	 * the transaction-abort path.
 	 */
+
+	CallXactCallbacks(is_parallel_worker ? XACT_EVENT_PARALLEL_PRE_COMMIT
+					  : XACT_EVENT_PRE_COMMIT);
 
 	/* If we might have parallel workers, clean them up now. */
 	if (IsInParallelMode())
@@ -2845,10 +2898,10 @@ CleanupTransaction(void)
 }
 
 /*
- *	StartTransactionCommand
+ *	StartTransactionCommandInternal
  */
-void
-StartTransactionCommand(void)
+static void
+StartTransactionCommandInternal(bool yb_skip_read_committed_handling)
 {
 	TransactionState s = CurrentTransactionState;
 
@@ -2873,6 +2926,54 @@ StartTransactionCommand(void)
 		case TBLOCK_INPROGRESS:
 		case TBLOCK_IMPLICIT_INPROGRESS:
 		case TBLOCK_SUBINPROGRESS:
+			/*
+			 * YB specific logic.
+			 *
+			 * For READ COMMITTED isolation, we want to reset the read point to current ht time so that
+			 * the query works on a newer snapshot that will include all txns committed before this
+			 * command.
+			 *
+			 * Read restart handling per statement
+			 * -----------------------------------
+			 * Note that by "all txns committed before this command" we intend to include any txn that
+			 * might have been committed before the statement was issued, as per real time (i.e., as
+			 * perceived by any client).
+			 *
+			 * Since there might be clock skew, during a read, if a txn participant finds committed
+			 * records with ht after the chosen read ht and is unsure if the records were committed before
+			 * the client issued read (as per real time), a kReadRestart will be received by postgres.
+			 *
+			 * Read restart retries are handled transparently for every statement in the txn in
+			 * yb_attempt_to_restart_on_error().
+			 */
+			if (YBTransactionsEnabled() && IsYBReadCommitted() && !yb_skip_read_committed_handling)
+			{
+				/*
+				 * Reset field ybDataSentForCurrQuery (indicates whether any data was sent as part of the
+				 * current query). This helps track if automatic restart of a query is possible in
+				 * READ COMMITTED isolation level.
+				 */
+				s->ybDataSentForCurrQuery = false;
+
+				/*
+				 * Create a new internal sub txn before any execution. This aids in rolling back any changes
+				 * before restarting the statement.
+				 *
+				 * We don't rely on the name of the internal sub transaction for rolling back to it in
+				 * yb_attempt_to_restart_on_error(). We just assert that the name of the current sub txn
+				 * matches before calling RollbackAndReleaseCurrentSubTransaction() to restart the
+				 * statement.
+				 *
+				 * Instead of calling BeginInternalSubTransaction(), we have copy-pasted necessary logic
+				 * into a new function since BeginInternalSubTransaction() again calls
+				 * CommitTransactionCommand() and StartTransactionCommand() which will result in recursion.
+				 * We could have solved the recursion problem by plumbing a flag to skip calling
+				 * BeginInternalSubTransaction() again, but it is simpler and less error-prone to just copy
+				 * the minimal required logic.
+				 */
+				BeginInternalSubTransactionForReadCommittedStatement();
+			}
+
 			break;
 
 			/*
@@ -2913,6 +3014,15 @@ StartTransactionCommand(void)
 	 */
 	Assert(CurTransactionContext != NULL);
 	MemoryContextSwitchTo(CurTransactionContext);
+}
+
+/*
+ *	StartTransactionCommand
+ */
+void
+StartTransactionCommand(void)
+{
+	StartTransactionCommandInternal(false /* yb_skip_read_committed_handling */);
 }
 
 void
@@ -4044,6 +4154,8 @@ DefineSavepoint(const char *name)
 			/* Normal subtransaction start */
 			PushTransaction();
 			s = CurrentTransactionState;	/* changed by push */
+			elog(DEBUG2, "new sub txn created by savepoint, subtxn_id: %d",
+					 s->subTransactionId);
 
 			/*
 			 * Savepoint names, like the TransactionState block itself, live
@@ -4330,7 +4442,7 @@ RollbackToSavepoint(const char *name)
 		elog(FATAL, "RollbackToSavepoint: unexpected state %s",
 			 BlockStateAsString(xact->blockState));
 
-	YBCRollbackSubTransaction(target->subTransactionId);
+	YBCRollbackToSubTransaction(target->subTransactionId);
 }
 
 /*
@@ -4346,6 +4458,13 @@ RollbackToSavepoint(const char *name)
 void
 BeginInternalSubTransaction(const char *name)
 {
+	/*
+	 * The subtransaction corresponding to the buffered operations must be
+	 * current and in the INPROGRESS state for correct error handling.
+	 * An error thrown while/after switching over to a new subtransaction
+	 * would lead to a fatal error or unpredictable behavior.
+	 */
+	YBFlushBufferedOperations();
 	TransactionState s = CurrentTransactionState;
 
 	/*
@@ -4374,6 +4493,8 @@ BeginInternalSubTransaction(const char *name)
 			/* Normal subtransaction start */
 			PushTransaction();
 			s = CurrentTransactionState;	/* changed by push */
+			elog(DEBUG2, "new sub txn created internally, subtxn_id: %d",
+					 s->subTransactionId);
 
 			/*
 			 * Savepoint names, like the TransactionState block itself, live
@@ -4404,7 +4525,44 @@ BeginInternalSubTransaction(const char *name)
 	}
 
 	CommitTransactionCommand();
-	StartTransactionCommand();
+
+	StartTransactionCommandInternal(true /* yb_skip_read_committed_handling */);
+}
+
+/*
+ * BeginInternalSubTransactionForReadCommittedStatement
+ *		This is similar to BeginInternalSubTransaction() but doesn't call CommitTransactionCommand()
+ *    and StartTransactionCommand(). It is okay to not call those since this method is called only
+ *    in 2 specific cases (i.e., when starting a new statement in an already existing txn in
+ *    READ COMMITED mode, or when rolling back to the internal sub txn while restarting a
+ *    statement) and both cases satisfy the following property -
+ *      CurrentTransactionState->blockState is TBLOCK_INPROGRESS, TBLOCK_IMPLICIT_INPROGRESS or
+ *			TBLOCK_SUBINPROGRESS.
+ */
+void
+BeginInternalSubTransactionForReadCommittedStatement() {
+
+	YBFlushBufferedOperations();
+	TransactionState s = CurrentTransactionState;
+
+	Assert(s->blockState == TBLOCK_SUBINPROGRESS ||
+				 s->blockState == TBLOCK_IMPLICIT_INPROGRESS ||
+				 s->blockState == TBLOCK_INPROGRESS);
+
+	if (IsInParallelMode())
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TRANSACTION_STATE),
+				errmsg("cannot start subtransactions during a parallel operation")));
+
+	/* Normal subtransaction start */
+	PushTransaction();
+	s = CurrentTransactionState;	/* changed by push */
+	elog(DEBUG2, "new internal sub txn in READ COMMITTED subtxn_id: %d", s->subTransactionId);
+
+	s->name = MemoryContextStrdup(TopTransactionContext, YB_READ_COMMITTED_INTERNAL_SUB_TXN_NAME);
+
+	StartSubTransaction();
+	s->blockState = TBLOCK_SUBINPROGRESS;
 }
 
 /*
@@ -4417,6 +4575,13 @@ BeginInternalSubTransaction(const char *name)
 void
 ReleaseCurrentSubTransaction(void)
 {
+	/*
+	 * The subtransaction corresponding to the buffered operations must be
+	 * current and in the INPROGRESS state for correct error handling.
+	 * An error thrown while/after commiting/releasing it would lead to a
+	 * fatal error or unpredictable behavior.
+	 */
+	YBFlushBufferedOperations();
 	TransactionState s = CurrentTransactionState;
 
 	/*
@@ -4995,6 +5160,8 @@ AbortSubTransaction(void)
 		AtEOSubXact_ApplyLauncher(false, s->nestingLevel);
 	}
 
+	YBCRollbackToSubTransaction(s->subTransactionId);
+
 	/*
 	 * Restore the upper transaction's read-only state, too.  This should be
 	 * redundant with GUC's cleanup but we may as well do it for consistency
@@ -5085,6 +5252,7 @@ PushTransaction(void)
 	GetUserIdAndSecContext(&s->prevUser, &s->prevSecContext);
 	s->prevXactReadOnly = XactReadOnly;
 	s->parallelModeLevel = 0;
+	s->ybDataSentForCurrQuery = p->ybDataSentForCurrQuery;
 
 	CurrentTransactionState = s;
 	YBUpdateActiveSubTransaction(CurrentTransactionState);
@@ -5309,12 +5477,14 @@ ShowTransactionStateRec(const char *str, TransactionState s)
 	/* use ereport to suppress computation if msg will not be printed */
 	ereport(DEBUG5,
 			(errmsg_internal("%s(%d) name: %s; blockState: %s; "
-							 "state: %s, ybDataSent: %s, xid/subid/cid: %u/%u/%u%s%s",
+							 "state: %s, ybDataSent: %s, ybDataSentForCurrQuery: %s, "
+							 "xid/subid/cid: %u/%u/%u%s%s",
 							 str, s->nestingLevel,
 							 PointerIsValid(s->name) ? s->name : "unnamed",
 							 BlockStateAsString(s->blockState),
 							 TransStateAsString(s->state),
 							 s->ybDataSent ? "Y" : "N",
+							 s->ybDataSentForCurrQuery ? "Y" : "N",
 							 (unsigned int) s->transactionId,
 							 (unsigned int) s->subTransactionId,
 							 (unsigned int) currentCommandId,
@@ -6025,14 +6195,23 @@ xact_redo(XLogReaderState *record)
 		elog(PANIC, "xact_redo: unknown op code %u", info);
 }
 
-void YBSaveDdlHandle(YBCPgStatement handle) {
+void YBSaveDdlHandle(YBCPgStatement handle)
+{
 	CurrentTransactionState->YBPostponedDdlOps = lappend(CurrentTransactionState->YBPostponedDdlOps, handle);
 }
 
-List* YBGetDdlHandles() {
+List* YBGetDdlHandles()
+{
 	return CurrentTransactionState->YBPostponedDdlOps;
 }
 
-void YBClearDdlHandles() {
+void YBClearDdlHandles()
+{
 	CurrentTransactionState->YBPostponedDdlOps = NULL;
+}
+
+void YbClearCurrentTransactionId()
+{
+	CurrentTransactionState->transactionId = InvalidTransactionId;
+	MyPgXact->xid = InvalidTransactionId;
 }

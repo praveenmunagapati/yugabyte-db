@@ -1,47 +1,55 @@
 # This file determines the jobs that we run in this branch on Jenkins.
 # Default architecture is x86_64
 jobs:
-  - os: centos7
-    compiler: clang7
+  - os: alma8
+    compiler: clang15
     build_type: asan
+    release_artifact: false
+
   - os: centos7
-    compiler: clang7
+    compiler: clang15
     build_type: tsan
+    release_artifact: false
+
   - os: centos7
-    compiler: clang11
+    compiler: clang15
     build_type: debug
-  - os: centos7
-    compiler: clang11
+    release_artifact: false
+
+  - os: alma8
+    compiler: clang15
     build_type: release
-  - os: centos8
-    compiler: clang11
+    release_artifact: true
+
+  - os: alma8
+    compiler: clang15
     build_type: release
     architecture: aarch64
-  - os: centos8
-    compiler: clang11
+    release_artifact: true
+
+  - os: alma8
+    compiler: clang15
     build_type: debug
     architecture: aarch64
-  - os: centos7
-    compiler: gcc5
-    build_type: debug
-  - os: centos7
-    compiler: gcc5
-    build_type: release
+    release_artifact: false
+
   - os: alma8
-    compiler: gcc9
-    build_type: debug    
-  - os: alma8
-    compiler: gcc9
-    build_type: release
-  - os: macos
+    compiler: gcc11
+    build_type: fastdebug
+    release_artifact: false
+
+  - os: mac12
     compiler: clang
     build_type: debug
-  - os: macos
+    architecture: arm64
+    release_artifact: false
+
+  - os: mac11.6
     compiler: clang
     build_type: release
-  - os: ubuntu18.04
-    compiler: gcc7
-    build_type: debug
+    release_artifact: true
+
   - os: ubuntu20.04
-    compiler: gcc9
-    build_type: release
+    compiler: clang15
+    build_type: debug
+    release_artifact: false

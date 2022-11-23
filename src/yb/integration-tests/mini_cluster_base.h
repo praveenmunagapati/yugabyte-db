@@ -11,14 +11,13 @@
 // under the License.
 //
 
-#ifndef YB_INTEGRATION_TESTS_MINI_CLUSTER_BASE_H_
-#define YB_INTEGRATION_TESTS_MINI_CLUSTER_BASE_H_
+#pragma once
 
-#include "yb/client/client.h"
+#include "yb/rpc/rpc_fwd.h"
+#include "yb/rpc/secure_stream.h"
 
-#include "yb/util/status.h"
-#include "yb/util/net/net_util.h"
-#include "yb/util/net/sockaddr.h"
+#include "yb/util/status_fwd.h"
+#include "yb/util/net/net_fwd.h"
 
 namespace yb {
 
@@ -41,34 +40,17 @@ class MiniClusterBase {
   // REQUIRES: the cluster must have already been Start()ed.
 
   // Created client won't shutdown messenger.
-  Result<std::unique_ptr<client::YBClient>> CreateClient(rpc::Messenger* messenger) {
-    client::YBClientBuilder builder;
-    ConfigureClientBuilder(&builder);
-    return builder.Build(messenger);
-  }
+  Result<std::unique_ptr<client::YBClient>> CreateClient(rpc::Messenger* messenger);
 
   // Created client will shutdown messenger on client shutdown.
   Result<std::unique_ptr<client::YBClient>> CreateClient(
-      client::YBClientBuilder* builder = nullptr) {
-    if (builder == nullptr) {
-      client::YBClientBuilder default_builder;
-      return CreateClient(&default_builder);
-    }
-    ConfigureClientBuilder(builder);
-    return builder->Build();
-  }
+      client::YBClientBuilder* builder = nullptr);
 
-  // Created client gets messenger ownership and will shutdown messenger on client shutdown.
-  Result<std::unique_ptr<client::YBClient>> CreateClient(
-      std::unique_ptr<rpc::Messenger>&& messenger) {
-    client::YBClientBuilder builder;
-    ConfigureClientBuilder(&builder);
-    return builder.Build(std::move(messenger));
-  }
+  Result<std::unique_ptr<client::YBClient>> CreateSecureClient(
+      const std::string& name, const std::string& host,
+      std::unique_ptr<rpc::SecureContext>* secure_context);
 
-  Result<HostPort> GetLeaderMasterBoundRpcAddr() {
-    return DoGetLeaderMasterBoundRpcAddr();
-  }
+  Result<HostPort> GetLeaderMasterBoundRpcAddr();
 
   bool running() const { return running_.load(std::memory_order_acquire); }
 
@@ -76,7 +58,15 @@ class MiniClusterBase {
   virtual ~MiniClusterBase() = default;
 
   std::atomic<bool> running_ { false };
+  std::unique_ptr<rpc::SecureContext> secure_context_;
 
+  template<class Options>
+  int32_t NumTabletsPerTransactionTable(Options options) {
+    if (options.transaction_table_num_tablets > 0) {
+      return options.transaction_table_num_tablets;
+    }
+    return std::max(2, static_cast<int32_t>(options.num_tablet_servers));
+  }
  private:
   virtual void ConfigureClientBuilder(client::YBClientBuilder* builder) = 0;
 
@@ -84,5 +74,3 @@ class MiniClusterBase {
 };
 
 }  // namespace yb
-
-#endif // YB_INTEGRATION_TESTS_MINI_CLUSTER_BASE_H_

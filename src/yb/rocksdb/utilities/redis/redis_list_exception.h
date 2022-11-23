@@ -20,8 +20,8 @@
  *
  */
 
-#ifndef ROCKSDB_LITE
 #pragma once
+
 #include <exception>
 
 namespace rocksdb {
@@ -34,4 +34,3 @@ class RedisListException: public std::exception {
 };
 
 } // namespace rocksdb
-#endif

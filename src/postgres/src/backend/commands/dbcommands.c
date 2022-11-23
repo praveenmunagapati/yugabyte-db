@@ -81,6 +81,7 @@
 
 /*  YB includes. */
 #include "commands/ybccmds.h"
+#include "common/pg_yb_common.h"
 #include "pg_yb_utils.h"
 
 typedef struct
@@ -170,12 +171,6 @@ createdb(ParseState *pstate, const CreatedbStmt *stmt)
 	 */
 	if (IsYsqlUpgrade)
 		elog(ERROR, "CREATE DATABASE is disallowed in YSQL upgrade mode");
-
-	if (dbname != NULL && (strcmp(dbname, "template0") == 0 ||
-		strcmp(dbname, "template1") == 0))
-	{
-		YBSetPreparingTemplates();
-	}
 
 	/* Extract options from the statement node tree */
 	foreach(option, stmt->options)
@@ -271,8 +266,10 @@ createdb(ParseState *pstate, const CreatedbStmt *stmt)
 					 errhint("Consider using tablespaces instead."),
 					 parser_errposition(pstate, defel->location)));
 		}
-		else if (strcmp(defel->defname, "colocated") == 0)
+		else if (strcmp(defel->defname, "colocated") == 0
+				 || strcmp(defel->defname, "colocation") == 0)
 		{
+			/* Ensure only one of colocation and colocated can be specified. */
 			if (dcolocated)
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
@@ -337,6 +334,8 @@ createdb(ParseState *pstate, const CreatedbStmt *stmt)
 	}
 	if (dcolocated && dcolocated->arg)
 		dbcolocated = defGetBoolean(dcolocated);
+	else
+		dbcolocated = YBColocateDatabaseByDefault();
 
 	/* obtain OID of proposed owner */
 	if (dbowner)
@@ -415,7 +414,8 @@ createdb(ParseState *pstate, const CreatedbStmt *stmt)
 							 "https://github.com/yugabyte/yugabyte-db/issues"),
 					 parser_errposition(pstate, dencoding->location)));
 
-		if (!YBIsCollationEnabled() && dcollate && dbcollate && strcmp(dbcollate, "C") != 0)
+		if (!(YBIsCollationEnabled() && kTestOnlyUseOSDefaultCollation) && dcollate &&
+			dbcollate && strcmp(dbcollate, "C") != 0)
 			ereport(YBUnsupportedFeatureSignalLevel(),
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("Value other than 'C' for lc_collate "
@@ -666,6 +666,12 @@ createdb(ParseState *pstate, const CreatedbStmt *stmt)
 
 	/* Register owner dependency */
 	recordDependencyOnOwner(DatabaseRelationId, dboid, datdba);
+
+	/*
+	 * Register tablespace dependency to prevent dropping database default
+	 * tablespace.
+	 */
+	recordDependencyOnTablespace(DatabaseRelationId, dboid, dst_deftablespace);
 
 	/* Create pg_shdepend entries for objects within database */
 	copyTemplateDependencies(src_dboid, dboid);

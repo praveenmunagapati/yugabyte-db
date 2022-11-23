@@ -11,13 +11,10 @@
 // under the License.
 //
 
-#ifndef YB_YQL_CQL_QL_PTREE_PT_PROPERTY_H_
-#define YB_YQL_CQL_QL_PTREE_PT_PROPERTY_H_
+#pragma once
 
 #include "yb/gutil/strings/substitute.h"
-#include "yb/master/master.pb.h"
 #include "yb/yql/cql/ql/ptree/list_node.h"
-#include "yb/yql/cql/ql/ptree/pt_expr.h"
 #include "yb/yql/cql/ql/ptree/tree_node.h"
 
 namespace yb {
@@ -42,12 +39,12 @@ class PTProperty : public TreeNode {
   //------------------------------------------------------------------------------------------------
   // Constructors and destructor.
   PTProperty(MemoryContext *memctx,
-             YBLocation::SharedPtr loc,
+             YBLocationPtr loc,
              const MCSharedPtr<MCString>& lhs_,
-             const PTExpr::SharedPtr& rhs_);
+             const PTExprPtr& rhs_);
 
   PTProperty(MemoryContext *memctx,
-             YBLocation::SharedPtr loc);
+             YBLocationPtr loc);
 
   virtual ~PTProperty();
 
@@ -63,38 +60,38 @@ class PTProperty : public TreeNode {
   }
 
   // Node semantics analysis.
-  virtual CHECKED_STATUS Analyze(SemContext *sem_context) override = 0;
+  virtual Status Analyze(SemContext *sem_context) override = 0;
 
   MCSharedPtr<MCString> lhs() const {
     return lhs_;
   }
 
-  PTExpr::SharedPtr rhs() const {
+  PTExprPtr rhs() const {
     return rhs_;
   }
 
-  static CHECKED_STATUS GetIntValueFromExpr(PTExpr::SharedPtr expr,
-                                            const string& property_name,
+  static Status GetIntValueFromExpr(PTExprPtr expr,
+                                            const std::string& property_name,
                                             int64_t *val);
 
-  static CHECKED_STATUS GetDoubleValueFromExpr(PTExpr::SharedPtr expr,
-                                               const string& property_name,
+  static Status GetDoubleValueFromExpr(PTExprPtr expr,
+                                               const std::string& property_name,
                                                long double *val);
 
-  static CHECKED_STATUS GetBoolValueFromExpr(PTExpr::SharedPtr expr,
-                                             const string& property_name,
+  static Status GetBoolValueFromExpr(PTExprPtr expr,
+                                             const std::string& property_name,
                                              bool *val);
 
-  static CHECKED_STATUS GetStringValueFromExpr(PTExpr::SharedPtr expr,
+  static Status GetStringValueFromExpr(PTExprPtr expr,
                                                bool to_lower_case,
-                                               const string& property_name,
-                                               string *val);
+                                               const std::string& property_name,
+                                               std::string *val);
 
  protected:
   // Parts of an expression 'lhs_ = rhs_' where lhs stands for left-hand side, and rhs for
   // right-hand side.
   MCSharedPtr<MCString> lhs_;
-  PTExpr::SharedPtr rhs_;
+  PTExprPtr rhs_;
 };
 
 class PTPropertyListNode : public TreeListNode<PTProperty> {
@@ -105,7 +102,7 @@ class PTPropertyListNode : public TreeListNode<PTProperty> {
   typedef MCSharedPtr<const PTPropertyListNode> SharedPtrConst;
 
   explicit PTPropertyListNode(MemoryContext *memory_context,
-                              YBLocation::SharedPtr loc,
+                              YBLocationPtr loc,
                               const MCSharedPtr<PTProperty>& tnode = nullptr)
       : TreeListNode<PTProperty>(memory_context, loc, tnode) {
   }
@@ -129,10 +126,8 @@ class PTPropertyListNode : public TreeListNode<PTProperty> {
     return MCMakeShared<PTPropertyListNode>(memctx, std::forward<TypeArgs>(args)...);
   }
 
-  virtual CHECKED_STATUS Analyze(SemContext *sem_context) override;
+  virtual Status Analyze(SemContext *sem_context) override;
 };
 
 } // namespace ql
 } // namespace yb
-
-#endif // YB_YQL_CQL_QL_PTREE_PT_PROPERTY_H_

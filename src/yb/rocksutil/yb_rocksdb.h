@@ -11,23 +11,18 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSUTIL_YB_ROCKSDB_H
-#define YB_ROCKSUTIL_YB_ROCKSDB_H
+#pragma once
 
-#include <string>
 #include <cstddef>
+#include <string>
 
-#include "yb/rocksdb/env.h"
 #include "yb/rocksdb/options.h"
 
-#include "yb/util/compare_util.h"
-#include "yb/util/slice.h"
 #include "yb/util/cast.h"
+#include "yb/util/slice.h"
 
 namespace yb {
 
 void InitRocksDBWriteOptions(rocksdb::WriteOptions* write_options);
 
 }  // namespace yb
-
-#endif // YB_ROCKSUTIL_YB_ROCKSDB_H

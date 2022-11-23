@@ -2,6 +2,7 @@
 
 import axios from 'axios';
 import { ROOT_URL } from '../config';
+import Cookies from 'js-cookie';
 import { getCustomerEndpoint } from './common';
 
 // Create Universe
@@ -79,6 +80,11 @@ export const GET_UNIVERSE_PER_NODE_STATUS_RESPONSE = 'GET_UNIVERSE_PER_NODE_STAT
 export const GET_UNIVERSE_PER_NODE_METRICS = 'GET_UNIVERSE_PER_NODE_METRICS';
 export const GET_UNIVERSE_PER_NODE_METRICS_RESPONSE = 'GET_UNIVERSE_PER_NODE_METRICS_RESPONSE';
 
+// Node Actions
+export const GET_NODE_DETAILS = 'GET_NODE_DETAILS';
+export const GET_NODE_DETAILS_RESPONSE = 'GET_NODE_DETAILS_RESPONSE';
+export const RESET_NODE_DETAILS = 'RESET_NODE_DETAILS';
+
 //Validation Tasks
 export const CHECK_IF_UNIVERSE_EXISTS = 'CHECK_IF_UNIVERSE_EXISTS';
 
@@ -120,6 +126,16 @@ export const SET_ALERTS_CONFIG_RESPONSE = 'SET_ALERTS_CONFIG_RESPONSE';
 
 export const UPDATE_BACKUP_STATE = 'UPDATE_BACKUP_STATE';
 export const UPDATE_BACKUP_STATE_RESPONSE = 'UPDATE_BACKUP_STATE_RESPONSE';
+
+export const FETCH_SUPPORTED_RELEASES = 'FETCH_SUPPORTED_RELEASES';
+export const FETCH_SUPPORTED_RELEASES_RESPONSE = 'FETCH_SUPPORTED_RELEASES_RESPONSE';
+
+/**
+ *  Mapping from taskType to api route
+ * */
+const UPGRADE_TASKS = {
+  VMImage: 'vm'
+};
 
 export function createUniverse(formValues) {
   const customerUUID = localStorage.getItem('customerId');
@@ -169,6 +185,22 @@ export function resetUniverseInfo() {
 export function fetchUniverseInfoResponse(response) {
   return {
     type: FETCH_UNIVERSE_INFO_RESPONSE,
+    payload: response
+  };
+}
+
+export function fetchReleasesByProvider(pUUID) {
+  const cUUID = localStorage.getItem('customerId');
+  const request = axios.get(`${ROOT_URL}/customers/${cUUID}/providers/${pUUID}/releases`);
+  return {
+    type: FETCH_SUPPORTED_RELEASES,
+    payload: request
+  };
+}
+
+export function fetchReleasesResponse(response) {
+  return {
+    type: FETCH_SUPPORTED_RELEASES_RESPONSE,
     payload: response
   };
 }
@@ -235,7 +267,8 @@ export function deleteUniverseResponse(response) {
 export function pauseUniverse(universeUUID) {
   const customerUUID = localStorage.getItem('customerId');
   const request = axios.post(
-    `${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/pause`);
+    `${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/pause`
+  );
   return {
     type: PAUSE_UNIVERSE,
     payload: request
@@ -252,7 +285,8 @@ export function pauseUniverseResponse(response) {
 export function restartUniverse(universeUUID) {
   const customerUUID = localStorage.getItem('customerId');
   const request = axios.post(
-    `${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/resume`);
+    `${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/resume`
+  );
   return {
     type: RESTART_UNIVERSE,
     payload: request
@@ -370,11 +404,26 @@ export function closeUniverseDialog() {
 export function rollingUpgrade(values, universeUUID) {
   const customerUUID = localStorage.getItem('customerId');
   const taskEndPoint = values.taskType.toLowerCase();
+
+  let request;
+  if (values.taskType === 'Certs') {
+    // This is to enable cert rotation for kubernetes universes
+    // For kubernetes universes we fallback to old modal
+    // But as we need to call the update_tls API we update the request accordingly
+    request = axios.post(
+      `${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/update_tls`,
+      values
+    );
+  } else {
+    request = axios.post(
+      `${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/upgrade/${
+        UPGRADE_TASKS[values.taskType] ?? taskEndPoint
+      }`,
+      values
+    );
+  }
   delete values.taskType;
-  const request = axios.post(
-    `${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/upgrade/${taskEndPoint}`,
-    values
-  );
+
   return {
     type: ROLLING_UPGRADE,
     payload: request
@@ -446,6 +495,29 @@ export function getUniversePerNodeStatusResponse(response) {
   return {
     type: GET_UNIVERSE_PER_NODE_STATUS_RESPONSE,
     payload: response
+  };
+}
+
+export function getNodeDetails(universeUUID, nodeName) {
+  const customerUUID = localStorage.getItem('customerId');
+  const requestUrl = `${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/nodes/${nodeName}/details`;
+  const request = axios.get(requestUrl);
+  return {
+    type: GET_NODE_DETAILS,
+    payload: request
+  };
+}
+
+export function getNodeDetailsResponse(response) {
+  return {
+    type: GET_NODE_DETAILS_RESPONSE,
+    payload: response
+  };
+}
+
+export function resetNodeDetails() {
+  return {
+    type: RESET_NODE_DETAILS
   };
 }
 
@@ -684,7 +756,7 @@ export function updateBackupStateResponse(response) {
 }
 
 export function fetchLiveQueries(universeUUID) {
-  const customerUUID = localStorage.getItem("customerId");
+  const customerUUID = localStorage.getItem('customerId');
   const endpoint = `${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/live_queries`;
   return axios.get(endpoint);
 }
@@ -705,6 +777,33 @@ export function fetchSlowQueries(universeUUID, cancelFn) {
   return request;
 }
 
+export async function fetchUnusedIndexesSuggestions(universeUUID) {
+  const customerUUID = localStorage.getItem('customerId');
+  try {
+    return await axios.get(`${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/unused_indexes`);
+  } catch (e) {
+    return e.response;
+  }
+}
+
+export async function fetchQueryLoadSkewSuggestions(universeUUID) {
+  const customerUUID = localStorage.getItem('customerId');
+  try {
+    return await axios.get(`${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/query_distribution_suggestions`);
+  } catch (e) {
+    return e.response;
+  }
+}
+
+export async function fetchRangeShardingSuggestions(universeUUID) {
+  const customerUUID = localStorage.getItem('customerId');
+  try {
+    return await axios.get(`${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/range_hash`);
+  } catch (e) {
+    return e.response;
+  }
+}
+
 export function resetSlowQueries(universeUUID) {
   const customerUUID = localStorage.getItem('customerId');
   const endpoint = `${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/slow_queries`;
@@ -714,13 +813,13 @@ export function resetSlowQueries(universeUUID) {
 export function getAlertTemplates(filter) {
   const customerUUID = localStorage.getItem('customerId');
   const endpoint = `${ROOT_URL}/customers/${customerUUID}/alert_templates`;
-  return axios.post(endpoint, filter).then(resp => resp.data);
+  return axios.post(endpoint, filter).then((resp) => resp.data);
 }
 
 export function getAlertConfigurations(filter) {
   const customerUUID = localStorage.getItem('customerId');
   const endpoint = `${ROOT_URL}/customers/${customerUUID}/alert_configurations/list`;
-  return axios.post(endpoint, filter).then(resp => resp.data);
+  return axios.post(endpoint, filter).then((resp) => resp.data);
 }
 
 export function createAlertConfiguration(data) {
@@ -739,4 +838,62 @@ export function downloadLogs(universeUUID, nodeName) {
   const customerUUID = localStorage.getItem('customerId');
   const endpoint = `${ROOT_URL}/customers/${customerUUID}/universes/${universeUUID}/${nodeName}/download_logs`;
   window.open(endpoint, '_blank');
+}
+
+//G-Flags
+export async function fetchGFlags(dbVersion, params) {
+  try {
+    const request = await axios.get(`${ROOT_URL}/metadata/version/${dbVersion}/list_gflags`, {
+      params
+    });
+    return request;
+  } catch (e) {
+    throw e.response.data;
+  }
+}
+
+export async function fetchParticularFlag(dbVersion, params) {
+  try {
+    const request = await axios.get(`${ROOT_URL}/metadata/version/${dbVersion}/gflag`, {
+      params
+    });
+    return request;
+  } catch (e) {
+    throw e.response.data;
+  }
+}
+
+export async function validateGFlags(dbVersion, payload) {
+  try {
+    const apiToken = Cookies.get('apiToken') || localStorage.getItem('apiToken');
+    if (apiToken && apiToken !== '') {
+      axios.defaults.headers.common['X-AUTH-YW-API-TOKEN'] = apiToken;
+    }
+    axios.defaults.headers.common['Csrf-Token'] = Cookies.get('csrfCookie');
+    const request = await axios.post(
+      `${ROOT_URL}/metadata/version/${dbVersion}/validate_gflags`,
+      payload
+    );
+    return request;
+  } catch (e) {
+    throw e.response.data;
+  }
+}
+
+//Fetch releases by provider
+export async function fetchSupportedReleases(pUUID) {
+  const cUUID = localStorage.getItem('customerId');
+  try {
+    return await axios.get(`${ROOT_URL}/customers/${cUUID}/providers/${pUUID}/releases`);
+  } catch (e) {
+    throw e.response.data;
+  }
+}
+
+export function validateHelmYAML(UniverseConfigureTaskParams) {
+  const cUUID = localStorage.getItem('customerId');
+  return axios.post(`${ROOT_URL}/customers/${cUUID}/validate_kubernetes_overrides`, {
+    ...UniverseConfigureTaskParams
+  });
+
 }

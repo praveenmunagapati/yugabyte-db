@@ -16,8 +16,6 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_ROCKSDB_LISTENER_H
-#define YB_ROCKSDB_LISTENER_H
 
 #pragma once
 
@@ -68,6 +66,8 @@ enum class CompactionReason {
   kUniversalSizeRatio,
   // [Universal] number of sorted runs > level0_file_num_compaction_trigger
   kUniversalSortedRunNum,
+  // [Universal] files have been marked for direct deletion
+  kUniversalDirectDeletion,
   // [FIFO] total size > max_table_files_size
   kFIFOMaxSize,
   // Manual compaction
@@ -76,7 +76,6 @@ enum class CompactionReason {
   kFilesMarkedForCompaction,
 };
 
-#ifndef ROCKSDB_LITE
 
 struct TableFileDeletionInfo {
   // The name of the database where the file was deleted.
@@ -250,13 +249,5 @@ class EventListener {
   virtual ~EventListener() {}
 };
 
-#else
-
-class EventListener {
-};
-
-#endif  // ROCKSDB_LITE
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_LISTENER_H

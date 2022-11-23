@@ -17,12 +17,19 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef ROCKSDB_LITE
+
+#include <string>
 
 #include "yb/rocksdb/tools/ldb_cmd.h"
 #include "yb/rocksdb/util/testharness.h"
 #include "yb/rocksdb/env.h"
 #include "yb/rocksdb/db/db_test_util.h"
+
+#include "yb/util/test_macros.h"
+
+using std::string;
+using std::vector;
+using std::map;
 
 DECLARE_bool(TEST_exit_on_finish);
 
@@ -114,12 +121,3 @@ int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
-#else
-#include <stdio.h>
-
-int main(int argc, char** argv) {
-  fprintf(stderr, "SKIPPED as LDBCommand is not supported in ROCKSDB_LITE\n");
-  return 0;
-}
-
-#endif  // ROCKSDB_LITE

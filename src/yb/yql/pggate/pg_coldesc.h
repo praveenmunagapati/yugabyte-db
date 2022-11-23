@@ -15,10 +15,8 @@
 // Structure definitions for column descriptor of a table.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_PGGATE_PG_COLDESC_H_
-#define YB_YQL_PGGATE_PG_COLDESC_H_
+#pragma once
 
-#include "yb/client/client.h"
 
 namespace yb {
 namespace pggate {
@@ -46,7 +44,7 @@ class ColumnDesc {
             int32_t attr_num,
             const std::shared_ptr<QLType>& ql_type,
             InternalType internal_type,
-            ColumnSchema::SortingType sorting_type) {
+            SortingType sorting_type) {
     index_ = index,
     id_ = id;
     name_ = name;
@@ -94,7 +92,7 @@ class ColumnDesc {
     return internal_type_;
   }
 
-  ColumnSchema::SortingType sorting_type() const {
+  SortingType sorting_type() const {
     return sorting_type_;
   }
 
@@ -107,10 +105,8 @@ class ColumnDesc {
   int32_t attr_num_ = -1;
   std::shared_ptr<QLType> ql_type_;
   InternalType internal_type_ = InternalType::VALUE_NOT_SET;
-  ColumnSchema::SortingType sorting_type_ = ColumnSchema::SortingType::kNotSpecified;
+  SortingType sorting_type_ = SortingType::kNotSpecified;
 };
 
 }  // namespace pggate
 }  // namespace yb
-
-#endif  // YB_YQL_PGGATE_PG_COLDESC_H_

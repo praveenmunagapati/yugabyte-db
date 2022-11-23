@@ -14,82 +14,158 @@
 
 #include <signal.h>
 
-#include <vector>
-#include <string>
-#include <random>
 #include <fstream>
+#include <random>
 #include <regex>
+#include <string>
+#include <thread>
+#include <vector>
 
-#include <gflags/gflags.h>
 #include <boost/algorithm/string.hpp>
 
-#include "yb/common/common_flags.h"
-#include "yb/util/errno.h"
-#include "yb/util/flag_tags.h"
-#include "yb/util/logging.h"
-#include "yb/util/subprocess.h"
+#include "yb/tserver/tablet_server_interface.h"
 #include "yb/util/env_util.h"
+#include "yb/util/errno.h"
+#include "yb/util/flags.h"
+#include "yb/util/logging.h"
 #include "yb/util/net/net_util.h"
 #include "yb/util/path_util.h"
 #include "yb/util/pg_util.h"
+#include "yb/util/result.h"
 #include "yb/util/scope_exit.h"
+#include "yb/util/status_format.h"
+#include "yb/util/status_log.h"
+#include "yb/util/string_util.h"
+#include "yb/util/subprocess.h"
+#include "yb/util/thread.h"
 
-DEFINE_string(pg_proxy_bind_address, "", "Address for the PostgreSQL proxy to bind to");
-DEFINE_bool(pg_transactions_enabled, true,
+DEFINE_UNKNOWN_string(pg_proxy_bind_address, "", "Address for the PostgreSQL proxy to bind to");
+DEFINE_UNKNOWN_string(postmaster_cgroup, "", "cgroup to add postmaster process to");
+DEFINE_UNKNOWN_bool(pg_transactions_enabled, true,
             "True to enable transactions in YugaByte PostgreSQL API.");
-DEFINE_bool(pg_verbose_error_log, false,
+DEFINE_UNKNOWN_string(yb_backend_oom_score_adj, "900",
+              "oom_score_adj of postgres backends in linux environments");
+DEFINE_UNKNOWN_bool(yb_pg_terminate_child_backend, false,
+            "Terminate other active server processes when a backend is killed");
+DEFINE_UNKNOWN_bool(pg_verbose_error_log, false,
             "True to enable verbose logging of errors in PostgreSQL server");
-DEFINE_int32(pgsql_proxy_webserver_port, 13000, "Webserver port for PGSQL");
+DEFINE_UNKNOWN_int32(pgsql_proxy_webserver_port, 13000, "Webserver port for PGSQL");
 
-DEFINE_test_flag(bool, pg_collation_enabled, false,
+DEFINE_test_flag(bool, pg_collation_enabled, true,
                  "True to enable collation support in YugaByte PostgreSQL.");
+// Default to 5MB
+DEFINE_UNKNOWN_int64(
+    pg_mem_tracker_tcmalloc_gc_release_bytes, 5 * 1024 * 1024,
+    "Overriding the gflag mem_tracker_tcmalloc_gc_release_bytes "
+    "defined in mem_tracker.cc. The overriding value is specifically "
+    "set for Postgres backends");
 
 DECLARE_string(metric_node_name);
 TAG_FLAG(pg_transactions_enabled, advanced);
 TAG_FLAG(pg_transactions_enabled, hidden);
 
-DEFINE_bool(pg_stat_statements_enabled, true,
+DEFINE_UNKNOWN_bool(pg_stat_statements_enabled, true,
             "True to enable statement stats in PostgreSQL server");
 TAG_FLAG(pg_stat_statements_enabled, advanced);
 TAG_FLAG(pg_stat_statements_enabled, hidden);
 
 // Top-level postgres configuration flags.
-DEFINE_bool(ysql_enable_auth, false,
+DEFINE_UNKNOWN_bool(ysql_enable_auth, false,
               "True to enforce password authentication for all connections");
-DEFINE_string(ysql_timezone, "",
-              "Overrides the default ysql timezone for displaying and interpreting timestamps");
-DEFINE_string(ysql_datestyle, "",
-              "Overrides the default ysql display format for date and time values");
-DEFINE_int32(ysql_max_connections, 0,
-              "Overrides the maximum number of concurrent ysql connections");
-DEFINE_string(ysql_default_transaction_isolation, "",
-              "Overrides the default ysql transaction isolation level");
-DEFINE_string(ysql_log_statement, "",
-              "Sets which types of ysql statements should be logged");
-DEFINE_string(ysql_log_min_messages, "",
-              "Sets the lowest ysql message level to log");
-DEFINE_string(ysql_log_min_duration_statement, "",
-              "Sets the duration of each completed ysql statement to be logged if the statement" \
-              " ran for at least the specified number of milliseconds.");
-
 
 // Catch-all postgres configuration flags.
-DEFINE_string(ysql_pg_conf_csv, "",
+DEFINE_UNKNOWN_string(ysql_pg_conf_csv, "",
               "CSV formatted line represented list of postgres setting assignments");
-DEFINE_string(ysql_hba_conf_csv, "",
+DEFINE_UNKNOWN_string(ysql_hba_conf_csv, "",
               "CSV formatted line represented list of postgres hba rules (in order)");
 TAG_FLAG(ysql_hba_conf_csv, sensitive_info);
 
-DEFINE_string(ysql_pg_conf, "",
+DEFINE_UNKNOWN_string(ysql_pg_conf, "",
               "Deprecated, use the `ysql_pg_conf_csv` flag instead. " \
               "Comma separated list of postgres setting assignments");
-DEFINE_string(ysql_hba_conf, "",
+DEFINE_UNKNOWN_string(ysql_hba_conf, "",
               "Deprecated, use `ysql_hba_conf_csv` flag instead. " \
               "Comma separated list of postgres hba rules (in order)");
 TAG_FLAG(ysql_hba_conf, sensitive_info);
 
-using std::vector;
+// gFlag wrappers over Postgres GUC parameter.
+// The value type should match the GUC parameter, or it should be a string, in which case Postgres
+// will convert it to the correct type.
+// The default values of gFlag are visible to customers via flags metadata xml, documentation, and
+// platform UI. So, it's important to keep these values as accurate as possible. The default_value
+// or target_value (for AutoFlags) should match the default specified in guc.c.
+// Use an empty string or 0 for parameters like timezone and max_connections whose default is
+// computed at runtime so that they show up as an undefined value instead of an incorrect value. If
+// 0 is a valid value for the parameter, then use an empty string. These are enforced by the
+// PgWrapperFlagsTest.VerifyGFlagDefaults test.
+#define DEFINE_NON_RUNTIME_PG_FLAG(type, name, default_value, description) \
+  BOOST_PP_CAT(DEFINE_NON_RUNTIME_, type)(BOOST_PP_CAT(ysql_, name), default_value, description); \
+  _TAG_FLAG(BOOST_PP_CAT(ysql_, name), ::yb::FlagTag::kPg, pg)
+
+#define DEFINE_RUNTIME_PG_FLAG(type, name, default_value, description) \
+  BOOST_PP_CAT(DEFINE_RUNTIME_, type)(BOOST_PP_CAT(ysql_, name), default_value, description); \
+  _TAG_FLAG(BOOST_PP_CAT(ysql_, name), ::yb::FlagTag::kPg, pg)
+
+#define DEFINE_RUNTIME_AUTO_PG_FLAG(type, name, flag_class, initial_val, target_val, description) \
+  BOOST_PP_CAT(DEFINE_RUNTIME_AUTO_, type)(ysql_##name, flag_class, initial_val, target_val, \
+                                           description); \
+  _TAG_FLAG(BOOST_PP_CAT(ysql_, name), ::yb::FlagTag::kPg, pg)
+
+DEFINE_RUNTIME_PG_FLAG(string, timezone, "",
+    "Overrides the default ysql timezone for displaying and interpreting timestamps. If no value "
+    "is provided, Postgres will determine one based on the environment");
+
+DEFINE_RUNTIME_PG_FLAG(string, datestyle,
+    "ISO, MDY", "The ysql display format for date and time values");
+
+DEFINE_NON_RUNTIME_PG_FLAG(int32, max_connections, 0,
+    "Overrides the maximum number of concurrent ysql connections. If set to 0, Postgres will "
+    "dynamically determine a platform-specific value");
+
+DEFINE_RUNTIME_PG_FLAG(string, default_transaction_isolation,
+    "read committed", "The ysql transaction isolation level");
+
+DEFINE_RUNTIME_PG_FLAG(string, log_statement,
+    "none", "Sets which types of ysql statements should be logged");
+
+DEFINE_RUNTIME_PG_FLAG(string, log_min_messages,
+    "warning", "Sets the lowest ysql message level to log");
+
+DEFINE_RUNTIME_PG_FLAG(int32, log_min_duration_statement, -1,
+    "Sets the duration of each completed ysql statement to be logged if the statement ran for at "
+    "least the specified number of milliseconds. Zero prints all queries. -1 turns this feature "
+    "off.");
+
+DEFINE_RUNTIME_AUTO_PG_FLAG(bool, yb_enable_expression_pushdown, kLocalVolatile, false, true,
+    "Push supported expressions from ysql down to DocDB for evaluation.");
+
+DEFINE_RUNTIME_PG_FLAG(int32, yb_index_state_flags_update_delay, 1000,
+    "Delay in milliseconds between stages of online index build. Set high to give online "
+    "transactions more time to complete.");
+
+DEFINE_RUNTIME_PG_FLAG(string, yb_xcluster_consistency_level, "database",
+    "Controls the consistency level of xCluster replicated databases. Valid values are "
+    "\"database\" and \"tablet\".");
+
+DEFINE_RUNTIME_PG_FLAG(string, yb_test_block_index_state_change, "",
+    "Block the given index state change from proceeding. Valid names are indisready, getsafetime,"
+    " and indisvalid. For testing purposes.");
+
+static bool ValidateXclusterConsistencyLevel(const char* flagname, const std::string& value) {
+  if (value != "database" && value != "tablet") {
+    fprintf(
+        stderr, "Invalid value for --%s: %s, must be 'database' or 'tablet'\n", flagname,
+        value.c_str());
+    return false;
+  }
+  return true;
+}
+
+DEFINE_validator(ysql_yb_xcluster_consistency_level, &ValidateXclusterConsistencyLevel);
+
+using gflags::CommandLineFlagInfo;
 using std::string;
+using std::vector;
 
 using namespace std::literals;  // NOLINT
 
@@ -153,7 +229,7 @@ void MergeSharedPreloadLibraries(const string& src, vector<string>* defaults) {
   defaults->insert(defaults->end(), new_items.begin(), new_items.end());
 }
 
-CHECKED_STATUS ReadCSVValues(const string& csv, vector<string>* lines) {
+Status ReadCSVValues(const string& csv, vector<string>* lines) {
   // Function reads CSV string in the following format:
   // - fields are divided with comma (,)
   // - fields with comma (,) or double-quote (") are quoted with double-quote (")
@@ -186,6 +262,47 @@ CHECKED_STATUS ReadCSVValues(const string& csv, vector<string>* lines) {
   }
   return Status::OK();
 }
+
+namespace {
+// Append any Pg gFlag with non default value, or non-promoted AutoFlag
+void AppendPgGFlags(vector<string>* lines) {
+  vector<CommandLineFlagInfo> flags;
+  GetAllFlags(&flags);
+
+  for (const CommandLineFlagInfo& flag : flags) {
+    std::unordered_set<FlagTag> tags;
+    GetFlagTags(flag.name, &tags);
+    if (!tags.contains(FlagTag::kPg)) {
+      continue;
+    }
+
+    // Skip flags that do not have a custom override
+    if (flag.is_default) {
+      if (!tags.contains(FlagTag::kAuto)) {
+        continue;
+      }
+
+      // AutoFlags in not-promoted state will be set to their initial value.
+      // In the promoted state they will be set to their target value. (guc default)
+      // We only need to override when AutoFlags is non-promoted.
+      auto* desc = GetAutoFlagDescription(flag.name);
+      CHECK_NOTNULL(desc);
+      if (IsFlagPromoted(flag, *desc)) {
+        continue;
+      }
+    }
+
+    const string pg_flag_prefix = "ysql_";
+    if (!flag.name.starts_with(pg_flag_prefix)) {
+      LOG(DFATAL) << "Flags with Pg Flag tag should have 'ysql_' prefix. Flag_name: " << flag.name;
+      continue;
+    }
+
+    string pg_variable_name = flag.name.substr(pg_flag_prefix.length());
+    lines->push_back(Format("$0=$1", pg_variable_name, flag.current_value));
+  }
+}
+}  // namespace
 
 Result<string> WritePostgresConfig(const PgProcessConf& conf) {
   // First add default configuration created by local initdb.
@@ -247,33 +364,11 @@ Result<string> WritePostgresConfig(const PgProcessConf& conf) {
     lines.push_back(Format("ssl_ca_file='$0/ca.crt'", conf.certs_for_client_dir));
   }
 
-  if (!FLAGS_ysql_timezone.empty()) {
-    lines.push_back("timezone=" + FLAGS_ysql_timezone);
-  }
-
-  if (!FLAGS_ysql_datestyle.empty()) {
-    lines.push_back("datestyle=" + FLAGS_ysql_datestyle);
-  }
-
-  if (FLAGS_ysql_max_connections > 0) {
-    lines.push_back("max_connections=" + std::to_string(FLAGS_ysql_max_connections));
-  }
-
-  if (!FLAGS_ysql_default_transaction_isolation.empty()) {
-    lines.push_back("default_transaction_isolation=" + FLAGS_ysql_default_transaction_isolation);
-  }
-
-  if (!FLAGS_ysql_log_statement.empty()) {
-    lines.push_back("log_statement=" + FLAGS_ysql_log_statement);
-  }
-
-  if (!FLAGS_ysql_log_min_messages.empty()) {
-    lines.push_back("log_min_messages=" + FLAGS_ysql_log_min_messages);
-  }
-
-  if (!FLAGS_ysql_log_min_duration_statement.empty()) {
-    lines.push_back("log_min_duration_statement=" + FLAGS_ysql_log_min_duration_statement);
-  }
+  // Finally add gFlags.
+  // If the file contains multiple entries for the same parameter, all but the last one are
+  // ignored. If there are duplicates in FLAGS_ysql_pg_conf_csv then we want the values specified
+  // via the gFlag to take precedence.
+  AppendPgGFlags(&lines);
 
   string conf_path = JoinPathSegments(conf.data_dir, "ysql_pg.conf");
   RETURN_NOT_OK(WriteConfigFile(conf_path, lines));
@@ -385,7 +480,8 @@ Status PgWrapper::Start() {
   // Configure UNIX domain socket for index backfill tserver-postgres communication and for
   // Yugabyte Platform backups.
   argv.push_back("-k");
-  const std::string& socket_dir = PgDeriveSocketDir(conf_.listen_addresses);
+  const std::string& socket_dir = PgDeriveSocketDir(
+      HostPort(conf_.listen_addresses, conf_.pg_port));
   RETURN_NOT_OK(Env::Default()->CreateDirs(socket_dir));
   argv.push_back(socket_dir);
 
@@ -422,12 +518,33 @@ Status PgWrapper::Start() {
   pg_proc_->SetEnv("LD_LIBRARY_PATH", boost::join(ld_library_path, ":"));
   pg_proc_->ShareParentStderr();
   pg_proc_->ShareParentStdout();
-  pg_proc_->SetParentDeathSignal(SIGINT);
+  pg_proc_->SetEnv("FLAGS_yb_pg_terminate_child_backend",
+                    FLAGS_yb_pg_terminate_child_backend ? "true" : "false");
+  pg_proc_->SetEnv("FLAGS_yb_backend_oom_score_adj", FLAGS_yb_backend_oom_score_adj);
+  pg_proc_->SetEnv(
+      "FLAGS_pg_mem_tracker_tcmalloc_gc_release_bytes",
+      std::to_string(FLAGS_pg_mem_tracker_tcmalloc_gc_release_bytes));
+
+  // See YBSetParentDeathSignal in pg_yb_utils.c for how this is used.
+  pg_proc_->SetEnv("YB_PG_PDEATHSIG", Format("$0", SIGINT));
   pg_proc_->InheritNonstandardFd(conf_.tserver_shm_fd);
-  SetCommonEnv(&pg_proc_.get(), /* yb_enabled */ true);
+  SetCommonEnv(&*pg_proc_, /* yb_enabled */ true);
   RETURN_NOT_OK(pg_proc_->Start());
+  if (!FLAGS_postmaster_cgroup.empty()) {
+    std::string path = FLAGS_postmaster_cgroup + "/cgroup.procs";
+    pg_proc_->AddPIDToCGroup(path, pg_proc_->pid());
+  }
   LOG(INFO) << "PostgreSQL server running as pid " << pg_proc_->pid();
   return Status::OK();
+}
+
+Status PgWrapper::ReloadConfig() {
+  return pg_proc_->Kill(SIGHUP);
+}
+
+Status PgWrapper::UpdateAndReloadConfig() {
+  VERIFY_RESULT(WritePostgresConfig(conf_));
+  return ReloadConfig();
 }
 
 void PgWrapper::Kill() {
@@ -597,14 +714,23 @@ void PgWrapper::SetCommonEnv(Subprocess* proc, bool yb_enabled) {
 // PgSupervisor: monitoring a PostgreSQL child process and restarting if needed
 // ------------------------------------------------------------------------------------------------
 
-PgSupervisor::PgSupervisor(PgProcessConf conf)
+PgSupervisor::PgSupervisor(PgProcessConf conf, tserver::TabletServerIf* tserver)
     : conf_(std::move(conf)) {
+  if (tserver) {
+    tserver->RegisterCertificateReloader(std::bind(&PgSupervisor::ReloadConfig, this));
+  }
+}
+
+PgSupervisor::~PgSupervisor() {
+  std::lock_guard<std::mutex> lock(mtx_);
+  DeregisterPgFlagChangeNotifications();
 }
 
 Status PgSupervisor::Start() {
   std::lock_guard<std::mutex> lock(mtx_);
   RETURN_NOT_OK(ExpectStateUnlocked(PgProcessState::kNotStarted));
   RETURN_NOT_OK(CleanupOldServerUnlocked());
+  RETURN_NOT_OK(RegisterPgFlagChangeNotifications());
   LOG(INFO) << "Starting PostgreSQL server";
   RETURN_NOT_OK(StartServerUnlocked());
 
@@ -620,7 +746,7 @@ Status PgSupervisor::Start() {
   return Status::OK();
 }
 
-CHECKED_STATUS PgSupervisor::CleanupOldServerUnlocked() {
+Status PgSupervisor::CleanupOldServerUnlocked() {
   std::string postmaster_pid_filename = JoinPathSegments(conf_.data_dir, "postmaster.pid");
   if (Env::Default()->FileExists(postmaster_pid_filename)) {
     std::ifstream postmaster_pid_file;
@@ -659,7 +785,8 @@ CHECKED_STATUS PgSupervisor::CleanupOldServerUnlocked() {
         LOG(WARNING) << "Didn't find postgres in " << cmdline;
       }
     }
-    ignore_result(Env::Default()->DeleteFile(postmaster_pid_filename));
+    WARN_NOT_OK(Env::Default()->DeleteFile(postmaster_pid_filename),
+                "Failed to remove postmaster pid file");
   }
   return Status::OK();
 }
@@ -669,7 +796,7 @@ PgProcessState PgSupervisor::GetState() {
   return state_;
 }
 
-CHECKED_STATUS PgSupervisor::ExpectStateUnlocked(PgProcessState expected_state) {
+Status PgSupervisor::ExpectStateUnlocked(PgProcessState expected_state) {
   if (state_ != expected_state) {
     return STATUS_FORMAT(
         IllegalState, "Expected PostgreSQL server state to be $0, got $1", expected_state, state_);
@@ -677,7 +804,7 @@ CHECKED_STATUS PgSupervisor::ExpectStateUnlocked(PgProcessState expected_state) 
   return Status::OK();
 }
 
-CHECKED_STATUS PgSupervisor::StartServerUnlocked() {
+Status PgSupervisor::StartServerUnlocked() {
   if (pg_wrapper_) {
     return STATUS(IllegalState, "Expecting pg_wrapper_ to not be set");
   }
@@ -730,6 +857,8 @@ void PgSupervisor::Stop() {
   {
     std::lock_guard<std::mutex> lock(mtx_);
     state_ = PgProcessState::kStopping;
+    DeregisterPgFlagChangeNotifications();
+
     if (pg_wrapper_) {
       pg_wrapper_->Kill();
     }
@@ -737,5 +866,54 @@ void PgSupervisor::Stop() {
   supervisor_thread_->Join();
 }
 
+Status PgSupervisor::ReloadConfig() {
+  std::lock_guard<std::mutex> lock(mtx_);
+  if (pg_wrapper_) {
+    return pg_wrapper_->ReloadConfig();
+  }
+  return Status::OK();
+}
+
+Status PgSupervisor::UpdateAndReloadConfig() {
+  std::lock_guard<std::mutex> lock(mtx_);
+  if (pg_wrapper_) {
+    return pg_wrapper_->UpdateAndReloadConfig();
+  }
+  return Status::OK();
+}
+
+Status PgSupervisor::RegisterReloadPgConfigCallback(const void* flag_ptr) {
+  // DeRegisterForPgFlagChangeNotifications is called before flag_callbacks_ is destroyed, so its
+  // safe to bind to this.
+  flag_callbacks_.emplace_back(VERIFY_RESULT(RegisterFlagUpdateCallback(
+      flag_ptr, "ReloadPgConfig", std::bind(&PgSupervisor::UpdateAndReloadConfig, this))));
+
+  return Status::OK();
+}
+
+Status PgSupervisor::RegisterPgFlagChangeNotifications() {
+  DeregisterPgFlagChangeNotifications();
+
+  vector<CommandLineFlagInfo> flags;
+  GetAllFlags(&flags);
+  for (const CommandLineFlagInfo& flag : flags) {
+    std::unordered_set<FlagTag> tags;
+    GetFlagTags(flag.name, &tags);
+    if (tags.contains(FlagTag::kPg)) {
+      RETURN_NOT_OK(RegisterReloadPgConfigCallback(flag.flag_ptr));
+    }
+  }
+
+  RETURN_NOT_OK(RegisterReloadPgConfigCallback(&FLAGS_ysql_pg_conf_csv));
+
+  return Status::OK();
+}
+
+void PgSupervisor::DeregisterPgFlagChangeNotifications() {
+  for (auto& callback : flag_callbacks_) {
+    callback.Deregister();
+  }
+  flag_callbacks_.clear();
+}
 }  // namespace pgwrapper
 }  // namespace yb

@@ -162,6 +162,24 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 			  Oid funcoid, Oid parentTriggerOid, Node *whenClause,
 			  bool isInternal, bool in_partition)
 {
+	return
+		CreateTriggerFiringOn(stmt, queryString, relOid, refRelOid,
+							  constraintOid, indexOid, funcoid,
+							  parentTriggerOid, whenClause, isInternal,
+							  in_partition, TRIGGER_FIRES_ON_ORIGIN);
+}
+
+/*
+ * Like the above; additionally the firing condition
+ * (always/origin/replica/disabled) can be specified.
+ */
+ObjectAddress
+CreateTriggerFiringOn(CreateTrigStmt *stmt, const char *queryString,
+					  Oid relOid, Oid refRelOid, Oid constraintOid,
+					  Oid indexOid, Oid funcoid, Oid parentTriggerOid,
+					  Node *whenClause, bool isInternal, bool in_partition,
+					  char trigger_fires_when)
+{
 	int16		tgtype;
 	int			ncolumns;
 	int16	   *columns;
@@ -341,9 +359,11 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 	{
 		aclresult = pg_class_aclcheck(RelationGetRelid(rel), GetUserId(),
 									  ACL_TRIGGER);
-		if (aclresult != ACLCHECK_OK)
+		if (aclresult != ACLCHECK_OK && !IsYbDbAdminUser(GetUserId()))
+		{
 			aclcheck_error(aclresult, get_relkind_objtype(rel->rd_rel->relkind),
 						   RelationGetRelationName(rel));
+		}
 
 		if (OidIsValid(constrrelid))
 		{
@@ -829,7 +849,7 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 															 CStringGetDatum(trigname));
 	values[Anum_pg_trigger_tgfoid - 1] = ObjectIdGetDatum(funcoid);
 	values[Anum_pg_trigger_tgtype - 1] = Int16GetDatum(tgtype);
-	values[Anum_pg_trigger_tgenabled - 1] = CharGetDatum(TRIGGER_FIRES_ON_ORIGIN);
+	values[Anum_pg_trigger_tgenabled - 1] = trigger_fires_when;
 	values[Anum_pg_trigger_tgisinternal - 1] = BoolGetDatum(isInternal || in_partition);
 	values[Anum_pg_trigger_tgconstrrelid - 1] = ObjectIdGetDatum(constrrelid);
 	values[Anum_pg_trigger_tgconstrindid - 1] = ObjectIdGetDatum(indexOid);
@@ -1172,11 +1192,11 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 			if (found_whole_row)
 				elog(ERROR, "unexpected whole-row reference found in trigger WHEN clause");
 
-			CreateTrigger(childStmt, queryString,
-						  partdesc->oids[i], refRelOid,
-						  InvalidOid, indexOnChild,
-						  funcoid, trigoid, qual,
-						  isInternal, true);
+			CreateTriggerFiringOn(childStmt, queryString,
+								  partdesc->oids[i], refRelOid,
+								  InvalidOid, indexOnChild,
+								  funcoid, trigoid, qual,
+								  isInternal, true, trigger_fires_when);
 
 			heap_close(childTbl, NoLock);
 
@@ -1628,7 +1648,7 @@ RangeVarCallbackForRenameTrigger(const RangeVar *rv, Oid relid, Oid oldrelid,
 						rv->relname)));
 
 	/* you must own the table to rename one of its triggers */
-	if (!pg_class_ownercheck(relid, GetUserId()))
+	if (!pg_class_ownercheck(relid, GetUserId()) && !IsYbDbAdminUser(GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, get_relkind_objtype(get_rel_relkind(relid)), rv->relname);
 	if (!allowSystemTableMods && IsSystemClass(relid, form))
 		ereport(ERROR,
@@ -1828,7 +1848,7 @@ EnableDisableTrigger(Relation rel, const char *tgname,
 			/* system trigger ... ok to process? */
 			if (skip_system)
 				continue;
-			if (!superuser())
+			if (!superuser() && !IsYbDbAdminUser(GetUserId()))
 				ereport(ERROR,
 						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 						 errmsg("permission denied: \"%s\" is a system trigger",
@@ -4437,6 +4457,7 @@ afterTriggerMarkEvents(AfterTriggerEventList *events,
 					   bool immediate_only)
 {
 	bool		found = false;
+	bool		deferred_found = false;
 	AfterTriggerEvent event;
 	AfterTriggerEventChunk *chunk;
 
@@ -4472,12 +4493,23 @@ afterTriggerMarkEvents(AfterTriggerEventList *events,
 		 */
 		if (defer_it && move_list != NULL)
 		{
+			deferred_found = true;
 			/* add it to move_list */
 			afterTriggerAddEvent(move_list, event, evtshared);
 			/* mark original copy "done" so we don't do it again */
 			event->ate_flags |= AFTER_TRIGGER_DONE;
 		}
 	}
+
+	/*
+	 * We could allow deferred triggers if, before the end of the
+	 * security-restricted operation, we were to verify that a SET CONSTRAINTS
+	 * ... IMMEDIATE has fired all such triggers.  For now, don't bother.
+	 */
+	if (deferred_found && InSecurityRestrictedOperation())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("cannot fire deferred trigger within security-restricted operation")));
 
 	return found;
 }
@@ -6002,6 +6034,11 @@ AfterTriggerSaveEvent(EState *estate, ResultRelInfo *relinfo,
 							modifiedCols, oldtup, newtup))
 			continue;
 
+		const bool is_fk_trigger_on_yb_table = IsYBBackedRelation(rel) &&
+				RI_FKey_trigger_type(trigger->tgfoid) == RI_TRIGGER_FK;
+		if (estate->yb_es_is_fk_check_disabled && is_fk_trigger_on_yb_table)
+			continue;
+
 		/*
 		 * If the trigger is a foreign key enforcement trigger, there are
 		 * certain cases where we can skip queueing the event because we can
@@ -6110,26 +6147,9 @@ AfterTriggerSaveEvent(EState *estate, ResultRelInfo *relinfo,
 			}
 		}
 
-		if (IsYBBackedRelation(rel) && RI_FKey_trigger_type(trigger->tgfoid) == RI_TRIGGER_FK)
-		{
-			YBCPgYBTupleIdDescriptor *descr = YBBuildFKTupleIdDescriptor(trigger, rel, newtup);
-			if (descr)
-			{
-				/*
-				 * Foreign key with at least one null value of real (non system) column
-				 * will not be checked, no need to add it into the cache.
-				 */
-				bool null_found = false;
-				for (YBCPgAttrValueDescriptor *attr = descr->attrs,
-					*end = descr->attrs + descr->nattrs;
-					attr != end && !null_found; ++attr)
-					null_found = attr->is_null && (attr->attr_num > 0);
+		if (is_fk_trigger_on_yb_table)
+			YbAddTriggerFKReferenceIntent(trigger, rel, newtup);
 
-				if (!null_found)
-					HandleYBStatus(YBCAddForeignKeyReferenceIntent(descr));
-				pfree(descr);
-			}
-		}
 		afterTriggerAddEvent(
 				&afterTriggers.query_stack[afterTriggers.query_depth].events, &new_event, &new_shared);
 	}

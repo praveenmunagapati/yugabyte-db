@@ -41,16 +41,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef YB_SERVER_DEFAULT_PATH_HANDLERS_H
-#define YB_SERVER_DEFAULT_PATH_HANDLERS_H
-
-#include <string>
+#pragma once
 
 namespace yb {
 
 class MetricRegistry;
 class Webserver;
 class FsManager;
+
+namespace server {
+class RpcServerBase;
+}
 
 // Adds a set of default path handlers to the webserver to display
 // logs and configuration flags.
@@ -62,6 +63,6 @@ void RegisterMetricsJsonHandler(Webserver* webserver, const MetricRegistry* cons
 // Adds an endpoint to display path usage.
 void RegisterPathUsageHandler(Webserver* webserver, FsManager* fsmanager);
 
-} // namespace yb
+void RegisterTlsHandler(Webserver* webserver, server::RpcServerBase* server);
 
-#endif // YB_SERVER_DEFAULT_PATH_HANDLERS_H
+} // namespace yb

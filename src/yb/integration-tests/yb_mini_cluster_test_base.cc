@@ -13,11 +13,14 @@
 
 #include "yb/integration-tests/yb_mini_cluster_test_base.h"
 
+#include "yb/client/client.h"
 #include "yb/client/session.h"
 
 #include "yb/integration-tests/cluster_verifier.h"
-#include "yb/integration-tests/mini_cluster.h"
 #include "yb/integration-tests/external_mini_cluster.h"
+#include "yb/integration-tests/mini_cluster.h"
+
+#include "yb/util/result.h"
 
 using namespace std::literals;
 
@@ -42,6 +45,10 @@ void YBMiniClusterTestBase<T>::SetUp() {
   YBTest::SetUp();
   HybridTime::TEST_SetPrettyToString(true);
 
+  // Save default value of use_priority_thread_pool_for_flushes flag for tests that aim to test
+  // the default behaviour rather then overridden one we configure here.
+  // Also see https://github.com/yugabyte/yugabyte-db/issues/8935.
+  saved_use_priority_thread_pool_for_flushes_ = FLAGS_use_priority_thread_pool_for_flushes;
   FLAGS_use_priority_thread_pool_for_flushes = true;
   FLAGS_allow_preempting_compactions = true;
 

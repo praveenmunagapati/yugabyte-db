@@ -29,24 +29,46 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
+
 #include "yb/tablet/tablet_bootstrap.h"
+
+#include <map>
+#include <set>
+
+#include <boost/preprocessor/cat.hpp>
+#include <boost/preprocessor/stringize.hpp>
+
+#include "yb/common/common_fwd.h"
+#include "yb/common/schema.h"
+#include "yb/common/wire_protocol.h"
 
 #include "yb/consensus/consensus.h"
 #include "yb/consensus/consensus.pb.h"
+#include "yb/consensus/consensus_meta.h"
 #include "yb/consensus/consensus_util.h"
 #include "yb/consensus/log.h"
+#include "yb/consensus/log.messages.h"
 #include "yb/consensus/log_anchor_registry.h"
+#include "yb/consensus/log_index.h"
 #include "yb/consensus/log_reader.h"
 #include "yb/consensus/log_util.h"
+#include "yb/consensus/opid_util.h"
 #include "yb/consensus/retryable_requests.h"
 
-#include "yb/server/hybrid_clock.h"
-#include "yb/tablet/snapshot_coordinator.h"
+#include "yb/docdb/consensus_frontier.h"
+#include "yb/docdb/value_type.h"
+
+#include "yb/gutil/casts.h"
+#include "yb/gutil/ref_counted.h"
+#include "yb/gutil/strings/substitute.h"
+#include "yb/gutil/thread_annotations.h"
+
+#include "yb/rpc/rpc_fwd.h"
+#include "yb/rpc/lightweight_message.h"
+
 #include "yb/tablet/tablet_fwd.h"
-#include "yb/tablet/tablet_snapshots.h"
-#include "yb/tablet/tablet.h"
-#include "yb/tablet/tablet_peer.h"
-#include "yb/tablet/tablet_splitter.h"
+#include "yb/tablet/mvcc.h"
+#include "yb/tablet/operations/change_auto_flags_config_operation.h"
 #include "yb/tablet/operations/change_metadata_operation.h"
 #include "yb/tablet/operations/history_cutoff_operation.h"
 #include "yb/tablet/operations/snapshot_operation.h"
@@ -54,26 +76,39 @@
 #include "yb/tablet/operations/truncate_operation.h"
 #include "yb/tablet/operations/update_txn_operation.h"
 #include "yb/tablet/operations/write_operation.h"
-#include "yb/util/fault_injection.h"
-#include "yb/util/flag_tags.h"
-#include "yb/util/opid.h"
-#include "yb/util/logging.h"
-#include "yb/util/scope_exit.h"
-#include "yb/util/status.h"
-#include "yb/util/stopwatch.h"
-#include "yb/util/env_util.h"
-#include "yb/consensus/log_index.h"
-#include "yb/docdb/consensus_frontier.h"
+#include "yb/tablet/snapshot_coordinator.h"
+#include "yb/tablet/tablet.h"
+#include "yb/tablet/tablet_metadata.h"
+#include "yb/tablet/tablet_options.h"
+#include "yb/tablet/tablet_snapshots.h"
+#include "yb/tablet/tablet_splitter.h"
+#include "yb/tablet/transaction_coordinator.h"
+#include "yb/tablet/transaction_participant.h"
+
 #include "yb/tserver/backup.pb.h"
 
-DEFINE_bool(skip_remove_old_recovery_dir, false,
+#include "yb/util/atomic.h"
+#include "yb/util/env_util.h"
+#include "yb/util/fault_injection.h"
+#include "yb/util/flags.h"
+#include "yb/util/format.h"
+#include "yb/util/logging.h"
+#include "yb/util/metric_entity.h"
+#include "yb/util/monotime.h"
+#include "yb/util/opid.h"
+#include "yb/util/scope_exit.h"
+#include "yb/util/status.h"
+#include "yb/util/status_format.h"
+#include "yb/util/stopwatch.h"
+
+DEFINE_UNKNOWN_bool(skip_remove_old_recovery_dir, false,
             "Skip removing WAL recovery dir after startup. (useful for debugging)");
 TAG_FLAG(skip_remove_old_recovery_dir, hidden);
 
-DEFINE_bool(skip_wal_rewrite, true,
-            "Skip rewriting WAL files during bootstrap.");
+// This is technically runtime, but it only affects tablets that start bootstrap after the flag
+// value is changed.
+DEFINE_RUNTIME_bool(skip_wal_rewrite, true, "Skip rewriting WAL files during bootstrap.");
 TAG_FLAG(skip_wal_rewrite, experimental);
-TAG_FLAG(skip_wal_rewrite, runtime);
 
 DEFINE_test_flag(double, fault_crash_during_log_replay, 0.0,
                  "Fraction of the time when the tablet will crash immediately "
@@ -81,22 +116,33 @@ DEFINE_test_flag(double, fault_crash_during_log_replay, 0.0,
 
 DECLARE_uint64(max_clock_sync_error_usec);
 
-DEFINE_bool(force_recover_flushed_frontier, false,
+DEFINE_UNKNOWN_bool(force_recover_flushed_frontier, false,
             "Could be used to ignore the flushed frontier metadata from RocksDB manifest and "
             "recover it from the log instead.");
 TAG_FLAG(force_recover_flushed_frontier, hidden);
 TAG_FLAG(force_recover_flushed_frontier, advanced);
 
-DEFINE_bool(skip_flushed_entries, true,
+DEFINE_UNKNOWN_bool(skip_flushed_entries, true,
             "Only replay WAL entries that are not flushed to RocksDB or within the retryable "
             "request timeout.");
 
 DECLARE_int32(retryable_request_timeout_secs);
 
-DEFINE_uint64(transaction_status_tablet_log_segment_size_bytes, 4_MB,
+DEFINE_UNKNOWN_uint64(transaction_status_tablet_log_segment_size_bytes, 4_MB,
               "The segment size for transaction status tablet log roll-overs, in bytes.");
 DEFINE_test_flag(int32, tablet_bootstrap_delay_ms, 0,
                  "Time (in ms) to delay tablet bootstrap by.");
+
+DEFINE_test_flag(bool, dump_docdb_before_tablet_bootstrap, false,
+                 "Dump the contents of DocDB before tablet bootstrap. Should only be used when "
+                 "data is small.");
+
+DEFINE_test_flag(bool, dump_docdb_after_tablet_bootstrap, false,
+                 "Dump the contents of DocDB after tablet bootstrap. Should only be used when "
+                 "data is small.");
+
+DEFINE_test_flag(bool, play_pending_uncommitted_entries, false,
+                 "Play all the pending entries present in the log even if they are uncommitted.");
 
 namespace yb {
 namespace tablet {
@@ -104,6 +150,8 @@ namespace tablet {
 using namespace std::literals; // NOLINT
 using namespace std::placeholders;
 using std::shared_ptr;
+using std::string;
+using std::vector;
 
 using log::Log;
 using log::LogEntryPB;
@@ -124,16 +172,14 @@ using consensus::OpIdToString;
 using consensus::ReplicateMsg;
 using consensus::MakeOpIdPB;
 using strings::Substitute;
-using tserver::ChangeMetadataRequestPB;
-using tserver::TruncateRequestPB;
 using tserver::WriteRequestPB;
 using tserver::TabletSnapshotOpRequestPB;
 
 static string DebugInfo(const string& tablet_id,
-                        int segment_seqno,
-                        int entry_idx,
+                        uint64_t segment_seqno,
+                        size_t entry_idx,
                         const string& segment_path,
-                        const LogEntryPB* entry) {
+                        const log::LWLogEntryPB* entry) {
   // Truncate the debug string to a reasonable length for logging.  Otherwise, glog will truncate
   // for us and we may miss important information which came after this long string.
   string debug_str = entry ? entry->ShortDebugString() : "<nullptr>"s;
@@ -151,7 +197,7 @@ static string DebugInfo(const string& tablet_id,
 // ================================================================================================
 
 struct Entry {
-  std::unique_ptr<log::LogEntryPB> entry;
+  std::shared_ptr<log::LWLogEntryPB> entry;
   RestartSafeCoarseTimePoint entry_time;
 
   std::string ToString() const {
@@ -174,18 +220,18 @@ struct ReplayState {
   static bool IsValidSequence(const OpId& a, const OpId& b);
 
   // Return a Corruption status if 'id' seems to be out-of-sequence in the log.
-  Status CheckSequentialReplicateId(const consensus::ReplicateMsg& msg);
+  Status CheckSequentialReplicateId(const consensus::LWReplicateMsg& msg);
 
   void UpdateCommittedOpId(const OpId& id);
 
   // half_limit is half the limit on the number of entries added
   void AddEntriesToStrings(
-      const OpIndexToEntryMap& entries, std::vector<std::string>* strings, int half_limit) const;
+      const OpIndexToEntryMap& entries, std::vector<std::string>* strings, size_t half_limit) const;
 
   // half_limit is half the limit on the number of entries to be dumped
   void DumpReplayStateToStrings(std::vector<std::string>* strings, int half_limit) const;
 
-  bool CanApply(log::LogEntryPB* entry);
+  bool CanApply(const log::LWLogEntryPB& entry);
 
   const std::string& LogPrefix() const { return log_prefix; }
 
@@ -260,7 +306,7 @@ bool ReplayState::IsValidSequence(const OpId& a, const OpId& b) {
 }
 
 // Return a Corruption status if 'id' seems to be out-of-sequence in the log.
-Status ReplayState::CheckSequentialReplicateId(const ReplicateMsg& msg) {
+Status ReplayState::CheckSequentialReplicateId(const consensus::LWReplicateMsg& msg) {
   SCHECK(msg.has_id(), Corruption, "A REPLICATE message must have an id");
   const auto msg_op_id = OpId::FromPB(msg.id());
   if (PREDICT_FALSE(!IsValidSequence(prev_op_id, msg_op_id))) {
@@ -284,7 +330,7 @@ void ReplayState::UpdateCommittedOpId(const OpId& id) {
 
 void ReplayState::AddEntriesToStrings(const OpIndexToEntryMap& entries,
                                       std::vector<std::string>* strings,
-                                      int half_limit) const {
+                                      size_t half_limit) const {
   const auto n = entries.size();
   const bool overflow = n > 2 * half_limit;
   size_t index = 0;
@@ -296,7 +342,7 @@ void ReplayState::AddEntriesToStrings(const OpIndexToEntryMap& entries,
           index + 1,
           OpId::FromPB(replicate.id()),
           replicate.hybrid_time(),
-          replicate.op_type(),
+          consensus::OperationType_Name(replicate.op_type()),
           OpId::FromPB(replicate.committed_op_id())));
     }
     if (overflow && index == half_limit - 1) {
@@ -331,8 +377,8 @@ void ReplayState::DumpReplayStateToStrings(
   }
 }
 
-bool ReplayState::CanApply(LogEntryPB* entry) {
-  return OpId::FromPB(entry->replicate().id()) <= committed_op_id;
+bool ReplayState::CanApply(const log::LWLogEntryPB& entry) {
+  return OpId::FromPB(entry.replicate().id()) <= committed_op_id;
 }
 
 OpId ReplayState::GetLowestOpIdToReplay(bool has_intents_db, const char* extra_log_prefix) const {
@@ -360,6 +406,10 @@ struct ReplayDecision {
   // This is true for transaction update operations that have already been applied to the regular
   // RocksDB but not to the intents RocksDB.
   AlreadyAppliedToRegularDB already_applied_to_regular_db = AlreadyAppliedToRegularDB::kFalse;
+
+  std::string ToString() const {
+    return YB_STRUCT_TO_STRING(should_replay, already_applied_to_regular_db);
+  }
 };
 
 ReplayDecision ShouldReplayOperation(
@@ -369,38 +419,51 @@ ReplayDecision ShouldReplayOperation(
     const int64_t intents_flushed_index,
     TransactionStatus txn_status,
     bool write_op_has_transaction) {
+  if (op_type == consensus::UPDATE_TRANSACTION_OP) {
+    if (txn_status == TransactionStatus::APPLYING && index <= regular_flushed_index) {
+      // TODO: Replaying even transactions that are flushed to both regular and intents RocksDB is a
+      // temporary change. The long term change is to track write and apply operations separately
+      // instead of a tracking a single "intents_flushed_index".
+      VLOG_WITH_FUNC(3) << "index: " << index << " "
+                        << "regular_flushed_index: " << regular_flushed_index
+                        << " intents_flushed_index: " << intents_flushed_index;
+      return {true, AlreadyAppliedToRegularDB::kTrue};
+    }
+    // For other types of transaction updates, we ignore them if they have been flushed to the
+    // regular RocksDB.
+    VLOG_WITH_FUNC(3) << "index: " << index << " > "
+                      << "regular_flushed_index: " << regular_flushed_index;
+    return {index > regular_flushed_index};
+  }
+
   // In most cases we assume that intents_flushed_index <= regular_flushed_index but here we are
   // trying to be resilient to violations of that assumption.
   if (index <= std::min(regular_flushed_index, intents_flushed_index)) {
     // Never replay anyting that is flushed to both regular and intents RocksDBs in a transactional
     // table.
+    VLOG_WITH_FUNC(3) << "index: " << index << " "
+                      << "regular_flushed_index: " << regular_flushed_index
+                      << " intents_flushed_index: " << intents_flushed_index;
     return {false};
-  }
-
-  if (op_type == consensus::UPDATE_TRANSACTION_OP) {
-    if (txn_status == TransactionStatus::APPLYING &&
-        intents_flushed_index < index && index <= regular_flushed_index) {
-      // Intents were applied/flushed to regular RocksDB, but not flushed into the intents RocksDB.
-      return {true, AlreadyAppliedToRegularDB::kTrue};
-    }
-    // For other types of transaction updates, we ignore them if they have been flushed to the
-    // regular RocksDB.
-    return {index > regular_flushed_index};
   }
 
   if (op_type == consensus::WRITE_OP && write_op_has_transaction) {
     // Write intents that have not been flushed into the intents DB.
+    VLOG_WITH_FUNC(3) << "index: " << index << " > "
+                      << "intents_flushed_index: " << intents_flushed_index;
     return {index > intents_flushed_index};
   }
 
+  VLOG_WITH_FUNC(3) << "index: " << index << " > "
+                    << "regular_flushed_index: " << regular_flushed_index;
   return {index > regular_flushed_index};
 }
 
-bool WriteOpHasTransaction(const ReplicateMsg& replicate) {
-  if (!replicate.has_write_request()) {
+bool WriteOpHasTransaction(const consensus::LWReplicateMsg& replicate) {
+  if (!replicate.has_write()) {
     return false;
   }
-  const auto& write_request = replicate.write_request();
+  const auto& write_request = replicate.write();
   if (!write_request.has_write_batch()) {
     return false;
   }
@@ -409,7 +472,7 @@ bool WriteOpHasTransaction(const ReplicateMsg& replicate) {
     return true;
   }
   for (const auto& pair : write_batch.write_pairs()) {
-    if (!pair.key().empty() && pair.key()[0] == docdb::ValueTypeAsChar::kExternalTransactionId) {
+    if (!pair.key().empty() && pair.key()[0] == docdb::KeyEntryTypeAsChar::kExternalTransactionId) {
       return true;
     }
   }
@@ -440,13 +503,14 @@ class TabletBootstrap {
         listener_(data.listener),
         append_pool_(data.append_pool),
         allocation_pool_(data.allocation_pool),
-      skip_wal_rewrite_(FLAGS_skip_wal_rewrite) ,
+        log_sync_pool_(data.log_sync_pool),
+        skip_wal_rewrite_(GetAtomicFlag(&FLAGS_skip_wal_rewrite)),
         test_hooks_(data.test_hooks) {
   }
 
   ~TabletBootstrap() {}
 
-  CHECKED_STATUS Bootstrap(
+  Status Bootstrap(
       TabletPtr* rebuilt_tablet,
       scoped_refptr<log::Log>* rebuilt_log,
       consensus::ConsensusBootstrapInfo* consensus_info) {
@@ -478,6 +542,11 @@ class TabletBootstrap {
 
     const bool has_blocks = VERIFY_RESULT(OpenTablet());
 
+    if (FLAGS_TEST_dump_docdb_before_tablet_bootstrap) {
+      LOG_WITH_PREFIX(INFO) << "DEBUG: DocDB dump before tablet bootstrap:";
+      tablet_->TEST_DocDBDumpToLog(IncludeIntents::kTrue);
+    }
+
     const auto needs_recovery = VERIFY_RESULT(PrepareToReplay());
     if (needs_recovery && !skip_wal_rewrite_) {
       RETURN_NOT_OK(OpenLogReader());
@@ -486,7 +555,7 @@ class TabletBootstrap {
     // This is a new tablet, nothing left to do.
     if (!has_blocks && !needs_recovery) {
       LOG_WITH_PREFIX(INFO) << "No blocks or log segments found. Creating new log.";
-      RETURN_NOT_OK_PREPEND(OpenNewLog(CreateNewSegment::kTrue), "Failed to open new log");
+      RETURN_NOT_OK_PREPEND(OpenLog(CreateNewSegment::kTrue), "Failed to open new log");
       RETURN_NOT_OK(FinishBootstrap("No bootstrap required, opened a new log",
                                     rebuilt_log,
                                     rebuilt_tablet));
@@ -542,12 +611,17 @@ class TabletBootstrap {
 
  private:
   // Finishes bootstrap, setting 'rebuilt_log' and 'rebuilt_tablet'.
-  CHECKED_STATUS FinishBootstrap(
+  Status FinishBootstrap(
       const std::string& message,
       scoped_refptr<log::Log>* rebuilt_log,
       TabletPtr* rebuilt_tablet) {
     tablet_->MarkFinishedBootstrapping();
     listener_->StatusMessage(message);
+    if (FLAGS_TEST_dump_docdb_after_tablet_bootstrap) {
+      LOG_WITH_PREFIX(INFO) << "DEBUG: DocDB debug dump after tablet bootstrap:\n";
+      tablet_->TEST_DocDBDumpToLog(IncludeIntents::kTrue);
+    }
+
     *rebuilt_tablet = std::move(tablet_);
     RETURN_NOT_OK(log_->EnsureInitialNewSegmentAllocated());
     rebuilt_log->swap(log_);
@@ -679,9 +753,8 @@ class TabletBootstrap {
         LogReader::Open(
             GetEnv(),
             index,
-            tablet_->metadata()->raft_group_id(),
+            LogPrefix(),
             wal_path,
-            tablet_->metadata()->fs_manager()->uuid(),
             tablet_->GetTableMetricsEntity().get(),
             tablet_->GetTabletMetricsEntity().get(),
             &log_reader_),
@@ -691,7 +764,7 @@ class TabletBootstrap {
 
   // Removes the recovery directory and all files contained therein.  Intended to be invoked after
   // log replay successfully completes.
-  CHECKED_STATUS RemoveRecoveryDir() {
+  Status RemoveRecoveryDir() {
     const string recovery_path = FsManager::GetTabletWalRecoveryDir(tablet_->metadata()->wal_dir());
     if (!GetEnv()->FileExists(recovery_path)) {
       VLOG(1) << "Tablet WAL recovery dir " << recovery_path << " does not exist.";
@@ -723,8 +796,9 @@ class TabletBootstrap {
     return Status::OK();
   }
 
-  // Opens a new log in the tablet's log directory.  The directory is expected to be clean.
-  CHECKED_STATUS OpenNewLog(log::CreateNewSegment create_new_segment) {
+  // Opens log in the tablet's log directory, create_new_segment flag is used to decide
+  // whether to create new log or open existing.
+  Status OpenLog(log::CreateNewSegment create_new_segment) {
     auto log_options = LogOptions();
     const auto& metadata = *tablet_->metadata();
     log_options.retention_secs = metadata.wal_retention_secs();
@@ -746,6 +820,7 @@ class TabletBootstrap {
         tablet_->GetTabletMetricsEntity(),
         append_pool_,
         allocation_pool_,
+        log_sync_pool_,
         metadata.cdc_min_replicated_index(),
         &log_,
         create_new_segment));
@@ -756,8 +831,8 @@ class TabletBootstrap {
 
   // Handle the given log entry. Validates entry.type() (it can only be REPLICATE), optionally
   // injects latency in tests, and delegates to HandleReplicateMessage.
-  CHECKED_STATUS HandleEntry(
-      yb::log::LogEntryMetadata entry_metadata, std::unique_ptr<log::LogEntryPB>* entry_ptr) {
+  Status HandleEntry(
+      log::LogEntryMetadata entry_metadata, std::shared_ptr<log::LWLogEntryPB>* entry_ptr) {
     auto& entry = **entry_ptr;
     VLOG_WITH_PREFIX(2) << "Handling entry: " << entry.ShortDebugString();
 
@@ -777,18 +852,18 @@ class TabletBootstrap {
   //     encountering an entry with an index lower than or equal to the index of an operation that
   //     is already present in pending_replicates.
   //   - Ignores entries that have already been flushed into regular and intents RocksDBs.
-  //   - Updates committed OpId based on the commmited OpId from the entry and calls
+  //   - Updates committed OpId based on the committed OpId from the entry and calls
   //     ApplyCommittedPendingReplicates.
   //   - Updates the "monotonic counter" used for assigning internal keys in YCQL arrays.
-  CHECKED_STATUS HandleReplicateMessage(
-      LogEntryMetadata entry_metadata, std::unique_ptr<log::LogEntryPB>* replicate_entry_ptr) {
+  Status HandleReplicateMessage(
+      LogEntryMetadata entry_metadata, std::shared_ptr<log::LWLogEntryPB>* replicate_entry_ptr) {
     auto& replicate_entry = **replicate_entry_ptr;
     stats_.ops_read++;
 
-    const ReplicateMsg& replicate = replicate_entry.replicate();
+    const auto& replicate = replicate_entry.replicate();
     VLOG_WITH_PREFIX(1) << "HandleReplicateMessage: " << entry_metadata.ToString()
-                        << ", op id: " << replicate.id()
-                        << ", committed op id: " << replicate.committed_op_id();
+                        << ", op id: " << OpId::FromPB(replicate.id())
+                        << ", committed op id: " << OpId::FromPB(replicate.committed_op_id());
     RETURN_NOT_OK(replay_state_->CheckSequentialReplicateId(replicate));
     SCHECK(replicate.has_hybrid_time(), Corruption, "A REPLICATE message must have a hybrid time");
     UpdateClock(replicate.hybrid_time());
@@ -800,7 +875,7 @@ class TabletBootstrap {
 
     // Append the replicate message to the log as is if we are not skipping wal rewrite. If we are
     // skipping, set consensus_state_only to true.
-    RETURN_NOT_OK(log_->Append(replicate_entry_ptr->get(), entry_metadata, skip_wal_rewrite_));
+    RETURN_NOT_OK(log_->Append(*replicate_entry_ptr, entry_metadata, skip_wal_rewrite_));
 
     auto iter = replay_state_->pending_replicates.lower_bound(op_id.index);
 
@@ -811,9 +886,9 @@ class TabletBootstrap {
       auto& last_entry = replay_state_->pending_replicates.rbegin()->second;
 
       LOG_WITH_PREFIX(INFO) << "Overwriting operations starting at: "
-                            << existing_entry.entry->replicate().id()
-                            << " up to: " << last_entry.entry->replicate().id()
-                            << " with operation: " << replicate.id();
+                            << OpId::FromPB(existing_entry.entry->replicate().id())
+                            << " up to: " << OpId::FromPB(last_entry.entry->replicate().id())
+                            << " with operation: " << OpId::FromPB(replicate.id());
       stats_.ops_overwritten += std::distance(iter, replay_state_->pending_replicates.end());
       if (test_hooks_) {
         // Tell the test framework about overwritten OpIds.
@@ -838,22 +913,29 @@ class TabletBootstrap {
     CHECK(replicate.has_committed_op_id())
         << "Replicate message has no committed_op_id for table type "
         << TableType_Name(tablet_->table_type()) << ". Replicate message:\n"
-        << replicate.DebugString();
+        << replicate.ShortDebugString();
 
     // We include the commit index as of the time a REPLICATE entry was added to the leader's log
     // into that entry. This allows us to decide when we can replay a REPLICATE entry during
     // bootstrap.
     replay_state_->UpdateCommittedOpId(OpId::FromPB(replicate.committed_op_id()));
 
+    // Test only flag to replay pending uncommitted entries.
+    if (FLAGS_TEST_play_pending_uncommitted_entries) {
+      LOG(INFO) << "Playing pending uncommitted entires for test only scenario";
+      replay_state_->UpdateCommittedOpId(op_id);
+    }
+
     return ApplyCommittedPendingReplicates();
   }
 
   // Replays the given committed operation.
-  CHECKED_STATUS PlayAnyRequest(
-      ReplicateMsg* replicate, AlreadyAppliedToRegularDB already_applied_to_regular_db) {
+  Status PlayAnyRequest(
+      consensus::LWReplicateMsg* replicate,
+      AlreadyAppliedToRegularDB already_applied_to_regular_db) {
     const auto op_type = replicate->op_type();
     if (test_hooks_) {
-      test_hooks_->Replayed(yb::OpId::FromPB(replicate->id()), already_applied_to_regular_db);
+      test_hooks_->Replayed(OpId::FromPB(replicate->id()), already_applied_to_regular_db);
     }
     switch (op_type) {
       case consensus::WRITE_OP:
@@ -883,6 +965,9 @@ class TabletBootstrap {
       case consensus::SPLIT_OP:
         return PlaySplitOpRequest(replicate);
 
+      case consensus::CHANGE_AUTO_FLAGS_CONFIG_OP:
+        return PlayChangeAutoFlagsConfigRequest(replicate);
+
       // Unexpected cases:
       case consensus::UNKNOWN_OP:
         return STATUS(IllegalState, Substitute("Unsupported operation type: $0", op_type));
@@ -893,39 +978,41 @@ class TabletBootstrap {
     return STATUS_FORMAT(Corruption, "Invalid operation type: $0", op_type);
   }
 
-  CHECKED_STATUS PlayTabletSnapshotRequest(ReplicateMsg* replicate_msg) {
-    TabletSnapshotOpRequestPB* const snapshot = replicate_msg->mutable_snapshot_request();
-
-    SnapshotOperation operation(tablet_.get(), snapshot);
+  Status PlayTabletSnapshotRequest(consensus::LWReplicateMsg* replicate_msg) {
+    SnapshotOperation operation(tablet_, replicate_msg->mutable_snapshot_request());
     operation.set_hybrid_time(HybridTime(replicate_msg->hybrid_time()));
+    operation.set_op_id(OpId::FromPB(replicate_msg->id()));
 
-    return operation.Replicated(/* leader_term= */ yb::OpId::kUnknownTerm);
+    return operation.Replicated(/* leader_term= */ OpId::kUnknownTerm,
+                                WasPending::kFalse);
   }
 
-  CHECKED_STATUS PlayHistoryCutoffRequest(ReplicateMsg* replicate_msg) {
-    HistoryCutoffOperation operation(
-        tablet_.get(), replicate_msg->mutable_history_cutoff());
+  Status PlayHistoryCutoffRequest(consensus::LWReplicateMsg* replicate_msg) {
+    HistoryCutoffOperation operation(tablet_, replicate_msg->mutable_history_cutoff());
 
     return operation.Apply(/* leader_term= */ yb::OpId::kUnknownTerm);
   }
 
-  CHECKED_STATUS PlaySplitOpRequest(ReplicateMsg* replicate_msg) {
-    tserver::SplitTabletRequestPB* const split_request = replicate_msg->mutable_split_request();
+  Status PlaySplitOpRequest(consensus::LWReplicateMsg* replicate_msg) {
+    auto& split_request = *replicate_msg->mutable_split_request();
     // We might be asked to replay SPLIT_OP even if it was applied and flushed when
     // FLAGS_force_recover_flushed_frontier is set.
-    if (split_request->tablet_id() != tablet_->tablet_id()) {
+    if (split_request.tablet_id() != tablet_->tablet_id()) {
       // Ignore SPLIT_OP designated for ancestor tablet(s).
       return Status::OK();
     }
 
     if (tablet_->metadata()->tablet_data_state() == TabletDataState::TABLET_DATA_SPLIT_COMPLETED) {
       // Ignore SPLIT_OP if tablet has been already split.
+      VLOG_WITH_PREFIX_AND_FUNC(1) << "Tablet has been already split.";
       return Status::OK();
     }
 
-    SplitOperation operation(tablet_.get(), data_.tablet_init_data.tablet_splitter, split_request);
+    SplitOperation operation(tablet_, data_.tablet_init_data.tablet_splitter, &split_request);
+    operation.set_op_id(OpId::FromPB(replicate_msg->id()));
     operation.set_hybrid_time(HybridTime(replicate_msg->hybrid_time()));
-    return data_.tablet_init_data.tablet_splitter->ApplyTabletSplit(&operation, log_.get());
+    return data_.tablet_init_data.tablet_splitter->ApplyTabletSplit(
+        &operation, log_.get(), cmeta_->committed_config());
 
     // TODO(tsplit): In scope of https://github.com/yugabyte/yugabyte-db/issues/1461 add integration
     // tests for:
@@ -936,12 +1023,27 @@ class TabletBootstrap {
     // - tablet bootstrap of new after-split tablet replaying split operation.
   }
 
+  Status PlayChangeAutoFlagsConfigRequest(consensus::LWReplicateMsg* replicate_msg) {
+    if (!tablet_->is_sys_catalog()) {
+      // This should never happen. We use WAL to propagate AutoFlags config only to other masters.
+      // For tablet servers we use heartbeats.
+      LOG_WITH_PREFIX_AND_FUNC(DFATAL)
+          << "AutoFlags config request ignored on non-sys_catalog tablet";
+      return Status::OK();
+    }
+
+    ChangeAutoFlagsConfigOperation operation(
+        tablet_, replicate_msg->mutable_auto_flags_config());
+
+    return operation.Apply();
+  }
+
   void HandleRetryableRequest(
-      const ReplicateMsg& replicate, RestartSafeCoarseTimePoint entry_time) {
-    if (!replicate.has_write_request())
+      const consensus::LWReplicateMsg& replicate, RestartSafeCoarseTimePoint entry_time) {
+    if (!replicate.has_write())
       return;
 
-    if (data_.retryable_requests) {
+    if (data_.bootstrap_retryable_requests && data_.retryable_requests) {
       data_.retryable_requests->Bootstrap(replicate, entry_time);
     }
 
@@ -954,32 +1056,32 @@ class TabletBootstrap {
 
   // Performs various checks based on the OpId, and decides whether to replay the given operation.
   // If so, calls PlayAnyRequest, or sometimes calls PlayUpdateTransactionRequest directly.
-  CHECKED_STATUS MaybeReplayCommittedEntry(
-      LogEntryPB* replicate_entry, RestartSafeCoarseTimePoint entry_time) {
-    ReplicateMsg* const replicate = replicate_entry->mutable_replicate();
-    const auto op_type = replicate->op_type();
+  Status MaybeReplayCommittedEntry(
+      const std::shared_ptr<log::LWLogEntryPB>& replicate_entry,
+      RestartSafeCoarseTimePoint entry_time) {
+    auto& replicate = *replicate_entry->mutable_replicate();
+    const auto op_type = replicate.op_type();
     const auto decision = ShouldReplayOperation(
         op_type,
-        replicate->id().index(),
+        replicate.id().index(),
         replay_state_->stored_op_ids.regular.index,
         replay_state_->stored_op_ids.intents.index,
         // txn_status
-        replicate->has_transaction_state()
-            ? replicate->transaction_state().status()
+        replicate.has_transaction_state()
+            ? replicate.transaction_state().status()
             : TransactionStatus::ABORTED,  // should not be used
         // write_op_has_transaction
-        WriteOpHasTransaction(*replicate));
+        WriteOpHasTransaction(replicate));
 
-    HandleRetryableRequest(*replicate, entry_time);
-
+    HandleRetryableRequest(replicate, entry_time);
+    VLOG_WITH_PREFIX_AND_FUNC(3) << "decision: " << AsString(decision);
     if (decision.should_replay) {
-      const auto status = PlayAnyRequest(replicate, decision.already_applied_to_regular_db);
-      if (!status.ok()) {
-        return status.CloneAndAppend(Format(
-            "Failed to play $0 request. ReplicateMsg: { $1 }",
-            OperationType_Name(op_type), *replicate));
-      }
-      replay_state_->max_committed_hybrid_time.MakeAtLeast(HybridTime(replicate->hybrid_time()));
+      RETURN_NOT_OK_PREPEND(
+          PlayAnyRequest(&replicate, decision.already_applied_to_regular_db),
+          Format(
+            "Failed to play $0 request, replicate: { $1 }",
+            OperationType_Name(op_type), replicate));
+      replay_state_->max_committed_hybrid_time.MakeAtLeast(HybridTime(replicate.hybrid_time()));
     }
 
     return Status::OK();
@@ -1054,7 +1156,7 @@ class TabletBootstrap {
   //
   // This functionality was originally introduced in
   // https://github.com/yugabyte/yugabyte-db/commit/41ef3f75e3c68686595c7613f53b649823b84fed
-  SegmentSequence::iterator SkipFlushedEntries(SegmentSequence* segments_ptr) {
+  SegmentSequence::const_iterator SkipFlushedEntries(SegmentSequence* segments_ptr) {
     static const char* kBootstrapOptimizerLogPrefix =
         "Bootstrap optimizer (skip_flushed_entries): ";
 
@@ -1070,8 +1172,9 @@ class TabletBootstrap {
     // Time point of the first entry of the last WAL segment, and how far back in time from it we
     // should retain other entries.
     boost::optional<RestartSafeCoarseTimePoint> replay_from_this_or_earlier_time;
-    const RestartSafeCoarseDuration min_seconds_to_retain_logs =
-        std::chrono::seconds(GetAtomicFlag(&FLAGS_retryable_request_timeout_secs));
+    const RestartSafeCoarseDuration min_seconds_to_retain_logs = data_.bootstrap_retryable_requests
+        ? std::chrono::seconds(GetAtomicFlag(&FLAGS_retryable_request_timeout_secs))
+        : 0s;
 
     auto iter = segments.end();
     while (iter != segments.begin()) {
@@ -1098,8 +1201,10 @@ class TabletBootstrap {
         test_hooks_->FirstOpIdOfSegment(segment_path, op_id);
       }
       const RestartSafeCoarseTimePoint first_op_time = first_op_metadata.entry_time;
+      const auto replay_from_this_or_earlier_time_was_initialized =
+          replay_from_this_or_earlier_time.is_initialized();
 
-      if (!replay_from_this_or_earlier_time.is_initialized()) {
+      if (!replay_from_this_or_earlier_time_was_initialized) {
         replay_from_this_or_earlier_time = first_op_time - min_seconds_to_retain_logs;
       }
 
@@ -1108,8 +1213,10 @@ class TabletBootstrap {
 
       const auto common_details_str = [&]() {
         std::ostringstream ss;
-        ss << EXPR_VALUE_FOR_LOG(first_op_time) << ", "
+        ss << EXPR_VALUE_FOR_LOG(op_id_replay_lowest) << ", "
+           << EXPR_VALUE_FOR_LOG(first_op_time) << ", "
            << EXPR_VALUE_FOR_LOG(min_seconds_to_retain_logs) << ", "
+           << EXPR_VALUE_FOR_LOG(replay_from_this_or_earlier_time_was_initialized) << ", "
            << EXPR_VALUE_FOR_LOG(*replay_from_this_or_earlier_time);
         return ss.str();
       };
@@ -1117,7 +1224,7 @@ class TabletBootstrap {
       if (is_first_op_id_low_enough && is_first_op_time_early_enough) {
         LOG_WITH_PREFIX(INFO)
             << kBootstrapOptimizerLogPrefix
-            << "found first mandatory segment op id: " << op_id
+            << "found first mandatory segment op id: " << op_id << ", "
             << common_details_str() << ", "
             << "number of segments to be skipped: " << (iter - segments.begin());
         return iter;
@@ -1155,7 +1262,7 @@ class TabletBootstrap {
   //
   // The resulting log can be continued later on when then tablet is rebuilt and starts accepting
   // writes from clients.
-  CHECKED_STATUS PlaySegments(ConsensusBootstrapInfo* consensus_info) {
+  Status PlaySegments(ConsensusBootstrapInfo* consensus_info) {
     const auto flushed_op_ids = VERIFY_RESULT(GetFlushedOpIds());
 
     if (tablet_->snapshot_coordinator()) {
@@ -1190,13 +1297,24 @@ class TabletBootstrap {
     // If skip_wal_rewrite is false, create a new segment and append each replayed entry to this
     // new log.
     RETURN_NOT_OK_PREPEND(
-        OpenNewLog(log::CreateNewSegment(!FLAGS_skip_wal_rewrite)), "Failed to open new log");
+        OpenLog(log::CreateNewSegment(!GetAtomicFlag(&FLAGS_skip_wal_rewrite))),
+          "Failed to open new log");
 
     log::SegmentSequence segments;
     RETURN_NOT_OK(log_->GetSegmentsSnapshot(&segments));
 
+    // If any cdc stream is active for this tablet, we do not want to skip flushed entries.
+    bool should_skip_flushed_entries = FLAGS_skip_flushed_entries;
+    if (should_skip_flushed_entries && tablet_->transaction_participant()) {
+      if (tablet_->transaction_participant()->GetRetainOpId() != OpId::Invalid()) {
+        should_skip_flushed_entries = false;
+        LOG_WITH_PREFIX(WARNING) << "Ignoring skip_flushed_entries even though it is set, because "
+                                 << "we need to scan all segments when any cdc stream is active "
+                                 << "for this tablet.";
+      }
+    }
     // Find the earliest log segment we need to read, so the rest can be ignored.
-    auto iter = FLAGS_skip_flushed_entries ? SkipFlushedEntries(&segments) : segments.begin();
+    auto iter = should_skip_flushed_entries ? SkipFlushedEntries(&segments) : segments.begin();
 
     yb::OpId last_committed_op_id;
     yb::OpId last_read_entry_op_id;
@@ -1216,9 +1334,9 @@ class TabletBootstrap {
           LOG_WITH_PREFIX(INFO) << "Dumping replay state to log: " << s;
           DumpReplayStateToLog();
           RETURN_NOT_OK_PREPEND(s, DebugInfo(tablet_->tablet_id(),
-                                            segment->header().sequence_number(),
-                                            entry_idx, segment->path(),
-                                            read_result.entries[entry_idx].get()));
+                                             segment->header().sequence_number(),
+                                             entry_idx, segment->path(),
+                                             read_result.entries[entry_idx].get()));
         }
       }
       if (!read_result.entry_metadata.empty()) {
@@ -1229,13 +1347,13 @@ class TabletBootstrap {
       // as possible, and then fail with Corruption.
       if (PREDICT_FALSE(!read_result.status.ok())) {
         return STATUS_FORMAT(Corruption,
-                            "Error reading Log Segment of tablet $0: $1 "
-                                "(Read up to entry $2 of segment $3, in path $4)",
-                            tablet_->tablet_id(),
-                            read_result.status,
-                            read_result.entries.size(),
-                            segment->header().sequence_number(),
-                            segment->path());
+                             "Error reading Log Segment of tablet $0: $1 "
+                                 "(Read up to entry $2 of segment $3, in path $4)",
+                             tablet_->tablet_id(),
+                             read_result.status,
+                             read_result.entries.size(),
+                             segment->header().sequence_number(),
+                             segment->path());
       }
 
       // TODO: could be more granular here and log during the segments as well, plus give info about
@@ -1270,7 +1388,7 @@ class TabletBootstrap {
           LOG_WITH_PREFIX(DFATAL)
               << "Invalid last committed op id: " << last_committed_op_id
               << ", record with this index has another term: "
-              << it->second.entry->replicate().id();
+              << OpId::FromPB(it->second.entry->replicate().id());
         }
       } else {
         DumpReplayStateToLog();
@@ -1284,12 +1402,13 @@ class TabletBootstrap {
     DumpReplayStateToLog();
 
     // Set up the ConsensusBootstrapInfo structure for the caller.
-    for (auto& e : replay_state_->pending_replicates) {
+    for (auto& [index, entry] : replay_state_->pending_replicates) {
       // We only allow log entries with an index later than the index of the last log entry already
       // applied to RocksDB to be passed to the tablet as "orphaned replicates". This will make sure
       // we don't try to write to RocksDB with non-monotonic sequence ids, but still create
       // ConsensusRound instances for writes that have not been persisted into RocksDB.
-      consensus_info->orphaned_replicates.emplace_back(e.second.entry->release_replicate());
+      consensus_info->orphaned_replicates.emplace_back(
+          entry.entry, entry.entry->mutable_replicate());
     }
     LOG_WITH_PREFIX(INFO)
         << "Number of orphaned replicates: " << consensus_info->orphaned_replicates.size()
@@ -1316,17 +1435,17 @@ class TabletBootstrap {
     return Status::OK();
   }
 
-  CHECKED_STATUS PlayWriteRequest(
-      ReplicateMsg* replicate_msg, AlreadyAppliedToRegularDB already_applied_to_regular_db) {
+  Status PlayWriteRequest(
+      consensus::LWReplicateMsg* replicate_msg,
+      AlreadyAppliedToRegularDB already_applied_to_regular_db) {
     SCHECK(replicate_msg->has_hybrid_time(), IllegalState,
            "A write operation with no hybrid time");
 
-    WriteRequestPB* write = replicate_msg->mutable_write_request();
+    auto* write = replicate_msg->mutable_write();
 
     SCHECK(write->has_write_batch(), Corruption, "A write request must have a write batch");
 
-    WriteOperation operation(OpId::kUnknownTerm, CoarseTimePoint::max(), /* context */ nullptr);
-    *operation.AllocateRequest() = *write;
+    WriteOperation operation(tablet_, write);
     operation.set_op_id(OpId::FromPB(replicate_msg->id()));
     HybridTime hybrid_time(replicate_msg->hybrid_time());
     operation.set_hybrid_time(hybrid_time);
@@ -1335,9 +1454,9 @@ class TabletBootstrap {
     tablet_->mvcc_manager()->AddFollowerPending(hybrid_time, op_id);
 
     if (test_hooks_ &&
-        replicate_msg->has_write_request() &&
-        replicate_msg->write_request().has_write_batch() &&
-        replicate_msg->write_request().write_batch().has_transaction() &&
+        replicate_msg->has_write() &&
+        replicate_msg->write().has_write_batch() &&
+        replicate_msg->write().write_batch().has_transaction() &&
         test_hooks_->ShouldSkipWritingIntents()) {
       // Used in unit tests to avoid instantiating the entire transactional subsystem.
       tablet_->mvcc_manager()->Replicated(hybrid_time, op_id);
@@ -1354,19 +1473,19 @@ class TabletBootstrap {
     return Status::OK();
   }
 
-  CHECKED_STATUS PlayChangeMetadataRequest(ReplicateMsg* replicate_msg) {
-    ChangeMetadataRequestPB* request = replicate_msg->mutable_change_metadata_request();
+  Status PlayChangeMetadataRequest(consensus::LWReplicateMsg* replicate_msg) {
+    auto* request = replicate_msg->mutable_change_metadata_request();
 
     // Decode schema
     Schema schema;
     if (request->has_schema()) {
-      RETURN_NOT_OK(SchemaFromPB(request->schema(), &schema));
+      RETURN_NOT_OK(SchemaFromPB(request->schema().ToGoogleProtobuf(), &schema));
     }
 
     ChangeMetadataOperation operation(request);
 
     // If table id isn't in metadata, ignore the replay as the table might've been dropped.
-    auto table_info = meta_->GetTableInfo(operation.table_id());
+    auto table_info = meta_->GetTableInfo(operation.table_id().ToBuffer());
     if (!table_info.ok()) {
       LOG_WITH_PREFIX(WARNING) << "Table ID " << operation.table_id()
           << " not found in metadata, skipping this ChangeMetadataRequest";
@@ -1394,9 +1513,9 @@ class TabletBootstrap {
     return Status::OK();
   }
 
-  CHECKED_STATUS PlayChangeConfigRequest(ReplicateMsg* replicate_msg) {
-    ChangeConfigRecordPB* change_config = replicate_msg->mutable_change_config_record();
-    RaftConfigPB config = change_config->new_config();
+  Status PlayChangeConfigRequest(consensus::LWReplicateMsg* replicate_msg) {
+    auto* change_config = replicate_msg->mutable_change_config_record();
+    RaftConfigPB config = change_config->new_config().ToGoogleProtobuf();
 
     int64_t cmeta_opid_index =  cmeta_->committed_config().opid_index();
     if (replicate_msg->id().index() > cmeta_opid_index) {
@@ -1422,10 +1541,10 @@ class TabletBootstrap {
     return Status::OK();
   }
 
-  CHECKED_STATUS PlayTruncateRequest(ReplicateMsg* replicate_msg) {
-    TruncateRequestPB* req = replicate_msg->mutable_truncate_request();
+  Status PlayTruncateRequest(consensus::LWReplicateMsg* replicate_msg) {
+    auto* req = replicate_msg->mutable_truncate();
 
-    TruncateOperation operation(tablet_.get(), req);
+    TruncateOperation operation(tablet_, req);
 
     Status s = tablet_->Truncate(&operation);
 
@@ -1434,8 +1553,9 @@ class TabletBootstrap {
     return Status::OK();
   }
 
-  CHECKED_STATUS PlayUpdateTransactionRequest(
-      ReplicateMsg* replicate_msg, AlreadyAppliedToRegularDB already_applied_to_regular_db) {
+  Status PlayUpdateTransactionRequest(
+      consensus::LWReplicateMsg* replicate_msg,
+      AlreadyAppliedToRegularDB already_applied_to_regular_db) {
     SCHECK(replicate_msg->has_hybrid_time(),
            Corruption, "A transaction update request must have a hybrid time");
 
@@ -1539,14 +1659,13 @@ class TabletBootstrap {
 
   // Goes through the contiguous prefix of pending_replicates and applies those that are committed
   // by calling MaybeReplayCommittedEntry.
-  CHECKED_STATUS ApplyCommittedPendingReplicates() {
+  Status ApplyCommittedPendingReplicates() {
     auto& pending_replicates = replay_state_->pending_replicates;
     auto iter = pending_replicates.begin();
-    while (iter != pending_replicates.end() && replay_state_->CanApply(iter->second.entry.get())) {
+    while (iter != pending_replicates.end() && replay_state_->CanApply(*iter->second.entry)) {
       VLOG_WITH_PREFIX(1) << "Applying committed pending replicate "
-                          << iter->second.entry->replicate().id();
-      auto op_id = iter->second.entry->replicate().id();
-      RETURN_NOT_OK(MaybeReplayCommittedEntry(iter->second.entry.get(), iter->second.entry_time));
+                          << OpId::FromPB(iter->second.entry->replicate().id());
+      RETURN_NOT_OK(MaybeReplayCommittedEntry(iter->second.entry, iter->second.entry_time));
       iter = pending_replicates.erase(iter);  // erase and advance the iterator (C++11)
       ++replay_state_->num_entries_applied_to_rocksdb;
     }
@@ -1573,6 +1692,9 @@ class TabletBootstrap {
 
   ThreadPool* allocation_pool_;
 
+  // Thread pool for executing log fsync tasks.
+  ThreadPool* log_sync_pool_;
+
   // Statistics on the replay of entries in the log.
   struct Stats {
     std::string ToString() const;
@@ -1586,7 +1708,7 @@ class TabletBootstrap {
 
   HybridTime rocksdb_last_entry_hybrid_time_ = HybridTime::kMin;
 
-  bool skip_wal_rewrite_;
+  log::SkipWalWrite skip_wal_rewrite_;
 
   // A way to inject flushed OpIds for regular and intents RocksDBs.
   boost::optional<DocDbOpIds> TEST_docdb_flushed_op_ids_;
@@ -1610,7 +1732,7 @@ string TabletBootstrap::Stats::ToString() const {
                 ops_read, ops_overwritten);
 }
 
-CHECKED_STATUS BootstrapTabletImpl(
+Status BootstrapTabletImpl(
     const BootstrapTabletData& data,
     TabletPtr* rebuilt_tablet,
     scoped_refptr<log::Log>* rebuilt_log,

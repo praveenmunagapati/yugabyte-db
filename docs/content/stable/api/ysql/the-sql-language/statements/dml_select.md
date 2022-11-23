@@ -7,8 +7,7 @@ menu:
   stable:
     identifier: dml_select
     parent: statements
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 ## Synopsis
@@ -22,13 +21,13 @@ The same syntax rules govern a subquery, wherever you might use one—like, for 
 <ul class="nav nav-tabs nav-tabs-yb">
   <li >
     <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
+      <i class="fa-solid fa-file-lines" aria-hidden="true"></i>
       Grammar
     </a>
   </li>
   <li>
     <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
+      <i class="fa-solid fa-diagram-project" aria-hidden="true"></i>
       Diagram
     </a>
   </li>
@@ -36,10 +35,10 @@ The same syntax rules govern a subquery, wherever you might use one—like, for 
 
 <div class="tab-content">
   <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/select,common_table_expression,fn_over_window,ordinary_aggregate_fn_invocation,within_group_aggregate_fn_invocation,grouping_element,order_expr.grammar.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/select,common_table_expression,fn_over_window,ordinary_aggregate_fn_invocation,within_group_aggregate_fn_invocation,grouping_element,order_expr.grammar.md" %}}
   </div>
   <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/select,common_table_expression,fn_over_window,ordinary_aggregate_fn_invocation,within_group_aggregate_fn_invocation,grouping_element,order_expr.diagram.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/select,common_table_expression,fn_over_window,ordinary_aggregate_fn_invocation,within_group_aggregate_fn_invocation,grouping_element,order_expr.diagram.md" %}}
   </div>
 </div>
 
@@ -92,7 +91,7 @@ When you understand the story of the invocation of these two kinds of functions 
 
   - _or_ as a so-called [within-group hypothetical-set aggregate function](../../../exprs/aggregate_functions/function-syntax-semantics/#within-group-hypothetical-set-aggregate-functions) using the `within_group_aggregate_fn_invocation` syntax—see this account of [`rank()`](../../../exprs/aggregate_functions/function-syntax-semantics/rank-dense-rank-percent-rank-cume-dist/#rank).
 
-- A function whose type is listed only as _"agg"_ can, in fact, be invoked _either_ as an aggregate function using the `ordinary_aggregate_fn_invocation` syntax _or_ as a window function using the `fn_over_window` syntax. The `avg()` function is described in the "Aggregate functions" major section section in the subsection [`avg()`, `count()`, `max()`, `min()`, `sum()`](../../../exprs/aggregate_functions/function-syntax-semantics/avg-count-max-min-sum/). See its subsections [`GROUP BY` syntax](../../../exprs/aggregate_functions/function-syntax-semantics/avg-count-max-min-sum/#group-by-syntax) and [`OVER` syntax](../../../exprs/aggregate_functions/function-syntax-semantics/avg-count-max-min-sum/#over-syntax) for, respectively, the `ordinary_aggregate_fn_invocation` and the `fn_over_window` invocation alternatives.
+- A function whose type is listed only as _"agg"_ can, in fact, be invoked _either_ as an aggregate function using the `ordinary_aggregate_fn_invocation` syntax _or_ as a window function using the `fn_over_window` syntax. The `avg()` function is described in the "Aggregate functions" major section in the subsection [`avg()`, `count()`, `max()`, `min()`, `sum()`](../../../exprs/aggregate_functions/function-syntax-semantics/avg-count-max-min-sum/). See its subsections [`GROUP BY` syntax](../../../exprs/aggregate_functions/function-syntax-semantics/avg-count-max-min-sum/#group-by-syntax) and [`OVER` syntax](../../../exprs/aggregate_functions/function-syntax-semantics/avg-count-max-min-sum/#over-syntax) for, respectively, the `ordinary_aggregate_fn_invocation` and the `fn_over_window` invocation alternatives.
 
 - Notice that the three functions [`mode()`](../../../exprs/aggregate_functions/function-syntax-semantics/mode-percentile-disc-percentile-cont/#mode), [`percentile_disc()`](../../../exprs/aggregate_functions/function-syntax-semantics/mode-percentile-disc-percentile-cont/#percentile-disc-percentile-cont), and [`percentile_cont()`](../../../exprs/aggregate_functions/function-syntax-semantics/mode-percentile-disc-percentile-cont/#percentile-disc-percentile-cont) are exceptions to this general rule (and they are the _only_ exceptions). These functions are referred to as [within-group ordered-set aggregate functions](../../../exprs/aggregate_functions/function-syntax-semantics/#within-group-ordered-set-aggregate-functions). `\df` lists the type of these functions only as _"agg"_. But these _cannot_ be invoked as window functions. The attempt causes this error:
 
@@ -100,7 +99,7 @@ When you understand the story of the invocation of these two kinds of functions 
   42809: WITHIN GROUP is required for ordered-set aggregate mode
   ```
 
-**Note:** The documentation in the [Aggregate functions](../../../exprs/aggregate_functions/) major section usually refers to the syntax that the `ordinary_aggregate_fn_invocation` rule and the `within_group_aggregate_fn_invocation` rule jointly govern as the [`GROUP BY` syntax](../../../exprs/aggregate_functions/function-syntax-semantics/avg-count-max-min-sum/#group-by-syntax) because it's these two syntax variants (and _only_ these two) can be used together with the `GROUP BY` clause (and therefore the `HAVING` clause). And it usually refers to the syntax that the `fn_over_window` rule governs as the [`OVER` syntax](../../../exprs/aggregate_functions/function-syntax-semantics/avg-count-max-min-sum/#over-syntax) because this syntax variant _requires_ the use of the `OVER` clause. Moreover, the use of the `GROUP BY` clause (and therefore the `HAVING` clause) is illegal with this syntax variant. 
+**Note:** The documentation in the [Aggregate functions](../../../exprs/aggregate_functions/) major section usually refers to the syntax that the `ordinary_aggregate_fn_invocation` rule and the `within_group_aggregate_fn_invocation` rule jointly govern as the [`GROUP BY` syntax](../../../exprs/aggregate_functions/function-syntax-semantics/avg-count-max-min-sum/#group-by-syntax) because it's these two syntax variants (and _only_ these two) can be used together with the `GROUP BY` clause (and therefore the `HAVING` clause). And it usually refers to the syntax that the `fn_over_window` rule governs as the [`OVER` syntax](../../../exprs/aggregate_functions/function-syntax-semantics/avg-count-max-min-sum/#over-syntax) because this syntax variant _requires_ the use of the `OVER` clause. Moreover, the use of the `GROUP BY` clause (and therefore the `HAVING` clause) is illegal with this syntax variant.
 
 ## Examples
 

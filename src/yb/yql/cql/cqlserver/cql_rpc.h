@@ -12,15 +12,26 @@
 // under the License.
 //
 //
-#ifndef YB_YQL_CQL_CQLSERVER_CQL_RPC_H
-#define YB_YQL_CQL_CQLSERVER_CQL_RPC_H
+#pragma once
+
+#include <stdint.h>
 
 #include <atomic>
+#include <mutex>
+#include <set>
+#include <type_traits>
+#include <utility>
+
+#include <boost/version.hpp>
+
+#include "yb/master/master_defaults.h"
 
 #include "yb/rpc/binary_call_parser.h"
 #include "yb/rpc/circular_read_buffer.h"
 #include "yb/rpc/rpc_with_call_id.h"
 #include "yb/rpc/server_event.h"
+
+#include "yb/util/net/net_fwd.h"
 
 #include "yb/yql/cql/ql/ql_session.h"
 #include "yb/yql/cql/ql/util/cql_message.h"
@@ -70,7 +81,7 @@ class CQLConnectionContext : public rpc::ConnectionContextWithCallId,
                                                const IoVecs& bytes_to_process,
                                                rpc::ReadBufferFull read_buffer_full) override;
   // Takes ownership of call_data content.
-  CHECKED_STATUS HandleCall(
+  Status HandleCall(
       const rpc::ConnectionPtr& connection, rpc::CallData* call_data) override;
 
   rpc::StreamReadBuffer& ReadBuffer() override {
@@ -96,15 +107,15 @@ class CQLConnectionContext : public rpc::ConnectionContextWithCallId,
 class CQLInboundCall : public rpc::InboundCall {
  public:
   explicit CQLInboundCall(rpc::ConnectionPtr conn,
-                          CallProcessedListener call_processed_listener,
+                          CallProcessedListener* call_processed_listener,
                           ql::QLSession::SharedPtr ql_session);
 
   // Takes ownership of call_data content.
-  CHECKED_STATUS ParseFrom(const MemTrackerPtr& call_tracker, rpc::CallData* call_data);
+  Status ParseFrom(const MemTrackerPtr& call_tracker, rpc::CallData* call_data);
 
   // Serialize the response packet for the finished call.
   // The resulting slices refer to memory in this object.
-  void DoSerialize(boost::container::small_vector_base<RefCntBuffer>* output) override;
+  void DoSerialize(rpc::ByteBlocks* output) override;
 
   void LogTrace() const override;
   std::string ToString() const override;
@@ -124,8 +135,11 @@ class CQLInboundCall : public rpc::InboundCall {
 
   uint16_t stream_id() const { return stream_id_; }
 
-  const std::string& service_name() const override;
-  const std::string& method_name() const override;
+  Slice serialized_remote_method() const override;
+  Slice method_name() const override;
+
+  static Slice static_serialized_remote_method();
+
   void RespondFailure(rpc::ErrorStatusPB::RpcErrorCodePB error_code, const Status& status) override;
   void RespondSuccess(const RefCntBuffer& buffer);
   void GetCallDetails(rpc::RpcCallInProgressPB *call_in_progress_pb) const;
@@ -145,6 +159,8 @@ class CQLInboundCall : public rpc::InboundCall {
     return DynamicMemoryUsageOf(response_msg_buf_);
   }
 
+  rpc::ThreadPoolTask* BindTask(rpc::InboundCallHandler* handler) override;
+
  private:
   RefCntBuffer response_msg_buf_;
   const ql::QLSession::SharedPtr ql_session_;
@@ -162,5 +178,3 @@ using CQLInboundCallPtr = std::shared_ptr<CQLInboundCall>;
 
 } // namespace cqlserver
 } // namespace yb
-
-#endif // YB_YQL_CQL_CQLSERVER_CQL_RPC_H

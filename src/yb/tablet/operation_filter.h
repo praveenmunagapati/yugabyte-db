@@ -11,12 +11,11 @@
 // under the License.
 //
 
-#ifndef YB_TABLET_OPERATION_FILTER_H
-#define YB_TABLET_OPERATION_FILTER_H
+#pragma once
 
 #include <boost/intrusive/list.hpp>
 
-#include "yb/consensus/consensus.pb.h"
+#include "yb/consensus/consensus_types.pb.h"
 
 #include "yb/util/opid.h"
 #include "yb/util/status.h"
@@ -30,7 +29,7 @@ namespace tablet {
 // doesn't care about scenarios that use this class.
 class OperationFilter : public boost::intrusive::list_base_hook<> {
  public:
-  virtual CHECKED_STATUS CheckOperationAllowed(
+  virtual Status CheckOperationAllowed(
       const OpId& id, consensus::OperationType op_type) const = 0;
 
   virtual ~OperationFilter() = default;
@@ -41,7 +40,7 @@ class FunctorOperationFilter : public OperationFilter {
  public:
   explicit FunctorOperationFilter(const F& f) : f_(f) {}
 
-  CHECKED_STATUS CheckOperationAllowed(
+  Status CheckOperationAllowed(
       const OpId& id, consensus::OperationType op_type) const override {
     return f_(id, op_type);
   }
@@ -57,5 +56,3 @@ std::unique_ptr<OperationFilter> MakeFunctorOperationFilter(const F& f) {
 
 }  // namespace tablet
 }  // namespace yb
-
-#endif  // YB_TABLET_OPERATION_FILTER_H

@@ -2,20 +2,18 @@
 title: Data Types
 linkTitle: Data Types
 description: Data Types in YSQL
-headcontent: Data Types
 image: /images/section_icons/secure/create-roles.png
 menu:
   stable:
     identifier: explore-ysql-language-features-data-types
     parent: explore-ysql-language-features
     weight: 150
-isTocNested: false
-showAsideToc: true
+type: docs
 ---
 
-This document describes the data types supported in YSQL, from the basic data types to the `SERIAL` pseudo-type (for implementing an auto-incrementing primary key column in a table), arrays, composite types, and range types. 
+This document describes the data types supported in YSQL, from the basic data types to the `SERIAL` pseudo-type (for implementing an auto-incrementing primary key column in a table), arrays, composite types, and range types.
 
-The [JSONB document data type](../../json-support/jsonb-ysql) is described in a separate section.
+The [JSONB document data type](../../json-support/jsonb-ysql/) is described in a separate section.
 
 ## Strings
 
@@ -36,7 +34,7 @@ CREATE TABLE char_types (
 );
 ```
 
-Insert the followingn rows into the table:
+Insert the following rows into the table:
 
 ```sql
 INSERT INTO char_types (a, b, c) VALUES (
@@ -80,7 +78,7 @@ CREATE TABLE floating_point_test (
 
 INSERT INTO floating_point_test (floatn_test, real_test, numeric_test)
 VALUES
-  (9223372036854775807, 2147483647, 5.36), 
+  (9223372036854775807, 2147483647, 5.36),
   (9223372036854775800, 2147483640, 9.99);
 ```
 
@@ -99,7 +97,6 @@ YSQL supports the following pseudotypes:
 * `SMALLSERIAL`: 2 bytes (1 to 32,767)
 * `SERIAL`:  4 bytes (1 to 2,147,483,647)
 * `BIGSERIAL`: 8 bytes (1 to 9,223,372,036,854,775,807)
-
 
 ## Date and Time
 
@@ -124,20 +121,24 @@ CREATE TABLE temporal_types (
 ```
 
 The following example inserts a row into the table:
+
 ```sql
 INSERT INTO temporal_types (
   date_type, time_type, timestamp_type, timestampz_type, interval_type)
 VALUES
-  ('2000-06-28', '06:23:00', '2016-06-22 19:10:25-07', 
+  ('2000-06-28', '06:23:00', '2016-06-22 19:10:25-07',
    '2016-06-22 19:10:25-07', '1 year'),
-  ('2010-06-28', '12:32:12','2016-06-22 19:10:25-07', 
+  ('2010-06-28', '12:32:12','2016-06-22 19:10:25-07',
    '2016-06-22 19:10:25-07', '10 years 3 months 5 days');
 ```
 
 The following shows the inserted data:
 
-```
+```sql
 yugabyte=# select * from temporal_types;
+```
+
+```output
  date_type  | time_type |   timestamp_type    |    timestampz_type     |     interval_type
 ------------+-----------+---------------------+------------------------+------------------------
  2010-06-28 | 12:32:12  | 2016-06-22 19:10:25 | 2016-06-22 19:10:25-07 | 10 years 3 mons 5 days
@@ -181,8 +182,10 @@ INSERT INTO rock_band VALUES (
 ```sql
 SELECT * FROM rock_band;
 ```
+
 Expect the following output:
-```
+
+```output
      name     |          members
 --------------+---------------------------
  Pink Floyd   | {Barrett,Gilmour}
@@ -195,8 +198,10 @@ You can access array values using subscripts, as follows:
 ```sql
 SELECT name FROM rock_band WHERE members[2] = 'Plant';
 ```
+
 Expect the following output:
-```
+
+```output
      name
 --------------
  Led Zeppelin
@@ -208,8 +213,10 @@ You can also access array values using slices, as follows:
 ```sql
 SELECT members[1:2] FROM rock_band;
 ```
+
 Expect the following output:
-```
+
+```output
       members
 -------------------
  {Barrett,Gilmour}
@@ -221,10 +228,12 @@ Expect the following output:
 
 ```sql
 UPDATE rock_band SET members[2] = 'Waters' WHERE name = 'Pink Floyd';
+select * from rock_band where name = 'Pink Floyd';
 ```
+
 Expect the following output:
-```
-yugabyte=# select * from rock_band where name = 'Pink Floyd';
+
+```output
     name    |     members
 ------------+------------------
  Pink Floyd | {Barrett,Waters}
@@ -234,12 +243,14 @@ yugabyte=# select * from rock_band where name = 'Pink Floyd';
 ### 5. Update the entire array
 
 ```sql
-UPDATE rock_band SET members = '{"Mason", "Wright", "Gilmour"}' 
-WHERE name = 'Pink Floyd';
+UPDATE rock_band SET members = '{"Mason", "Wright", "Gilmour"}'
+       WHERE name = 'Pink Floyd';
+select * from rock_band where name = 'Pink Floyd';
 ```
+
 Expect the following output:
-```
-yugabyte=# select * from rock_band where name = 'Pink Floyd';
+
+```output
     name    |        members
 ------------+------------------------
  Pink Floyd | {Mason,Wright,Gilmour}
@@ -249,40 +260,46 @@ yugabyte=# select * from rock_band where name = 'Pink Floyd';
 ### 6. Search in arrays
 
 Use the `ANY` keyword to search for a particular value in an array, as follows:
+
 ```sql
 SELECT name FROM rock_band WHERE 'Mason' = ANY(members);
 ```
+
 Expect the following output:
-```
+
+```output
     name
 ------------
  Pink Floyd
 (1 row)
 ```
 
-
 ## Enumerations - `ENUM` Type
 
-YugabyteDB supports the `ENUM` type in PostgreSQL. The following examples are adapted from [Enums](http://postgresguide.com/sexy/enums.html):
+YugabyteDB supports the `ENUM` type in PostgreSQL. The following examples are adapted from [Enums](http://postgresguide.com/cool/enums.html):
 
 ### 1. Create `ENUM`
+
 ```sql
 CREATE TYPE e_contact_method AS ENUM (
-  'Email', 
-  'Sms', 
+  'Email',
+  'Sms',
   'Phone');
 ```
 
 ### 2. View the `ENUM`
 
 To view the list of values across all `ENUM` types, execute the following:
+
 ```sql
-SELECT t.typname, e.enumlabel 
-  FROM pg_type t, pg_enum e 
+SELECT t.typname, e.enumlabel
+  FROM pg_type t, pg_enum e
   WHERE t.oid = e.enumtypid;
 ```
+
 The output should be as follows:
-```
+
+```output
      typname      | enumlabel
 ------------------+-----------
  e_contact_method | Email
@@ -290,7 +307,7 @@ The output should be as follows:
  e_contact_method | Phone
 ```
 
-### 2. Create a table with an `ENUM` column
+### 3. Create a table with an `ENUM` column
 
 ```sql
 CREATE TABLE contact_method_info (
@@ -300,17 +317,21 @@ CREATE TABLE contact_method_info (
 );
 ```
 
-### 3. Insert a row with `ENUM`
+### 4. Insert a row with `ENUM`
 
-The `ENUM` should should have a valid value, as follows:
+The `ENUM` should have a valid value, as follows:
 
 ```sql
-INSERT INTO contact_method_info VALUES ('Jeff', 'Email', 'jeff@mail.com')
+INSERT INTO contact_method_info VALUES ('Jeff', 'Email', 'jeff@mail.com');
 ```
 
 Execute the following to verify:
+
+```sql
+select * from contact_method_info;
 ```
-yugabyte=# select * from contact_method_info;
+
+```output
  contact_name | contact_method |     value
 --------------+----------------+---------------
  Jeff         | Email          | jeff@mail.com
@@ -320,10 +341,12 @@ yugabyte=# select * from contact_method_info;
 Inserting an invalid `ENUM` value would fail, as shown in the following example:
 
 ```sql
-yugabyte=# INSERT INTO contact_method_info VALUES ('Jeff', 'Fax', '4563456');
+INSERT INTO contact_method_info VALUES ('Jeff', 'Fax', '4563456');
 ```
+
 You should see the following error (which is compatible with that of PostgreSQL):
-```
+
+```output
 ERROR:  22P02: invalid input value for enum e_contact_method: "Fax"
 LINE 1: INSERT INTO contact_method_info VALUES ('Jeff', 'Fax', '4563...
 ```
@@ -353,7 +376,8 @@ CREATE TABLE on_hand (
 
 ### 3. Insert a row
 
-To insert a row, use the `RUN` keyword, as follows:
+To insert a row, use the `ROW` keyword, as follows:
+
 ```sql
 INSERT INTO on_hand VALUES (ROW('fuzzy dice', 42, 1.99), 1000);
 ```
@@ -361,16 +385,20 @@ INSERT INTO on_hand VALUES (ROW('fuzzy dice', 42, 1.99), 1000);
 ### 4. Select data
 
 To select some subfields from the `on_hand` example table, execute the following:
+
 ```sql
 SELECT (item).name FROM on_hand WHERE (item).price > 0.99;
 ```
+
 You can also use the table names, as follows:
+
 ```sql
 SELECT (on_hand.item).name FROM on_hand WHERE (on_hand.item).price > 0.99;
 ```
+
 Expect the following output:
-```
-yugabyte=# SELECT (item).name FROM on_hand WHERE (item).price > 0.99;
+
+```output
     name
 ------------
  fuzzy dice
@@ -383,13 +411,13 @@ Range data types represent a range of values of an element type. Range types are
 
 YSQL supports the following range types:
 
-- `tsrange`, which corresponds to a range of `timestamp without time zone`.
-- `tstzrange`, which corresponds to a range of `timestamp with time zone`.
-- `daterange`, which corresponds to a range of `date`.
-- `int4range`, which corresponds to a range of `integer`.
-- `int8range`, which corresponds to a range of `biginteger`.
-- `numrange`, which corresponds to a range of `numeric`.
-- User-defined types.
+* `tsrange`, which corresponds to a range of `timestamp without time zone`.
+* `tstzrange`, which corresponds to a range of `timestamp with time zone`.
+* `daterange`, which corresponds to a range of `date`.
+* `int4range`, which corresponds to a range of `integer`.
+* `int8range`, which corresponds to a range of `biginteger`.
+* `numrange`, which corresponds to a range of `numeric`.
+* User-defined types.
 
 The following example shows how to provide a range of time for an employee's vacation:
 
@@ -398,7 +426,7 @@ CREATE TABLE employees (employee_no int, vacation tsrange);
 ```
 
 ```sql
-INSERT INTO employees 
+INSERT INTO employees
   VALUES (1227, '[2020-01-01 8:30, 2020-02-02 5:30)');
 ```
 
@@ -406,7 +434,7 @@ A non-empty range has a lower bound and an upper bound, with everything between 
 
 The following is a syntax of an input for a range value, where *empty* is a representation of a range that does not contain anything:
 
-```sql
+```nocopy.sql
 (lowerbound, upperbound)
 
 (lowerbound, upperbound]
@@ -429,7 +457,7 @@ SELECT numrange(3.0, 10.0, '(]');
 In addition to using built-in range types, you can define your own custom ones. The following example shows how to define a range type of subtype `text` and use it in a `SELECT` statement:
 
 ```sql
-CREATE TYPE textrange 
+CREATE TYPE textrange
   AS RANGE (subtype = text);
 ```
 
@@ -437,5 +465,4 @@ CREATE TYPE textrange
 SELECT '( " a " " a ", " z " " z " )'::textrange;
 ```
 
-For more information on range types, see [Range Data Types](/latest/api/ysql/datatypes/type_range/). 
-
+For more information on range types, see [Range Data Types](/preview/api/ysql/datatypes/type_range/).

@@ -30,51 +30,64 @@
 // under the License.
 //
 
-#include <iostream>
+#include <map>
+#include <set>
 #include <vector>
 
-#include <gflags/gflags.h>
+#include <boost/preprocessor/cat.hpp>
+#include <boost/preprocessor/stringize.hpp>
 #include <glog/logging.h>
 
+#include "yb/common/schema.h"
 #include "yb/common/wire_protocol.h"
+
 #include "yb/consensus/consensus.pb.h"
 #include "yb/consensus/log.h"
+#include "yb/consensus/log.messages.h"
 #include "yb/consensus/log_index.h"
 #include "yb/consensus/log_reader.h"
+
 #include "yb/gutil/stl_util.h"
 #include "yb/gutil/strings/numbers.h"
+
+#include "yb/util/atomic.h"
 #include "yb/util/env.h"
 #include "yb/util/flags.h"
 #include "yb/util/logging.h"
-#include "yb/util/metrics.h"
-#include "yb/util/pb_util.h"
+#include "yb/util/memory/arena.h"
+#include "yb/util/metric_entity.h"
+#include "yb/util/monotime.h"
 #include "yb/util/opid.h"
+#include "yb/util/pb_util.h"
+#include "yb/util/result.h"
+#include "yb/util/size_literals.h"
+#include "yb/util/status_format.h"
 
-DEFINE_bool(print_headers, true, "print the log segment headers/footers");
-DEFINE_bool(filter_log_segment, false, "filter the input log segment");
-DEFINE_string(print_entries, "decoded",
+DEFINE_UNKNOWN_bool(print_headers, true, "print the log segment headers/footers");
+DEFINE_UNKNOWN_bool(filter_log_segment, false, "filter the input log segment");
+DEFINE_UNKNOWN_string(print_entries, "decoded",
               "How to print entries:\n"
               "  false|0|no = don't print\n"
               "  true|1|yes|decoded = print them decoded\n"
               "  pb = print the raw protobuf\n"
               "  id = print only their ids");
-DEFINE_int32(truncate_data, 100,
+DEFINE_UNKNOWN_int32(truncate_data, 100,
              "Truncate the data fields to the given number of bytes "
              "before printing. Set to 0 to disable");
 
-DEFINE_int64(min_op_term_to_omit, yb::OpId::Invalid().term,
+DEFINE_UNKNOWN_int64(min_op_term_to_omit, yb::OpId::Invalid().term,
              "Term of first record (inclusive) to omit from the result for --filter_log_segment");
 
-DEFINE_int64(min_op_index_to_omit, yb::OpId::Invalid().index,
+DEFINE_UNKNOWN_int64(min_op_index_to_omit, yb::OpId::Invalid().index,
              "Index of first record (inclusive) to omit from the result for --filter_log_segment");
 
-DEFINE_int64(max_op_term_to_omit, yb::OpId::Invalid().term,
+DEFINE_UNKNOWN_int64(max_op_term_to_omit, yb::OpId::Invalid().term,
              "Term of last record (inclusive) to omit from the result for --filter_log_segment");
 
-DEFINE_int64(max_op_index_to_omit, yb::OpId::Invalid().index,
+DEFINE_UNKNOWN_int64(max_op_index_to_omit, yb::OpId::Invalid().index,
              "Index of last record (inclusive) to omit from the result for --filter_log_segment");
 
-DEFINE_string(output_wal_dir, "", "WAL directory for the output of --filter_log_segment");
+DEFINE_UNKNOWN_string(output_wal_dir, "", "WAL directory for the output of --filter_log_segment");
 
 namespace yb {
 namespace log {
@@ -85,7 +98,6 @@ using std::string;
 using std::vector;
 using std::cout;
 using std::endl;
-using tserver::WriteRequestPB;
 
 enum PrintEntryType {
   DONT_PRINT,
@@ -123,6 +135,8 @@ void PrintIdOnly(const LogEntryPB& entry) {
            << "@" << entry.replicate().hybrid_time() << "\t";
       cout << "REPLICATE "
            << OperationType_Name(entry.replicate().op_type());
+      cout << ", SIZE: "
+           << entry.replicate().ByteSizeLong();
       break;
     }
     default:
@@ -134,14 +148,7 @@ void PrintIdOnly(const LogEntryPB& entry) {
 
 Status PrintDecodedWriteRequestPB(const string& indent,
                                   const Schema& tablet_schema,
-                                  const WriteRequestPB& write) {
-  Arena arena(32 * 1024, 1024 * 1024);
-
-  cout << indent << "Tablet: " << write.tablet_id() << endl;
-  if (write.has_propagated_hybrid_time()) {
-    cout << indent << "Propagated TS: " << write.propagated_hybrid_time() << endl;
-  }
-
+                                  const tablet::WritePB& write) {
   return Status::OK();
 }
 
@@ -154,7 +161,7 @@ Status PrintDecoded(const LogEntryPB& entry, const Schema& tablet_schema) {
 
     const ReplicateMsg& replicate = entry.replicate();
     if (replicate.op_type() == consensus::WRITE_OP) {
-      RETURN_NOT_OK(PrintDecodedWriteRequestPB(indent, tablet_schema, replicate.write_request()));
+      RETURN_NOT_OK(PrintDecodedWriteRequestPB(indent, tablet_schema, replicate.write()));
     } else {
       cout << indent << replicate.ShortDebugString() << endl;
     }
@@ -176,18 +183,18 @@ Status PrintSegment(const scoped_refptr<ReadableLogSegment>& segment) {
   Schema tablet_schema;
   RETURN_NOT_OK(SchemaFromPB(segment->header().schema(), &tablet_schema));
 
-  for (const auto& entry : read_entries.entries) {
-
+  for (const auto& lw_entry : read_entries.entries) {
+    auto entry = lw_entry->ToGoogleProtobuf();
     if (print_type == PRINT_PB) {
       if (FLAGS_truncate_data > 0) {
-        pb_util::TruncateFields(entry.get(), FLAGS_truncate_data);
+        pb_util::TruncateFields(&entry, FLAGS_truncate_data);
       }
 
-      cout << "Entry:\n" << entry->DebugString();
+      cout << "Entry:\n" << entry.DebugString();
     } else if (print_type == PRINT_DECODED) {
-      RETURN_NOT_OK(PrintDecoded(*entry, tablet_schema));
+      RETURN_NOT_OK(PrintDecoded(entry, tablet_schema));
     } else if (print_type == PRINT_ID) {
-      PrintIdOnly(*entry);
+      PrintIdOnly(entry);
     }
   }
   if (FLAGS_print_headers && segment->HasFooter()) {
@@ -203,13 +210,12 @@ Status DumpLog(const string& tablet_id, const string& tablet_wal_path) {
   fs_opts.read_only = true;
   FsManager fs_manager(env, fs_opts);
 
-  RETURN_NOT_OK(fs_manager.Open());
+  RETURN_NOT_OK(fs_manager.CheckAndOpenFileSystemRoots());
   std::unique_ptr<LogReader> reader;
   RETURN_NOT_OK(LogReader::Open(env,
                                 scoped_refptr<LogIndex>(),
-                                tablet_id,
+                                "Log reader: ",
                                 tablet_wal_path,
-                                fs_manager.uuid(),
                                 scoped_refptr<MetricEntity>(),
                                 scoped_refptr<MetricEntity>(),
                                 &reader));
@@ -310,13 +316,14 @@ Status FilterLogSegment(const string& segment_path) {
   scoped_refptr<Log> log;
   RETURN_NOT_OK(Log::Open(
       log_options,
-      segment_header.tablet_id(),
+      segment_header.unused_tablet_id(),
       output_wal_dir,
       "log-dump-tool",
       tablet_schema,
       segment_header.schema_version(),
       /* table_metric_entity */ nullptr,
       /* tablet_metric_entity */ nullptr,
+      log_thread_pool.get(),
       log_thread_pool.get(),
       log_thread_pool.get(),
       /* cdc_min_replicated_index */ 0,
@@ -338,9 +345,7 @@ Status FilterLogSegment(const string& segment_path) {
       num_omitted++;
       continue;
     }
-    RETURN_NOT_OK(log->Append(
-        entry_ptr.release(), read_entries.entry_metadata[i],
-        /* skip_wal_rewrite */ false));
+    RETURN_NOT_OK(log->Append(entry_ptr, read_entries.entry_metadata[i], SkipWalWrite::kFalse));
     num_included++;
   }
   LOG(INFO) << "Included " << num_included << " entries, omitted " << num_omitted << " entries";

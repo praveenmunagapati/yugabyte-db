@@ -190,7 +190,7 @@ public class MiniYBCluster implements AutoCloseable {
 
   public void startSyncClient(boolean waitForMasterLeader) throws Exception {
     syncClient = new YBClient.YBClientBuilder(getMasterAddresses())
-        .defaultAdminOperationTimeoutMs(clusterParameters.defaultTimeoutMs)
+        .defaultAdminOperationTimeoutMs(clusterParameters.defaultAdminOperationTimeoutMs)
         .defaultOperationTimeoutMs(clusterParameters.defaultTimeoutMs)
         .sslCertFile(certFile)
         .sslClientCertFiles(clientCertFile, clientKeyFile)
@@ -198,7 +198,7 @@ public class MiniYBCluster implements AutoCloseable {
         .build();
 
     if (waitForMasterLeader) {
-      syncClient.waitForMasterLeader(clusterParameters.defaultTimeoutMs);
+      syncClient.waitForMasterLeader(clusterParameters.defaultAdminOperationTimeoutMs);
     }
   }
 
@@ -251,11 +251,6 @@ public class MiniYBCluster implements AutoCloseable {
 
     commonFlags.add("--yb_num_shards_per_tserver=" + clusterParameters.numShardsPerTServer);
     commonFlags.add("--ysql_num_shards_per_tserver=" + clusterParameters.numShardsPerTServer);
-
-    if (clusterParameters.replicationFactor > 0) {
-      commonFlags.add("--replication_factor=" + clusterParameters.replicationFactor);
-    }
-
     commonFlags.add("--enable_ysql=" + clusterParameters.startYsqlProxy);
 
     return commonFlags;
@@ -288,10 +283,10 @@ public class MiniYBCluster implements AutoCloseable {
    * @return the string representation of a random localhost IP.
    */
   private String getRandomBindAddressOnLinux() throws IllegalArgumentException {
-    assert(TestUtils.IS_LINUX);
+    assert(SystemUtil.IS_LINUX);
     // On Linux we can use 127.x.y.z, so let's just pick a random address.
     final StringBuilder randomLoopbackIp = new StringBuilder("127");
-    final Random rng = RandomNumberUtil.getRandomGenerator();
+    final Random rng = RandomUtil.getRandomGenerator();
     for (int i = 0; i < 3; ++i) {
       // Do not use 0 or 255 for IP components.
       randomLoopbackIp.append("." + (1 + rng.nextInt(254)));
@@ -318,7 +313,7 @@ public class MiniYBCluster implements AutoCloseable {
   }
 
   private String getDaemonBindAddress(MiniYBDaemonType daemonType) throws IOException {
-    if (TestUtils.IS_LINUX && !clusterParameters.useIpWithCertificate) {
+    if (SystemUtil.IS_LINUX && !clusterParameters.useIpWithCertificate) {
       return pickFreeRandomBindIpOnLinux(daemonType);
     }
 
@@ -361,7 +356,7 @@ public class MiniYBCluster implements AutoCloseable {
     // range of x.
     final int nextToLastByteMax = clusterParameters.useIpWithCertificate ? 0 : 3;
 
-    if (TestUtils.IS_LINUX) {
+    if (SystemUtil.IS_LINUX) {
       // We only use even last bytes of the loopback IP in case we are testing TLS encryption.
       final int lastIpByteStep = clusterParameters.useIpWithCertificate ? 2 : 1;
       for (int nextToLastByte = nextToLastByteMin;
@@ -397,7 +392,7 @@ public class MiniYBCluster implements AutoCloseable {
       }
     }
 
-    Collections.shuffle(bindIps, RandomNumberUtil.getRandomGenerator());
+    Collections.shuffle(bindIps, RandomUtil.getRandomGenerator());
 
     for (int i = bindIps.size() - 1; i >= 0; --i) {
       String bindAddress = bindIps.get(i);
@@ -460,21 +455,31 @@ public class MiniYBCluster implements AutoCloseable {
     startTabletServers(numTservers, commonTserverFlags, perTserverFlags, tserverEnvVars);
   }
 
-  private void applyYsqlSnapshot(YsqlSnapshotVersion ver, Map<String, String> masterFlags) {
+  private String getYsqlSnapshotFilePath(YsqlSnapshotVersion ver) {
+    String filenamePrefix = "initial_sys_catalog_snapshot_";
+    String filename;
     switch (ver) {
       case EARLIEST:
-        String filename = "initial_sys_catalog_snapshot_2.0.9.0";
-        File file = new File(YSQL_SNAPSHOTS_DIR, filename);
-        Preconditions.checkState(file.exists(),
-            "Snapshot %s is not found in %s, should've been downloaded by the build script!",
-            filename, YSQL_SNAPSHOTS_DIR);
-        masterFlags.put("initial_sys_catalog_snapshot_path", file.getAbsolutePath());
+        filename = filenamePrefix + "2.0.9.0";
         break;
       case LATEST:
-        // NOOP, use default path
-        break;
+        throw new IllegalArgumentException("LATEST snapshot does not need a custom path");
       default:
-        Preconditions.checkArgument(false, "Unknown snapshot version: %s", ver);
+        throw new IllegalArgumentException("Unknown snapshot version: " + ver);
+    }
+    filename = filename + "_" + (BuildTypeUtil.isRelease() ? "release" : "debug");
+    File file = new File(YSQL_SNAPSHOTS_DIR, filename);
+    Preconditions.checkState(file.exists(),
+        "Snapshot %s is not found in %s, should've been downloaded by the build script!",
+        filename, YSQL_SNAPSHOTS_DIR);
+    return file.getAbsolutePath();
+  }
+
+  private void applyYsqlSnapshot(YsqlSnapshotVersion ver, Map<String, String> masterFlags) {
+    // No need to set the flag for LATEST snapshot.
+    if (ver != YsqlSnapshotVersion.LATEST) {
+      String snapshotPath = getYsqlSnapshotFilePath(ver);
+      masterFlags.put("initial_sys_catalog_snapshot_path", snapshotPath);
     }
   }
 
@@ -580,7 +585,8 @@ public class MiniYBCluster implements AutoCloseable {
         "--pgsql_proxy_webserver_port=" + pgsqlWebPort,
         "--yb_client_admin_operation_timeout_sec=" + YB_CLIENT_ADMIN_OPERATION_TIMEOUT_SEC,
         "--callhome_enabled=false",
-        "--TEST_process_info_dir=" + getProcessInfoDir());
+        "--TEST_process_info_dir=" + getProcessInfoDir(),
+        "--never_fsync=true");
     addFlagsFromEnv(tsCmdLine, "YB_EXTRA_TSERVER_FLAGS");
 
     if (clusterParameters.startYsqlProxy) {
@@ -631,17 +637,24 @@ public class MiniYBCluster implements AutoCloseable {
       "--rpc_slow_query_threshold_ms=" + RPC_SLOW_QUERY_THRESHOLD,
       "--webserver_port=" + masterWebPort,
       "--callhome_enabled=false",
-      "--TEST_process_info_dir=" + getProcessInfoDir());
+      "--TEST_process_info_dir=" + getProcessInfoDir(),
+      "--never_fsync=true");
     if (clusterParameters.tserverHeartbeatTimeoutMsOpt.isPresent()) {
       masterCmdLine.add(
           "--tserver_unresponsive_timeout_ms=" +
           clusterParameters.tserverHeartbeatTimeoutMsOpt.get());
     }
+
     if (clusterParameters.yqlSystemPartitionsVtableRefreshSecsOpt.isPresent()) {
       masterCmdLine.add(
           "--partitions_vtable_cache_refresh_secs=" +
           clusterParameters.yqlSystemPartitionsVtableRefreshSecsOpt.get());
     }
+
+    if (clusterParameters.replicationFactor > 0) {
+      masterCmdLine.add("--replication_factor=" + clusterParameters.replicationFactor);
+    }
+
     addFlagsFromEnv(masterCmdLine, "YB_EXTRA_MASTER_FLAGS");
     return masterCmdLine;
   }
@@ -986,40 +999,76 @@ public class MiniYBCluster implements AutoCloseable {
   }
 
   /**
-   * Stops all the processes and deletes the folders used to store data and the flagfile.
+   * Stops all the processes and deletes the paths used to store data and the flagfile.
    */
   public void shutdown() throws Exception {
     LOG.info("Shutting down mini cluster");
+
+    // Before shutdownDaemons, collect postgres coreFileDirs if needed.
+    List<File> coreFileDirs;
+    if (CoreFileUtil.IS_MAC) {
+      // Use default dir specified in CoreFileUtil.processCoreFile.
+      coreFileDirs = Collections.<File>singletonList(null);
+    } else {
+      // Unlike master and tserver, postgres processes have working directory in their pg_data
+      // directory.  Simply check all tserver pg_data directories since we don't readily know which
+      // one this postgres process belonged to.
+      // TODO(#11753): handle tservers that were removed from the list using
+      //               killTabletServerOnHostPort
+      // TODO(#11754): don't assume core files are put in the current working directory of the
+      //               process
+      coreFileDirs = new ArrayList<>(tserverProcesses.size());
+      for (MiniYBDaemon tserverProcess : tserverProcesses.values()) {
+        coreFileDirs.add(Paths.get(tserverProcess.getDataDirPath()).resolve("pg_data").toFile());
+      }
+    }
+
     shutdownDaemons();
+
     String processInfoDir = getProcessInfoDir();
-    processCoreFiles(processInfoDir);
+    processCoreFiles(processInfoDir, coreFileDirs);
     pathsToDelete.add(processInfoDir);
-    for (String path : pathsToDelete) {
-      try {
-        File f = new File(path);
-        LOG.info("Deleting path: " + path);
-        if (f.isDirectory()) {
-          FileUtils.deleteDirectory(f);
-        } else {
-          f.delete();
+
+    if (ConfForTesting.keepData()) {
+      LOG.info("Skipping deletion of data paths");
+    } else {
+      for (String path : pathsToDelete) {
+        try {
+          File f = new File(path);
+          LOG.info("Deleting path: " + path);
+          if (f.isDirectory()) {
+            FileUtils.deleteDirectory(f);
+          } else {
+            f.delete();
+          }
+        } catch (Exception e) {
+          LOG.warn("Could not delete path {}", path, e);
         }
-      } catch (Exception e) {
-        LOG.warn("Could not delete path {}", path, e);
       }
     }
     LOG.info("Mini cluster shutdown finished");
   }
 
-  private void processCoreFiles(String folder) {
-    File[] files = (new File(folder)).listFiles();
+  /**
+   * Process core files for processes listed in processInfoDir.  For now, only postgres processes
+   * are listed.  More specifically, for now, only postgres backend processes are listed, not
+   * postmaster or background workers.  Those core files need to be inspected manually.
+   * TODO(#11755): inspect other postgres processes
+   * Hint: To manually inspect core files, make sure the core files aren't deleted.  By default,
+   *       data directories are deleted when the test is over.  If core files are dumped into the
+   *       pg_data directory, use YB_JAVATEST_KEEPDATA to keep the data directories.
+   */
+  private void processCoreFiles(String processInfoDir, List<File> coreFileDirs) {
+    File[] files = (new File(processInfoDir)).listFiles();
     for (File file : files == null ? new File[]{} : files) {
       String fileName = file.getAbsolutePath();
       try {
         String exeFile = new String(Files.readAllBytes(Paths.get(fileName)));
         int pid = Integer.parseInt(file.getName());
-        CoreFileUtil.processCoreFile(
-            pid, exeFile, exeFile, null /* coreFileDir */,
-            CoreFileUtil.CoreFileMatchMode.EXACT_PID);
+        for (File coreFileDir : coreFileDirs) {
+          CoreFileUtil.processCoreFile(
+              pid, exeFile, exeFile, coreFileDir, CoreFileUtil.CoreFileMatchMode.EXACT_PID);
+        }
       } catch (Exception e) {
         LOG.warn("Failed to analyze PID from '{}' file", fileName, e);
       }

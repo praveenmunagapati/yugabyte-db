@@ -2,22 +2,27 @@
 
 package com.yugabyte.yw.commissioner.tasks.upgrade;
 
+import com.google.common.collect.ImmutableMap;
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
-import com.yugabyte.yw.commissioner.SubTaskGroup;
+import com.yugabyte.yw.commissioner.TaskExecutor.SubTaskGroup;
 import com.yugabyte.yw.commissioner.UpgradeTaskBase;
 import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskGroupType;
 import com.yugabyte.yw.commissioner.tasks.subtasks.AnsibleConfigureServers;
 import com.yugabyte.yw.commissioner.tasks.subtasks.UniverseSetTlsParams;
-import com.yugabyte.yw.common.CertificateHelper;
+import com.yugabyte.yw.common.certmgmt.EncryptionInTransitUtil;
 import com.yugabyte.yw.forms.TlsToggleParams;
 import com.yugabyte.yw.forms.UpgradeTaskParams.UpgradeOption;
 import com.yugabyte.yw.forms.UpgradeTaskParams.UpgradeTaskSubType;
 import com.yugabyte.yw.forms.UpgradeTaskParams.UpgradeTaskType;
+import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.helpers.NodeDetails;
 import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import javax.inject.Inject;
 import org.apache.commons.lang3.tuple.Pair;
 
@@ -48,10 +53,12 @@ public class TlsToggle extends UpgradeTaskBase {
     runUpgrade(
         () -> {
           Pair<List<NodeDetails>, List<NodeDetails>> nodes = fetchNodes(taskParams().upgradeOption);
+          Set<NodeDetails> allNodes = toOrderedSet(nodes);
           // Verify the request params and fail if invalid
           verifyParams();
           // Copy any new certs to all nodes
-          createCopyCertTasks(nodes.getRight());
+          createCopyCertTasks(allNodes);
+          updateUniverseHttpsEnabledUI();
           // Round 1 gflags upgrade
           createRound1GFlagUpdateTasks(nodes);
           // Update TLS related params in universe details
@@ -64,11 +71,11 @@ public class TlsToggle extends UpgradeTaskBase {
   private void verifyParams() {
     taskParams().verifyParams(getUniverse());
 
-    if (CertificateHelper.isRootCARequired(taskParams()) && taskParams().rootCA == null) {
+    if (EncryptionInTransitUtil.isRootCARequired(taskParams()) && taskParams().rootCA == null) {
       throw new IllegalArgumentException("Root certificate is null");
     }
 
-    if (CertificateHelper.isClientRootCARequired(taskParams())
+    if (EncryptionInTransitUtil.isClientRootCARequired(taskParams())
         && taskParams().clientRootCA == null) {
       throw new IllegalArgumentException("Client root certificate is null");
     }
@@ -78,27 +85,31 @@ public class TlsToggle extends UpgradeTaskBase {
     if (getNodeToNodeChange() < 0) {
       // Setting allow_insecure to true can be done in non-restart way
       createNonRestartUpgradeTaskFlow(
-          (List<NodeDetails> nodeList, ServerType processType) -> {
-            createGFlagUpdateTasks(1, nodeList, processType);
+          (List<NodeDetails> nodeList, Set<ServerType> processTypes) -> {
+            createGFlagUpdateTasks(1, nodeList, getSingle(processTypes));
             Map<String, String> gflags = new HashMap<>();
             gflags.put("allow_insecure_connections", "true");
-            createSetFlagInMemoryTasks(nodeList, processType, true, gflags, false)
+            createSetFlagInMemoryTasks(nodeList, getSingle(processTypes), true, gflags, false)
                 .setSubTaskGroupType(getTaskSubGroupType());
           },
-          nodes);
+          nodes,
+          DEFAULT_CONTEXT,
+          false);
     } else {
       if (taskParams().upgradeOption == UpgradeOption.ROLLING_UPGRADE) {
         createRollingUpgradeTaskFlow(
-            (List<NodeDetails> nodeList, ServerType processType) ->
-                createGFlagUpdateTasks(1, nodeList, processType),
+            (nodeList, processTypes) ->
+                createGFlagUpdateTasks(1, nodeList, getSingle(processTypes)),
             nodes,
-            true);
+            RUN_BEFORE_STOPPING,
+            false);
       } else if (taskParams().upgradeOption == UpgradeOption.NON_ROLLING_UPGRADE) {
         createNonRollingUpgradeTaskFlow(
-            (List<NodeDetails> nodeList, ServerType processType) ->
-                createGFlagUpdateTasks(1, nodeList, processType),
+            (nodeList, processTypes) ->
+                createGFlagUpdateTasks(1, nodeList, getSingle(processTypes)),
             nodes,
-            true);
+            RUN_BEFORE_STOPPING,
+            false);
       }
     }
   }
@@ -108,28 +119,57 @@ public class TlsToggle extends UpgradeTaskBase {
     if (getNodeToNodeChange() > 0) {
       // Setting allow_insecure can be done in non-restart way
       createNonRestartUpgradeTaskFlow(
-          (List<NodeDetails> nodeList, ServerType processType) -> {
+          (List<NodeDetails> nodeList, Set<ServerType> processTypes) -> {
+            ServerType processType = getSingle(processTypes);
             createGFlagUpdateTasks(2, nodeList, processType);
             Map<String, String> gflags = new HashMap<>();
             gflags.put("allow_insecure_connections", String.valueOf(taskParams().allowInsecure));
             createSetFlagInMemoryTasks(nodeList, processType, true, gflags, false)
                 .setSubTaskGroupType(getTaskSubGroupType());
           },
-          nodes);
+          nodes,
+          DEFAULT_CONTEXT,
+          false);
     } else if (getNodeToNodeChange() < 0) {
       if (taskParams().upgradeOption == UpgradeOption.ROLLING_UPGRADE) {
         createRollingUpgradeTaskFlow(
-            (List<NodeDetails> nodeList, ServerType processType) ->
-                createGFlagUpdateTasks(2, nodeList, processType),
+            (nodeList, processTypes) ->
+                createGFlagUpdateTasks(2, nodeList, getSingle(processTypes)),
             nodes,
-            true);
+            RUN_BEFORE_STOPPING,
+            false);
       } else if (taskParams().upgradeOption == UpgradeOption.NON_ROLLING_UPGRADE) {
         createNonRollingUpgradeTaskFlow(
-            (List<NodeDetails> nodeList, ServerType processType) ->
-                createGFlagUpdateTasks(2, nodeList, processType),
+            (nodeList, processTypes) ->
+                createGFlagUpdateTasks(2, nodeList, getSingle(processTypes)),
             nodes,
-            true);
+            RUN_BEFORE_STOPPING,
+            false);
       }
+    }
+
+    if (taskParams().ybcInstalled) {
+      createServerControlTasks(nodes.getRight(), ServerType.CONTROLLER, "stop");
+      createYbcFlagsUpdateTasks(nodes.getRight());
+      createServerControlTasks(nodes.getRight(), ServerType.CONTROLLER, "start");
+      createWaitForYbcServerTask(new HashSet<NodeDetails>(nodes.getRight()));
+    }
+  }
+
+  protected void updateUniverseHttpsEnabledUI() {
+    int nodeToNodeChange = getNodeToNodeChange();
+
+    // HTTPS_ENABLED_UI will piggyback node-to-node encryption.
+    if (nodeToNodeChange != 0) {
+      String httpsEnabledUI =
+          (nodeToNodeChange > 0
+                  && Universe.shouldEnableHttpsUI(true, getUserIntent().ybSoftwareVersion))
+              ? "true"
+              : "false";
+      saveUniverseDetails(
+          u -> {
+            u.updateConfig(ImmutableMap.of(Universe.HTTPS_ENABLED_UI, httpsEnabledUI));
+          });
     }
   }
 
@@ -142,21 +182,30 @@ public class TlsToggle extends UpgradeTaskBase {
     String subGroupDescription =
         String.format(
             "AnsibleConfigureServers (%s) for: %s", getTaskSubGroupType(), taskParams().nodePrefix);
-    SubTaskGroup taskGroup = new SubTaskGroup(subGroupDescription, executor);
+    SubTaskGroup subTaskGroup = getTaskExecutor().createSubTaskGroup(subGroupDescription, executor);
     for (NodeDetails node : nodes) {
-      taskGroup.addTask(
-          getAnsibleConfigureServerTask(
+      subTaskGroup.addSubTask(
+          getAnsibleConfigureServerTaskForToggleTls(
               node,
               processType,
               round == 1
                   ? UpgradeTaskSubType.Round1GFlagsUpdate
                   : UpgradeTaskSubType.Round2GFlagsUpdate));
     }
-    taskGroup.setSubTaskGroupType(getTaskSubGroupType());
-    subTaskGroupQueue.add(taskGroup);
+    subTaskGroup.setSubTaskGroupType(getTaskSubGroupType());
+    getRunnableTask().addSubTaskGroup(subTaskGroup);
   }
 
-  private void createCopyCertTasks(List<NodeDetails> nodes) {
+  private void createYbcFlagsUpdateTasks(List<NodeDetails> nodes) {
+    SubTaskGroup subTaskGroup =
+        getTaskExecutor().createSubTaskGroup("AnsibleClusterServerCtl", executor);
+    for (NodeDetails node : nodes) {
+      subTaskGroup.addSubTask(getAnsibleConfigureServerTaskForYbcToggleTls(node));
+    }
+    getRunnableTask().addSubTaskGroup(subTaskGroup);
+  }
+
+  private void createCopyCertTasks(Collection<NodeDetails> nodes) {
     // Copy cert tasks are not needed if TLS is disabled
     if (!taskParams().enableNodeToNodeEncrypt && !taskParams().enableClientToNodeEncrypt) {
       return;
@@ -165,18 +214,19 @@ public class TlsToggle extends UpgradeTaskBase {
     String subGroupDescription =
         String.format(
             "AnsibleConfigureServers (%s) for: %s", getTaskSubGroupType(), taskParams().nodePrefix);
-    SubTaskGroup copyCertGroup = new SubTaskGroup(subGroupDescription, executor);
+    SubTaskGroup subTaskGroup = getTaskExecutor().createSubTaskGroup(subGroupDescription, executor);
     for (NodeDetails node : nodes) {
-      copyCertGroup.addTask(
-          getAnsibleConfigureServerTask(node, ServerType.TSERVER, UpgradeTaskSubType.CopyCerts));
+      subTaskGroup.addSubTask(
+          getAnsibleConfigureServerTaskForToggleTls(
+              node, ServerType.TSERVER, UpgradeTaskSubType.CopyCerts));
     }
-    copyCertGroup.setSubTaskGroupType(getTaskSubGroupType());
-    subTaskGroupQueue.add(copyCertGroup);
+    subTaskGroup.setSubTaskGroupType(getTaskSubGroupType());
+    getRunnableTask().addSubTaskGroup(subTaskGroup);
   }
 
   private void createUniverseSetTlsParamsTask() {
-    SubTaskGroup taskGroup = new SubTaskGroup("UniverseSetTlsParams", executor);
-
+    SubTaskGroup subTaskGroup =
+        getTaskExecutor().createSubTaskGroup("UniverseSetTlsParams", executor);
     UniverseSetTlsParams.Params params = new UniverseSetTlsParams.Params();
     params.universeUUID = taskParams().universeUUID;
     params.enableNodeToNodeEncrypt = taskParams().enableNodeToNodeEncrypt;
@@ -188,16 +238,36 @@ public class TlsToggle extends UpgradeTaskBase {
 
     UniverseSetTlsParams task = createTask(UniverseSetTlsParams.class);
     task.initialize(params);
-    taskGroup.addTask(task);
+    subTaskGroup.addSubTask(task);
 
-    taskGroup.setSubTaskGroupType(getTaskSubGroupType());
-    subTaskGroupQueue.add(taskGroup);
+    subTaskGroup.setSubTaskGroupType(getTaskSubGroupType());
+    getRunnableTask().addSubTaskGroup(subTaskGroup);
   }
 
-  private AnsibleConfigureServers getAnsibleConfigureServerTask(
+  private AnsibleConfigureServers getAnsibleConfigureServerTaskForToggleTls(
       NodeDetails node, ServerType processType, UpgradeTaskSubType taskSubType) {
     AnsibleConfigureServers.Params params =
         getAnsibleConfigureServerParams(node, processType, UpgradeTaskType.ToggleTls, taskSubType);
+    params.enableNodeToNodeEncrypt = taskParams().enableNodeToNodeEncrypt;
+    params.enableClientToNodeEncrypt = taskParams().enableClientToNodeEncrypt;
+    params.allowInsecure = taskParams().allowInsecure;
+    params.rootCA = taskParams().rootCA;
+    params.clientRootCA = taskParams().clientRootCA;
+    params.rootAndClientRootCASame = taskParams().rootAndClientRootCASame;
+    params.nodeToNodeChange = getNodeToNodeChange();
+    AnsibleConfigureServers task = createTask(AnsibleConfigureServers.class);
+    task.initialize(params);
+    task.setUserTaskUUID(userTaskUUID);
+    return task;
+  }
+
+  private AnsibleConfigureServers getAnsibleConfigureServerTaskForYbcToggleTls(NodeDetails node) {
+    AnsibleConfigureServers.Params params =
+        getAnsibleConfigureServerParams(
+            node,
+            ServerType.CONTROLLER,
+            UpgradeTaskType.ToggleTls,
+            UpgradeTaskSubType.YbcGflagsUpdate);
     params.enableNodeToNodeEncrypt = taskParams().enableNodeToNodeEncrypt;
     params.enableClientToNodeEncrypt = taskParams().enableClientToNodeEncrypt;
     params.allowInsecure = taskParams().allowInsecure;

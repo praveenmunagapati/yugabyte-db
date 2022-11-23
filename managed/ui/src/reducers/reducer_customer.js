@@ -26,6 +26,8 @@ import {
   ADD_TLS_CERT,
   ADD_TLS_CERT_RESPONSE,
   ADD_TLS_CERT_RESET,
+  UPDATE_CERT,
+  UPDATE_CERT_RESPONSE,
   FETCH_HOST_INFO,
   FETCH_HOST_INFO_SUCCESS,
   FETCH_HOST_INFO_FAILURE,
@@ -40,6 +42,13 @@ import {
   SET_INITIAL_VALUES,
   EDIT_CUSTOMER_CONFIG,
   EDIT_CUSTOMER_CONFIG_RESPONSE,
+  FETCH_RUNTIME_CONFIGS,
+  FETCH_RUNTIME_CONFIGS_RESPONSE,
+  SET_RUNTIME_CONFIG,
+  SET_RUNTIME_CONFIG_RESPONSE,
+  DELETE_RUNTIME_CONFIG,
+  DELETE_RUNTIME_CONFIG_RESPONSE,
+  RESET_RUNTIME_CONFIGS,
   FETCH_CUSTOMER_CONFIGS,
   FETCH_CUSTOMER_CONFIGS_RESPONSE,
   DELETE_CUSTOMER_CONFIG,
@@ -69,7 +78,8 @@ import {
   GET_CUSTOMER_USERS_SUCCESS,
   GET_CUSTOMER_USERS_FAILURE,
   CREATE_USER,
-  CREATE_USER_RESPONSE,
+  CREATE_USER_SUCCESS,
+  CREATE_USER_FAILURE,
   CREATE_ALERT_CHANNEL,
   CREATE_ALERT_CHANNEL_RESPONSE,
   GET_ALERT_CHANNELS,
@@ -85,7 +95,14 @@ import {
   UPDATE_ALERT_CONFIG,
   UPDATE_ALERT_CONFIG_RESPONSE,
   DELETE_ALERT_DESTINATION,
-  DELETE_ALERT_CONFIG
+  DELETE_ALERT_CONFIG,
+  LOGS_FETCHING,
+  FETCH_USER,
+  FETCH_USER_SUCCESS,
+  FETCH_USER_FAILURE,
+  UPDATE_USER_PROFILE,
+  UPDATE_USER_PROFILE_SUCCESS,
+  UPDATE_USER_PROFILE_FAILURE
 } from '../actions/customers';
 
 import { sortVersionStrings, isDefinedNotNull } from '../utils/ObjectUtils';
@@ -99,6 +116,7 @@ import {
 
 const INITIAL_STATE = {
   currentCustomer: getInitialState({}),
+  currentUser: getInitialState({}),
   authToken: getInitialState({}),
   apiToken: getInitialState(null),
   tasks: [],
@@ -114,6 +132,7 @@ const INITIAL_STATE = {
   alertDestinations: getInitialState([]),
   alertTemplates: getInitialState([]),
   alertConfigs: getInitialState([]),
+  customers: getInitialState([]),
   deleteDestination: getInitialState([]),
   deleteAlertConfig: getInitialState([]),
   hostInfo: null,
@@ -162,6 +181,13 @@ export default function (state = INITIAL_STATE, action) {
       return setLoadingState(state, 'authToken', {});
     case LOGIN_RESPONSE:
       return setPromiseResponse(state, 'authToken', action);
+
+    case FETCH_USER:
+      return setLoadingState(state, 'currentUser', {});
+    case FETCH_USER_SUCCESS:
+      return setPromiseResponse(state, 'currentUser', action.payload);
+    case FETCH_USER_FAILURE:
+      return setFailureState(state, 'currentUser', action.payload);
 
     case API_TOKEN_LOADING:
       return setLoadingState(state, 'apiToken', null);
@@ -215,6 +241,10 @@ export default function (state = INITIAL_STATE, action) {
       return setPromiseResponse(state, 'addCertificate', action);
     case ADD_TLS_CERT_RESET:
       return setLoadingState(state, 'addCertificate', getInitialState({}));
+    case UPDATE_CERT:
+      return setLoadingState(state, 'updateCert', {});
+    case UPDATE_CERT_RESPONSE:
+      return setLoadingState(state, 'updateCert', action);
     case FETCH_HOST_INFO:
       return { ...state, hostInfo: null };
     case FETCH_HOST_INFO_SUCCESS:
@@ -225,9 +255,29 @@ export default function (state = INITIAL_STATE, action) {
     case UPDATE_PROFILE:
       return setLoadingState(state, 'profile');
     case UPDATE_PROFILE_SUCCESS:
-      return setSuccessState(state, 'profile', 'updated-success');
+      return {
+        ...setSuccessState(state, 'profile', 'updated-success'),
+        currentCustomer: {
+          ...state.currentCustomer,
+          data: {
+            ...state.currentCustomer.data,
+            ...action.payload.data
+          }
+        }
+      };
     case UPDATE_PROFILE_FAILURE:
       return setFailureState(state, 'profile', action.payload.response.data.error);
+
+    case UPDATE_USER_PROFILE:
+      return setLoadingState(state, 'profile');
+    case UPDATE_USER_PROFILE_SUCCESS:
+      return {
+        ...setSuccessState(state, 'profile', 'updated-success'),
+        currentUser: { ...action.payload }
+      };
+    case UPDATE_USER_PROFILE_FAILURE:
+      return setFailureState(state, 'profile', action.payload.response.data.error);
+
     case FETCH_CUSTOMER_COUNT:
       return setLoadingState(state, 'customerCount');
     case GET_ALERTS:
@@ -342,11 +392,26 @@ export default function (state = INITIAL_STATE, action) {
       return setLoadingState(state, 'configs', []);
     case FETCH_CUSTOMER_CONFIGS_RESPONSE:
       return setPromiseResponse(state, 'configs', action);
+    case FETCH_RUNTIME_CONFIGS:
+      return setLoadingState(state, 'runtimeConfigs', []);
+    case FETCH_RUNTIME_CONFIGS_RESPONSE:
+      return setPromiseResponse(state, 'runtimeConfigs', action);
+    case RESET_RUNTIME_CONFIGS:
+      return setLoadingState(state, 'runtimeConfigs', []);
+    case SET_RUNTIME_CONFIG:
+      return setLoadingState(state, 'updateRuntimeConfig', {});
+    case SET_RUNTIME_CONFIG_RESPONSE:
+      return setPromiseResponse(state, 'updateRuntimeConfig', action);
+    case DELETE_RUNTIME_CONFIG:
+      return setLoadingState(state, 'deleteRuntimeConfig', {});
+    case DELETE_RUNTIME_CONFIG_RESPONSE:
+      return setPromiseResponse(state, 'deleteRuntimeConfig', action);
     case DELETE_CUSTOMER_CONFIG:
       return setLoadingState(state, 'deleteConfig', {});
     case DELETE_CUSTOMER_CONFIG_RESPONSE:
       return setPromiseResponse(state, 'deleteConfig', action);
 
+    case LOGS_FETCHING:
     case GET_LOGS:
       return {
         ...state,
@@ -355,7 +420,7 @@ export default function (state = INITIAL_STATE, action) {
     case GET_LOGS_SUCCESS:
       return {
         ...state,
-        yugaware_logs: action.payload.data.lines.reverse(),
+        yugaware_logs: action.payload.data,
         yugawareLogError: false
       };
     case GET_LOGS_FAILURE:
@@ -374,8 +439,10 @@ export default function (state = INITIAL_STATE, action) {
 
     case CREATE_USER:
       return setLoadingState(state, 'createUser', {});
-    case CREATE_USER_RESPONSE:
-      return setPromiseResponse(state, 'createUser', action);
+    case CREATE_USER_SUCCESS:
+      return setSuccessState(state, 'createUser', action);
+    case CREATE_USER_FAILURE:
+      return setFailureState(state, 'createUser', action);
 
     case GET_RELEASES:
       return setLoadingState(state, 'releases', []);

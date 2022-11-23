@@ -11,41 +11,48 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_TSERVER_FWD_H
-#define YB_TSERVER_TSERVER_FWD_H
+#pragma once
+
+#include <functional>
+
+#include "yb/tserver/backup.fwd.h"
+#include "yb/tserver/tserver.fwd.h"
+#include "yb/tserver/tserver_service.fwd.h"
+
+#include "yb/util/strongly_typed_bool.h"
 
 namespace yb {
+
+namespace client {
+
+class TransactionPool;
+class YBPgsqlOp;
+
+}
+
 namespace tserver {
 
-class AbortTransactionRequestPB;
-class AbortTransactionResponsePB;
-class GetTabletStatusRequestPB;
-class GetTabletStatusResponsePB;
-class GetTransactionStatusAtParticipantRequestPB;
-class GetTransactionStatusAtParticipantResponsePB;
-class GetTransactionStatusRequestPB;
-class GetTransactionStatusResponsePB;
 class Heartbeater;
 class LocalTabletServer;
 class MetricsSnapshotter;
-class PgCreateColumnPB;
-class PgCreateTableRequestPB;
+class PgTableCache;
+class PgResponseCache;
 class TSTabletManager;
 class TabletPeerLookupIf;
 class TabletServer;
 class TabletServerAdminServiceProxy;
 class TabletServerBackupServiceProxy;
+class TabletServerIf;
 class TabletServerOptions;
 class TabletServerServiceProxy;
-class TabletServerForwardServiceProxy;
+class TabletServiceImpl;
 class TabletServerPathHandlers;
-class TabletSnapshotOpRequestPB;
-class TabletSnapshotOpResponsePB;
-class TransactionStatePB;
-class UpdateTransactionRequestPB;
-class UpdateTransactionResponsePB;
+
+enum class TabletServerServiceRpcMethodIndexes;
+
+YB_STRONGLY_TYPED_BOOL(AllowSplitTablet);
+
+using TransactionPoolProvider = std::function<client::TransactionPool&()>;
 
 } // namespace tserver
 } // namespace yb
-
-#endif // YB_TSERVER_TSERVER_FWD_H

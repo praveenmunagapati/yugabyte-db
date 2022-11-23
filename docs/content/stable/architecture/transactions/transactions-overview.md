@@ -8,8 +8,7 @@ menu:
     identifier: architecture-transactions-overview
     parent: architecture-acid-transactions
     weight: 1151
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 Transactions and strong consistency are a fundamental requirement for any RDBMS. DocDB has been designed for strong consistency. It supports fully distributed ACID transactions across rows, multiple tablets and multiple nodes at any scale. Transactions can span across tables in DocDB.
@@ -37,7 +36,7 @@ YugabyteDB uses **Hybrid Logical Clocks (HLCs)**. HLCs solve the problem by comb
 
 Each node in a YugabyteDB cluster first computes its HLC. HLC is represented as a (physical time component, logical component) tuple. HLCs generated on any node are strictly monotonic, and are compared as a tuple. When comparing two HLCs, the physical time component takes precedence over the logical component.
 
-* **Physical time component:** YugabyteDB uses the physical clock (`CLOCK_REALTIME` in Linux) of a node to initialize the physical time component of its HLC. Once initialized, the physical time component can only get updated to a higher value. A monotonic clock is used since it represents the time elapsed since some arbitrary, fixed point in the past and guarantees that the time source is strictly linearly increasing.
+* **Physical time component:** YugabyteDB uses the physical clock (`CLOCK_REALTIME` in Linux) of a node to initialize the physical time component of its HLC. Once initialized, the physical time component can only get updated to a higher value.
 
 * **Logical component:** For a given physical time component, the logical component of the HLC is a monotonically increasing number that provides ordering of events happening within that same physical time. This is initially set to 0. If the physical time component gets updated at any point, the logical component is reset to 0.
 
@@ -51,7 +50,7 @@ This same HLC is used to determine the read point in order to determine which up
 
 ## MVCC
 
-YugabyteDB maintains data consistency internally using *multi-version concurrency control* (MVCC) without having to lock rows. Each transaction works on a version of the data in the database as of some hybrid timestamp. This prevents transactions from reading the intermediate updates made by concurrently running transactions, some of which may be updating the same rows. Each transaction, however, can see it's own updates, thereby providing transaction isolation for each database session. This technique of using MVCC minimizes lock contention when there are multiple concurrent transactions executing. 
+YugabyteDB maintains data consistency internally using *multi-version concurrency control* (MVCC) without having to lock rows. Each transaction works on a version of the data in the database as of some hybrid timestamp. This prevents transactions from reading the intermediate updates made by concurrently running transactions, some of which may be updating the same rows. Each transaction, however, can see it's own updates, thereby providing transaction isolation for each database session. This technique of using MVCC minimizes lock contention when there are multiple concurrent transactions executing.
 
 ### MVCC using hybrid time
 
@@ -79,7 +78,7 @@ The timestamp that we are using for MVCC comes from the [Hybrid Time](http://use
 
 ### Supported isolation levels
 
-YugabyteDB supports two transaction isolation levels - `SNAPSHOT` (which is mapped to the SQL isolation level `REPEATABLE READ`) and `SERIALIZABLE` (which maps to the SQL isolation level of the same name). Read more about [isolation levels in YugabyteDB](../isolation-levels).
+YugabyteDB supports three transaction isolation levels - Read Committed, Serializable (both map to the SQL isolation level of the same name) and Snapshot (which maps to the SQL isolation level `REPEATABLE READ`). Read more about [isolation levels in YugabyteDB](../isolation-levels).
 
 ### Explicit locking
 
@@ -87,7 +86,7 @@ Just as with PostgreSQL, YugabyteDB provides various lock modes to control concu
 
 {{< note title="Note" >}}
 
-The architecture section covers the set of explicit locking modes currently supported by YugabyteDB. The plan is to cover most of the locking modes supported by PostgreSQL over time. 
+The architecture section covers the set of explicit locking modes currently supported by YugabyteDB. The plan is to cover most of the locking modes supported by PostgreSQL over time.
 
 {{</note >}}
 
@@ -104,7 +103,7 @@ The transaction manager of YugabyteDB automatically detects transactions that up
 
 {{< note title="Note" >}}
 
-Because single row transactions do not have to update the transaction status table, they are much higher in performance than distributed transactions discussed in the next section. 
+Because single row transactions do not have to update the transaction status table, they are much higher in performance than distributed transactions discussed in the next section.
 
 {{</note >}}
 
@@ -129,7 +128,7 @@ UPDATE table SET column = <new value> WHERE <all primary key values are specifie
 Single-row upsert statements using `UPDATE` .. `ON CONFLICT`. Note that the updates performed in case the row exists should match the set of values that were specified in the insert clause.
 
 ```
-INSERT INTO table (columns) VALUES (values) 
+INSERT INTO table (columns) VALUES (values)
     ON CONFLICT DO UPDATE
     SET <values>;
 ```

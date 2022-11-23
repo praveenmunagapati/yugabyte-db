@@ -29,6 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
+
 #include "yb/server/server_base.h"
 
 #include <algorithm>
@@ -37,14 +38,21 @@
 #include <vector>
 
 #include <boost/algorithm/string/predicate.hpp>
-#include <gflags/gflags.h>
 
 #include "yb/common/wire_protocol.h"
+
+#include "yb/encryption/encryption_util.h"
+
 #include "yb/fs/fs_manager.h"
+
 #include "yb/gutil/strings/strcat.h"
-#include "yb/gutil/strings/substitute.h"
+#include "yb/gutil/sysinfo.h"
 #include "yb/gutil/walltime.h"
+
 #include "yb/rpc/messenger.h"
+#include "yb/rpc/proxy.h"
+#include "yb/rpc/secure_stream.h"
+
 #include "yb/server/default-path-handlers.h"
 #include "yb/server/generic_service.h"
 #include "yb/server/glog_metrics.h"
@@ -55,46 +63,48 @@
 #include "yb/server/server_base.pb.h"
 #include "yb/server/server_base_options.h"
 #include "yb/server/tcmalloc_metrics.h"
-#include "yb/server/skewed_clock.h"
 #include "yb/server/tracing-path-handlers.h"
 #include "yb/server/webserver.h"
+
 #include "yb/util/atomic.h"
+#include "yb/util/concurrent_value.h"
 #include "yb/util/env.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 #include "yb/util/jsonwriter.h"
 #include "yb/util/mem_tracker.h"
 #include "yb/util/metrics.h"
 #include "yb/util/monotime.h"
-#include "yb/util/net/sockaddr.h"
 #include "yb/util/net/net_util.h"
-#include "yb/util/status.h"
+#include "yb/util/net/sockaddr.h"
 #include "yb/util/pb_util.h"
 #include "yb/util/rolling_log.h"
 #include "yb/util/spinlock_profiling.h"
+#include "yb/util/status.h"
+#include "yb/util/status_log.h"
+#include "yb/util/timestamp.h"
 #include "yb/util/thread.h"
 #include "yb/util/version_info.h"
-#include "yb/util/encryption_util.h"
-#include "yb/gutil/sysinfo.h"
 
-DEFINE_int32(num_reactor_threads, -1,
+DEFINE_UNKNOWN_int32(num_reactor_threads, -1,
              "Number of libev reactor threads to start. If -1, the value is automatically set.");
 TAG_FLAG(num_reactor_threads, advanced);
 
 DECLARE_bool(use_hybrid_clock);
 
-DEFINE_int32(generic_svc_num_threads, 10,
+DEFINE_UNKNOWN_int32(generic_svc_num_threads, 10,
              "Number of RPC worker threads to run for the generic service");
 TAG_FLAG(generic_svc_num_threads, advanced);
 
-DEFINE_int32(generic_svc_queue_length, 50,
+DEFINE_UNKNOWN_int32(generic_svc_queue_length, 50,
              "RPC Queue length for the generic service");
 TAG_FLAG(generic_svc_queue_length, advanced);
 
-DEFINE_string(yb_test_name, "",
+DEFINE_UNKNOWN_string(yb_test_name, "",
               "Specifies test name this daemon is running as part of.");
 
-DEFINE_bool(TEST_check_broadcast_address, true, "Break connectivity in test mini cluster to "
-            "check broadcast address.");
+DEFINE_UNKNOWN_bool(TEST_check_broadcast_address, true,
+    "Break connectivity in test mini cluster to "
+    "check broadcast address.");
 
 DEFINE_test_flag(string, public_hostname_suffix, ".ip.yugabyte", "Suffix for public hostnames.");
 
@@ -161,12 +171,12 @@ void RegisterTCMallocTracker(const char* name, const char* prop) {
 
 RpcServerBase::RpcServerBase(string name, const ServerBaseOptions& options,
                              const string& metric_namespace,
-                             MemTrackerPtr mem_tracker)
+                             MemTrackerPtr mem_tracker,
+                             const scoped_refptr<server::Clock>& clock)
     : name_(std::move(name)),
       mem_tracker_(std::move(mem_tracker)),
       metric_registry_(new MetricRegistry()),
-      metric_entity_(METRIC_ENTITY_server.Instantiate(metric_registry_.get(),
-                                                      metric_namespace)),
+      metric_entity_(METRIC_ENTITY_server.Instantiate(metric_registry_.get(), metric_namespace)),
       options_(options),
       initialized_(false),
       stop_metrics_logging_latch_(1) {
@@ -192,7 +202,10 @@ RpcServerBase::RpcServerBase(string name, const ServerBaseOptions& options,
   }
 #endif
 
-  if (FLAGS_use_hybrid_clock) {
+  if (clock) {
+    clock_ = clock;
+    external_clock_ = true;
+  } else if (FLAGS_use_hybrid_clock) {
     clock_ = new HybridClock();
   } else {
     clock_ = LogicalClock::CreateStartingAt(HybridTime::kInitial);
@@ -241,8 +254,8 @@ const NodeInstancePB& RpcServerBase::instance_pb() const {
 Status RpcServerBase::SetupMessengerBuilder(rpc::MessengerBuilder* builder) {
   if (FLAGS_num_reactor_threads == -1) {
     // Auto set the number of reactors based on the number of cores.
-    FLAGS_num_reactor_threads =
-        std::min(16, static_cast<int>(base::NumCPUs()));
+    auto count = std::min(16, static_cast<int>(base::NumCPUs()));
+    RETURN_NOT_OK(SET_FLAG_DEFAULT_AND_CURRENT(num_reactor_threads, count));
     LOG(INFO) << "Auto setting FLAGS_num_reactor_threads to " << FLAGS_num_reactor_threads;
   }
 
@@ -252,6 +265,8 @@ Status RpcServerBase::SetupMessengerBuilder(rpc::MessengerBuilder* builder) {
 
   return Status::OK();
 }
+
+Status RpcServerBase::InitAutoFlags() { return Status::OK(); }
 
 Status RpcServerBase::Init() {
   CHECK(!initialized_);
@@ -267,7 +282,9 @@ Status RpcServerBase::Init() {
   // Initialize the clock immediately. This checks that the clock is synchronized
   // so we're less likely to get into a partially initialized state on disk during startup
   // if we're having clock problems.
-  RETURN_NOT_OK_PREPEND(clock_->Init(), "Cannot initialize clock");
+  if (!external_clock_) {
+    RETURN_NOT_OK_PREPEND(clock_->Init(), "Cannot initialize clock");
+  }
 
   // Create the Messenger.
   rpc::MessengerBuilder builder(name_);
@@ -304,6 +321,10 @@ void RpcServerBase::GetStatusPB(ServerStatusPB* status) const {
   }
 
   VersionInfo::GetVersionInfoPB(status->mutable_version_info());
+}
+
+CloudInfoPB RpcServerBase::MakeCloudInfoPB() const {
+  return options_.MakeCloudInfoPB();
 }
 
 Status RpcServerBase::DumpServerInfo(const string& path,
@@ -357,13 +378,13 @@ void RpcServerBase::MetricsLoggingThread() {
     buf << "metrics " << GetCurrentTimeMicros() << " ";
 
     // Collect the metrics JSON string.
-    vector<string> metrics;
-    metrics.push_back("*");
+    MetricEntityOptions entity_opts;
+    entity_opts.metrics.push_back("*");
     MetricJsonOptions opts;
     opts.include_raw_histograms = true;
 
     JsonWriter writer(&buf, JsonWriter::COMPACT);
-    Status s = metric_registry_->WriteAsJson(&writer, metrics, opts);
+    Status s = metric_registry_->WriteAsJson(&writer, entity_opts, opts);
     if (!s.ok()) {
       WARN_NOT_OK(s, "Unable to collect metrics to log");
       next_log.AddDelta(kWaitBetweenFailures);
@@ -421,11 +442,12 @@ void RpcServerBase::Shutdown() {
 RpcAndWebServerBase::RpcAndWebServerBase(
     string name, const ServerBaseOptions& options,
     const std::string& metric_namespace,
-    MemTrackerPtr mem_tracker)
-    : RpcServerBase(name, options, metric_namespace, std::move(mem_tracker)),
-      web_server_(new Webserver(options.webserver_opts, name_)) {
+    MemTrackerPtr mem_tracker,
+    const scoped_refptr<server::Clock>& clock)
+    : RpcServerBase(name, options, metric_namespace, std::move(mem_tracker), clock),
+      web_server_(new Webserver(options_.CompleteWebserverOptions(), name_)) {
   FsManagerOpts fs_opts;
-  fs_opts.metric_entity = metric_entity_;
+  fs_opts.metric_registry = metric_registry_.get();
   fs_opts.parent_mem_tracker = mem_tracker_;
   fs_opts.wal_paths = options.fs_opts.wal_paths;
   fs_opts.data_paths = options.fs_opts.data_paths;
@@ -439,10 +461,10 @@ RpcAndWebServerBase::~RpcAndWebServerBase() {
   Shutdown();
 }
 
-Endpoint RpcAndWebServerBase::first_http_address() const {
+Result<Endpoint> RpcAndWebServerBase::first_http_address() const {
   std::vector<Endpoint> addrs;
-  WARN_NOT_OK(web_server_->GetBoundAddresses(&addrs),
-              "Couldn't get bound webserver addresses");
+  RETURN_NOT_OK_PREPEND(web_server_->GetBoundAddresses(&addrs),
+                        "Couldn't get bound webserver addresses");
   CHECK(!addrs.empty()) << "Not bound";
   return addrs[0];
 }
@@ -461,21 +483,23 @@ void RpcAndWebServerBase::GenerateInstanceID() {
 }
 
 Status RpcAndWebServerBase::Init() {
-  yb::InitOpenSSL();
+  rpc::InitOpenSSL();
 
-  Status s = fs_manager_->Open();
+  Status s = fs_manager_->CheckAndOpenFileSystemRoots();
   if (s.IsNotFound() || (!s.ok() && fs_manager_->HasAnyLockFiles())) {
     LOG(INFO) << "Could not load existing FS layout: " << s.ToString();
     LOG(INFO) << "Creating new FS layout";
     RETURN_NOT_OK_PREPEND(fs_manager_->CreateInitialFileSystemLayout(true),
                           "Could not create new FS layout");
-    s = fs_manager_->Open();
+    s = fs_manager_->CheckAndOpenFileSystemRoots();
   }
   RETURN_NOT_OK_PREPEND(s, "Failed to load FS layout");
 
   if (PREDICT_FALSE(FLAGS_TEST_simulate_port_conflict_error)) {
     return STATUS(NetworkError, "Simulated port conflict error");
   }
+
+  RETURN_NOT_OK(InitAutoFlags());
 
   RETURN_NOT_OK(RpcServerBase::Init());
 
@@ -556,10 +580,11 @@ string RpcAndWebServerBase::GetEasterEggMessage() const {
 
 string RpcAndWebServerBase::FooterHtml() const {
   return Substitute("<pre class='message'><i class=\"fa-lg fa fa-gift\" aria-hidden=\"true\"></i>"
-                    " $0</pre><pre>$1\nserver uuid $2</pre>",
+                    " $0</pre><pre>$1\nserver uuid $2 local time $3</pre>",
                     GetEasterEggMessage(),
                     VersionInfo::GetShortVersionString(),
-                    instance_pb_->permanent_uuid());
+                    instance_pb_->permanent_uuid(),
+                    Timestamp(GetCurrentTimeMicros()).ToHumanReadableTime());
 }
 
 void RpcAndWebServerBase::DisplayIconTile(std::stringstream* output, const string icon,
@@ -586,11 +611,13 @@ void RpcAndWebServerBase::DisplayGeneralInfoIcons(std::stringstream* output) {
   // Total memory.
   DisplayIconTile(output, "fa-cog", "Total Memory", "/memz");
   // Metrics.
-  DisplayIconTile(output, "fa-line-chart", "Metrics", "/prometheus-metrics");
+  DisplayIconTile(output, "fa-line-chart", "Metrics", "/prometheus-metrics?reset_histograms=false");
   // Threads.
   DisplayIconTile(output, "fa-microchip", "Threads", "/threadz");
   // Drives.
   DisplayIconTile(output, "fa-hdd-o", "Drives", "/drives");
+  // TLS.
+  DisplayIconTile(output, "fa-lock", "TLS", "/tls");
 }
 
 Status RpcAndWebServerBase::DisplayRpcIcons(std::stringstream* output) {
@@ -622,6 +649,7 @@ Status RpcAndWebServerBase::Start() {
   AddRpczPathHandlers(messenger_.get(), web_server_.get());
   RegisterMetricsJsonHandler(web_server_.get(), metric_registry_.get());
   RegisterPathUsageHandler(web_server_.get(), fs_manager_.get());
+  RegisterTlsHandler(web_server_.get(), this);
   TracingPathHandlers::RegisterHandlers(web_server_.get());
   web_server_->RegisterPathHandler("/utilz", "Utilities",
                                    std::bind(&RpcAndWebServerBase::HandleDebugPage, this, _1, _2),
@@ -639,12 +667,12 @@ void RpcAndWebServerBase::Shutdown() {
   web_server_->Stop();
 }
 
-std::string TEST_RpcAddress(int index, Private priv) {
+std::string TEST_RpcAddress(size_t index, Private priv) {
   return Format("127.0.0.$0$1",
                 index * 2 + (priv ? 0 : 1), priv ? "" : FLAGS_TEST_public_hostname_suffix);
 }
 
-string TEST_RpcBindEndpoint(int index, uint16_t port) {
+string TEST_RpcBindEndpoint(size_t index, uint16_t port) {
   return HostPortToString(TEST_RpcAddress(index, Private::kTrue), port);
 }
 
@@ -653,11 +681,11 @@ constexpr int kMinServerIdx = 1;
 
 // We group servers by two. Servers in the same group communciate via private connection. Servers in
 // different groups communicate via public connection.
-int ServerGroupNum(int server_idx) {
+size_t ServerGroupNum(size_t server_idx) {
   return (server_idx - 1) / FLAGS_TEST_nodes_per_cloud;
 }
 
-void TEST_SetupConnectivity(rpc::Messenger* messenger, int index) {
+void TEST_SetupConnectivity(rpc::Messenger* messenger, size_t index) {
   if (!FLAGS_TEST_check_broadcast_address) {
     return;
   }

@@ -11,30 +11,42 @@
 package com.yugabyte.yw.controllers.handlers;
 
 import static play.mvc.Http.Status.BAD_REQUEST;
+import static play.mvc.Http.Status.INTERNAL_SERVER_ERROR;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
-import com.yugabyte.yw.cloud.PublicCloudConstants;
 import com.yugabyte.yw.commissioner.Commissioner;
 import com.yugabyte.yw.commissioner.Common;
+import com.yugabyte.yw.commissioner.tasks.AddOnClusterDelete;
 import com.yugabyte.yw.commissioner.tasks.DestroyUniverse;
 import com.yugabyte.yw.commissioner.tasks.ReadOnlyClusterDelete;
-import com.yugabyte.yw.common.CertificateHelper;
-import com.yugabyte.yw.common.KubernetesManager;
+import com.yugabyte.yw.commissioner.tasks.ReadOnlyKubernetesClusterDelete;
+import com.yugabyte.yw.commissioner.tasks.XClusterConfigTaskBase;
+import com.yugabyte.yw.common.KubernetesManagerFactory;
 import com.yugabyte.yw.common.PlacementInfoUtil;
 import com.yugabyte.yw.common.PlatformServiceException;
 import com.yugabyte.yw.common.Util;
+import com.yugabyte.yw.common.YbcManager;
+import com.yugabyte.yw.common.certmgmt.CertConfigType;
+import com.yugabyte.yw.common.certmgmt.CertificateHelper;
+import com.yugabyte.yw.common.certmgmt.EncryptionInTransitUtil;
+import com.yugabyte.yw.common.certmgmt.providers.VaultPKI;
 import com.yugabyte.yw.common.config.RuntimeConfigFactory;
+import com.yugabyte.yw.common.config.impl.SettableRuntimeConfigFactory;
+import com.yugabyte.yw.common.gflags.GFlagsUtil;
 import com.yugabyte.yw.common.kms.EncryptionAtRestManager;
 import com.yugabyte.yw.common.password.PasswordPolicyService;
 import com.yugabyte.yw.forms.CertsRotateParams;
 import com.yugabyte.yw.forms.DiskIncreaseFormData;
+import com.yugabyte.yw.forms.ResizeNodeParams;
 import com.yugabyte.yw.forms.TlsConfigUpdateParams;
 import com.yugabyte.yw.forms.TlsToggleParams;
 import com.yugabyte.yw.forms.UniverseConfigureTaskParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.Cluster;
+import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.ClusterType;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.UserIntent;
 import com.yugabyte.yw.forms.UniverseResp;
 import com.yugabyte.yw.forms.UpgradeParams;
@@ -47,17 +59,29 @@ import com.yugabyte.yw.models.Provider;
 import com.yugabyte.yw.models.Region;
 import com.yugabyte.yw.models.TaskInfo;
 import com.yugabyte.yw.models.Universe;
+import com.yugabyte.yw.models.helpers.CommonUtils;
 import com.yugabyte.yw.models.helpers.NodeDetails;
+import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
 import com.yugabyte.yw.models.helpers.TaskType;
+import io.ebean.Ebean;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import javax.annotation.Nullable;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import play.libs.Json;
 import play.mvc.Http;
 import play.mvc.Http.Status;
 
@@ -73,10 +97,20 @@ public class UniverseCRUDHandler {
 
   @Inject RuntimeConfigFactory runtimeConfigFactory;
 
-  @Inject KubernetesManager kubernetesManager;
+  @Inject SettableRuntimeConfigFactory settableRuntimeConfigFactory;
+
+  @Inject KubernetesManagerFactory kubernetesManagerFactory;
   @Inject PasswordPolicyService passwordPolicyService;
 
   @Inject UpgradeUniverseHandler upgradeUniverseHandler;
+
+  @Inject YbcManager ybcManager;
+
+  private enum OpType {
+    CONFIGURE,
+    CREATE,
+    UPDATE
+  }
 
   /**
    * Function to Trim keys and values of the passed map.
@@ -95,6 +129,83 @@ public class UniverseCRUDHandler {
     return trimData;
   }
 
+  public Set<UniverseDefinitionTaskParams.UpdateOptions> getUpdateOptions(
+      Customer customer, UniverseConfigureTaskParams taskParams) {
+    Cluster cluster =
+        taskParams.getCurrentClusterType().equals(UniverseDefinitionTaskParams.ClusterType.PRIMARY)
+            ? taskParams.getPrimaryCluster()
+            : taskParams.getReadOnlyClusters().get(0);
+    return getUpdateOptions(
+        taskParams, cluster, PlacementInfoUtil.getUniverseForParams(taskParams));
+  }
+
+  private Set<UniverseDefinitionTaskParams.UpdateOptions> getUpdateOptions(
+      UniverseConfigureTaskParams taskParams, Cluster cluster, @Nullable Universe universe) {
+    if (taskParams.clusterOperation == UniverseConfigureTaskParams.ClusterOperationType.CREATE
+        || universe == null) {
+      return Collections.singleton(UniverseDefinitionTaskParams.UpdateOptions.UPDATE);
+    }
+    Cluster currentCluster = universe.getCluster(cluster.uuid);
+    Set<UniverseDefinitionTaskParams.UpdateOptions> result = new HashSet<>();
+    Set<NodeDetails> nodesInCluster = taskParams.getNodesInCluster(cluster.uuid);
+    boolean hasChangedNodes = false;
+    boolean hasRemainingNodes = false;
+
+    boolean smartResizePossible =
+        ResizeNodeParams.checkResizeIsPossible(
+            currentCluster.userIntent, cluster.userIntent, universe, true);
+
+    for (NodeDetails node : nodesInCluster) {
+      if (node.state == NodeState.ToBeAdded || node.state == NodeState.ToBeRemoved) {
+        hasChangedNodes = true;
+      } else {
+        hasRemainingNodes = true;
+      }
+    }
+    if (!hasRemainingNodes) {
+      result.add(UniverseDefinitionTaskParams.UpdateOptions.FULL_MOVE);
+      if (!PlacementInfoUtil.isSamePlacement(currentCluster.placementInfo, cluster.placementInfo)) {
+        smartResizePossible = false;
+      }
+    } else {
+      if (hasChangedNodes || !cluster.areTagsSame(currentCluster)) {
+        result.add(UniverseDefinitionTaskParams.UpdateOptions.UPDATE);
+      } else if (GFlagsUtil.checkGFlagsByIntentChange(
+          currentCluster.userIntent, cluster.userIntent)) {
+        result.add(UniverseDefinitionTaskParams.UpdateOptions.GFLAGS_UPGRADE);
+      }
+    }
+    if (smartResizePossible
+        && (result.isEmpty()
+            || result.equals(
+                Collections.singleton(UniverseDefinitionTaskParams.UpdateOptions.FULL_MOVE)))) {
+      if (cluster.userIntent.instanceType == null
+          || cluster.userIntent.instanceType.equals(currentCluster.userIntent.instanceType)) {
+        result.add(UniverseDefinitionTaskParams.UpdateOptions.SMART_RESIZE_NON_RESTART);
+      } else {
+        result.add(UniverseDefinitionTaskParams.UpdateOptions.SMART_RESIZE);
+      }
+    }
+    return result;
+  }
+
+  private Cluster getClusterFromTaskParams(UniverseConfigureTaskParams taskParams) {
+    Cluster cluster;
+    if (taskParams.currentClusterType.equals(UniverseDefinitionTaskParams.ClusterType.PRIMARY)) {
+      cluster = taskParams.getPrimaryCluster();
+    } else if (taskParams.currentClusterType.equals(
+        UniverseDefinitionTaskParams.ClusterType.ASYNC)) {
+      cluster = taskParams.getReadOnlyClusters().get(0);
+    } else if (taskParams.currentClusterType.equals(
+        UniverseDefinitionTaskParams.ClusterType.ADDON)) {
+      cluster = taskParams.getAddOnClusters().get(0);
+    } else {
+      throw new PlatformServiceException(BAD_REQUEST, "Invalid cluster type");
+    }
+
+    return cluster;
+  }
+
   public void configure(Customer customer, UniverseConfigureTaskParams taskParams) {
     if (taskParams.currentClusterType == null) {
       throw new PlatformServiceException(BAD_REQUEST, "currentClusterType must be set");
@@ -105,33 +216,217 @@ public class UniverseCRUDHandler {
 
     // TODO(Rahul): When we support multiple read only clusters, change clusterType to cluster
     //  uuid.
-    Cluster c =
-        taskParams.getCurrentClusterType().equals(UniverseDefinitionTaskParams.ClusterType.PRIMARY)
-            ? taskParams.getPrimaryCluster()
-            : taskParams.getReadOnlyClusters().get(0);
-    UniverseDefinitionTaskParams.UserIntent primaryIntent = c.userIntent;
+    Cluster cluster = getClusterFromTaskParams(taskParams);
+    UniverseDefinitionTaskParams.UserIntent primaryIntent = cluster.userIntent;
+
+    checkGeoPartitioningParameters(customer, taskParams, OpType.CONFIGURE);
+
     primaryIntent.masterGFlags = trimFlags(primaryIntent.masterGFlags);
     primaryIntent.tserverGFlags = trimFlags(primaryIntent.tserverGFlags);
     if (StringUtils.isEmpty(primaryIntent.accessKeyCode)) {
       primaryIntent.accessKeyCode = appConfig.getString("yb.security.default.access.key");
     }
-    if (PlacementInfoUtil.checkIfNodeParamsValid(taskParams, c)) {
-      PlacementInfoUtil.updateUniverseDefinition(taskParams, customer.getCustomerId(), c.uuid);
+    if (PlacementInfoUtil.checkIfNodeParamsValid(taskParams, cluster)) {
+      try {
+        Universe universe = PlacementInfoUtil.getUniverseForParams(taskParams);
+        PlacementInfoUtil.updateUniverseDefinition(
+            taskParams, universe, customer.getCustomerId(), cluster.uuid);
+        try {
+          if (taskParams
+              .getPrimaryCluster()
+              .userIntent
+              .providerType
+              .equals(Common.CloudType.kubernetes)) {
+            taskParams.updateOptions =
+                Collections.singleton(
+                    UniverseDefinitionTaskParams.UpdateOptions.SMART_RESIZE_NON_RESTART);
+          } else {
+            taskParams.updateOptions = getUpdateOptions(taskParams, cluster, universe);
+          }
+        } catch (Exception e) {
+          LOG.error("Failed to calculate update options", e);
+        }
+        UniverseResp.fillClusterRegions(taskParams.clusters);
+      } catch (IllegalStateException | UnsupportedOperationException e) {
+        throw new PlatformServiceException(BAD_REQUEST, e.getMessage());
+      }
     } else {
       throw new PlatformServiceException(
           BAD_REQUEST,
-          "Invalid Node/AZ combination for given instance type " + c.userIntent.instanceType);
+          "Invalid Node/AZ combination for given instance type " + cluster.userIntent.instanceType);
     }
+  }
+
+  private void checkGeoPartitioningParameters(
+      Customer customer, UniverseDefinitionTaskParams taskParams, OpType op) {
+
+    UUID defaultRegionUUID = PlacementInfoUtil.getDefaultRegion(taskParams);
+    if (defaultRegionUUID != null) {
+      UserIntent intent = taskParams.getPrimaryCluster().userIntent;
+      Region defaultRegion =
+          Region.getOrBadRequest(
+              customer.getUuid(), UUID.fromString(intent.provider), defaultRegionUUID);
+      if (!intent.regionList.contains(defaultRegionUUID)) {
+        throw new PlatformServiceException(
+            BAD_REQUEST, "Default region " + defaultRegion + " not in user region list.");
+      }
+
+      if (op == OpType.CREATE || op == OpType.UPDATE) {
+        int nodesInDefRegion =
+            (int)
+                taskParams
+                    .nodeDetailsSet
+                    .stream()
+                    .filter(n -> n.isActive() && defaultRegion.code.equals(n.cloudInfo.region))
+                    .count();
+        if (nodesInDefRegion < intent.replicationFactor) {
+          if (taskParams.mastersInDefaultRegion) {
+            throw new PlatformServiceException(
+                BAD_REQUEST,
+                String.format(
+                    "Could not pick %d masters, only %d nodes available in default region %s.",
+                    intent.replicationFactor, nodesInDefRegion, defaultRegion.name));
+          } else {
+            throw new PlatformServiceException(
+                BAD_REQUEST,
+                String.format(
+                    "Could not pick %d nodes in default region %s to place enough data replicas.",
+                    intent.replicationFactor, defaultRegion.name));
+          }
+        }
+      }
+    }
+  }
+
+  // Creates RootCA certificate if not provided and creates client certificate
+  public void checkForCertificates(Customer customer, UniverseDefinitionTaskParams taskParams) {
+    Cluster primaryCluster = taskParams.getPrimaryCluster();
+    CertificateInfo cert;
+
+    if (primaryCluster.userIntent.enableNodeToNodeEncrypt) {
+      if (taskParams.rootCA != null) {
+        cert = CertificateInfo.get(taskParams.rootCA);
+
+        if (cert.certType == CertConfigType.CustomServerCert) {
+          throw new PlatformServiceException(
+              BAD_REQUEST,
+              "CustomServerCert are only supported for Client to Server Communication.");
+        }
+
+        if (cert.certType == CertConfigType.CustomCertHostPath) {
+          if (!taskParams
+              .getPrimaryCluster()
+              .userIntent
+              .providerType
+              .equals(Common.CloudType.onprem)) {
+            throw new PlatformServiceException(
+                BAD_REQUEST,
+                "CustomCertHostPath certificates are only supported for onprem providers.");
+          }
+        }
+
+        if (cert.certType == CertConfigType.HashicorpVault) {
+          try {
+            VaultPKI certProvider = VaultPKI.getVaultPKIInstance(cert);
+            certProvider.dumpCACertBundle(
+                runtimeConfigFactory.staticApplicationConf().getString("yb.storage.path"),
+                customer.uuid);
+          } catch (Exception e) {
+            throw new PlatformServiceException(
+                INTERNAL_SERVER_ERROR,
+                String.format(
+                    "Error while dumping certs from Vault for certificate: %s", taskParams.rootCA));
+          }
+        }
+      } else {
+        // create self-signed rootCA in case it is not provided by the user.
+        taskParams.rootCA =
+            CertificateHelper.createRootCA(
+                runtimeConfigFactory.staticApplicationConf(), taskParams.nodePrefix, customer.uuid);
+      }
+      checkValidRootCA(taskParams.rootCA);
+    }
+
+    if (primaryCluster.userIntent.enableClientToNodeEncrypt) {
+      if (taskParams.clientRootCA == null) {
+        if (taskParams.rootCA != null && taskParams.rootAndClientRootCASame) {
+          // Setting ClientRootCA to RootCA in case rootAndClientRootCA is true
+          taskParams.clientRootCA = taskParams.rootCA;
+        } else {
+          // create self-signed clientRootCA in case it is not provided by the user
+          // and root and clientRoot CA needs to be different
+          taskParams.clientRootCA =
+              CertificateHelper.createClientRootCA(
+                  runtimeConfigFactory.staticApplicationConf(),
+                  taskParams.nodePrefix,
+                  customer.uuid);
+        }
+      }
+
+      cert = CertificateInfo.get(taskParams.clientRootCA);
+      if (cert.certType == CertConfigType.CustomCertHostPath) {
+        if (!taskParams
+            .getPrimaryCluster()
+            .userIntent
+            .providerType
+            .equals(Common.CloudType.onprem)) {
+          throw new PlatformServiceException(
+              BAD_REQUEST,
+              "CustomCertHostPath certificates are only supported for onprem providers.");
+        }
+      }
+
+      if (cert.certType == CertConfigType.HashicorpVault) {
+        try {
+          VaultPKI certProvider = VaultPKI.getVaultPKIInstance(cert);
+          certProvider.dumpCACertBundle(
+              runtimeConfigFactory.staticApplicationConf().getString("yb.storage.path"),
+              customer.uuid);
+        } catch (Exception e) {
+          throw new PlatformServiceException(
+              INTERNAL_SERVER_ERROR,
+              String.format(
+                  "Error while dumping certs from Vault for certificate: %s",
+                  taskParams.clientRootCA));
+        }
+      }
+
+      checkValidRootCA(taskParams.clientRootCA);
+
+      // Setting rootCA to ClientRootCA in case node to node encryption is disabled.
+      // This is necessary to set to ensure backward compatibility as existing parts of
+      // codebase (kubernetes) uses rootCA for Client to Node Encryption
+      if (taskParams.rootCA == null && taskParams.rootAndClientRootCASame) {
+        taskParams.rootCA = taskParams.clientRootCA;
+      }
+
+      // Generate client certs if rootAndClientRootCASame is true and rootCA is self-signed.
+      // This is there only for legacy support, no need if rootCA and clientRootCA are different.
+      if (taskParams.rootAndClientRootCASame) {
+        CertificateInfo rootCert = CertificateInfo.get(taskParams.rootCA);
+        if (rootCert.certType == CertConfigType.SelfSigned
+            || rootCert.certType == CertConfigType.HashicorpVault) {
+          CertificateHelper.createClientCertificate(
+              runtimeConfigFactory.staticApplicationConf(), customer.uuid, taskParams.rootCA);
+        }
+      }
+    }
+  }
+
+  public void setUpXClusterSettings(UniverseDefinitionTaskParams taskParams) {
+    taskParams.xClusterInfo.sourceRootCertDirPath =
+        XClusterConfigTaskBase.getProducerCertsDir(
+            taskParams.getPrimaryCluster().userIntent.provider);
   }
 
   public UniverseResp createUniverse(Customer customer, UniverseDefinitionTaskParams taskParams) {
     LOG.info("Create for {}.", customer.uuid);
-    // Get the user submitted form data.
 
+    // Get the user submitted form data.
     if (taskParams.getPrimaryCluster() != null
         && !Util.isValidUniverseNameFormat(
             taskParams.getPrimaryCluster().userIntent.universeName)) {
-      throw new PlatformServiceException(BAD_REQUEST, Util.UNIV_NAME_ERROR_MESG);
+      throw new PlatformServiceException(BAD_REQUEST, Util.UNIVERSE_NAME_ERROR_MESG);
     }
 
     if (!taskParams.rootAndClientRootCASame
@@ -143,22 +438,19 @@ public class UniverseCRUDHandler {
       throw new PlatformServiceException(
           BAD_REQUEST, "root and clientRootCA cannot be different for Kubernetes env.");
     }
+    boolean cloudEnabled =
+        runtimeConfigFactory.forCustomer(customer).getBoolean("yb.cloud.enabled");
 
     for (Cluster c : taskParams.clusters) {
       Provider provider = Provider.getOrBadRequest(UUID.fromString(c.userIntent.provider));
       // Set the provider code.
       c.userIntent.providerType = Common.CloudType.valueOf(provider.code);
-      c.validate();
+      c.validate(!cloudEnabled);
       // Check if for a new create, no value is set, we explicitly set it to UNEXPOSED.
       if (c.userIntent.enableExposingService
           == UniverseDefinitionTaskParams.ExposingServiceState.NONE) {
         c.userIntent.enableExposingService =
             UniverseDefinitionTaskParams.ExposingServiceState.UNEXPOSED;
-      }
-      if (c.userIntent.providerType.equals(Common.CloudType.onprem)) {
-        if (provider.getConfig().containsKey("USE_HOSTNAME")) {
-          c.userIntent.useHostname = Boolean.parseBoolean(provider.getConfig().get("USE_HOSTNAME"));
-        }
       }
 
       if (c.userIntent.providerType.equals(Common.CloudType.kubernetes)) {
@@ -168,6 +460,12 @@ public class UniverseCRUDHandler {
           throw new PlatformServiceException(BAD_REQUEST, e.getMessage());
         }
         checkHelmChartExists(c.userIntent.ybSoftwareVersion);
+        // TODO(bhavin192): there should be some validation on the
+        // universe_name when creating the universe, because we cannot
+        // have more than 43 characters for universe_name + az_name
+        // when using new naming style. The length of longest AZ name
+        // should be picked up for that provider and then checked
+        // against the give universe_name.
       }
 
       // Set the node exporter config based on the provider
@@ -175,13 +473,16 @@ public class UniverseCRUDHandler {
         AccessKey accessKey = AccessKey.get(provider.uuid, c.userIntent.accessKeyCode);
         AccessKey.KeyInfo keyInfo = accessKey.getKeyInfo();
         boolean installNodeExporter = keyInfo.installNodeExporter;
-        int nodeExporterPort = keyInfo.nodeExporterPort;
         String nodeExporterUser = keyInfo.nodeExporterUser;
         taskParams.extraDependencies.installNodeExporter = installNodeExporter;
-        taskParams.communicationPorts.nodeExporterPort = nodeExporterPort;
 
-        for (NodeDetails node : taskParams.nodeDetailsSet) {
-          node.nodeExporterPort = nodeExporterPort;
+        if (c.userIntent.providerType.equals(Common.CloudType.onprem)) {
+          int nodeExporterPort = keyInfo.nodeExporterPort;
+          taskParams.communicationPorts.nodeExporterPort = nodeExporterPort;
+
+          for (NodeDetails node : taskParams.nodeDetailsSet) {
+            node.nodeExporterPort = nodeExporterPort;
+          }
         }
 
         if (installNodeExporter) {
@@ -222,147 +523,133 @@ public class UniverseCRUDHandler {
       }
     }
 
+    checkGeoPartitioningParameters(customer, taskParams, OpType.CREATE);
+
     // Create a new universe. This makes sure that a universe of this name does not already exist
     // for this customer id.
-    Universe universe = Universe.create(taskParams, customer.getCustomerId());
-    LOG.info("Created universe {} : {}.", universe.universeUUID, universe.name);
-
-    // Add an entry for the universe into the customer table.
-    customer.addUniverseUUID(universe.universeUUID);
-    customer.save();
-
-    LOG.info(
-        "Added universe {} : {} for customer [{}].",
-        universe.universeUUID,
-        universe.name,
-        customer.getCustomerId());
-
+    Universe universe = null;
     TaskType taskType = TaskType.CreateUniverse;
-    Cluster primaryCluster = taskParams.getPrimaryCluster();
 
-    if (primaryCluster != null) {
-      UniverseDefinitionTaskParams.UserIntent primaryIntent = primaryCluster.userIntent;
-      primaryIntent.masterGFlags = trimFlags(primaryIntent.masterGFlags);
-      primaryIntent.tserverGFlags = trimFlags(primaryIntent.tserverGFlags);
-      if (primaryCluster.userIntent.providerType.equals(Common.CloudType.kubernetes)) {
-        taskType = TaskType.CreateKubernetesUniverse;
-        universe.updateConfig(
-            ImmutableMap.of(Universe.HELM2_LEGACY, Universe.HelmLegacy.V3.toString()));
-      } else {
-        if (primaryCluster.userIntent.enableIPV6) {
-          throw new PlatformServiceException(
-              BAD_REQUEST, "IPV6 not supported for platform deployed VMs.");
-        }
-      }
+    Ebean.beginTransaction();
+    try {
+      universe = Universe.create(taskParams, customer.getCustomerId());
+      LOG.info("Created universe {} : {}.", universe.universeUUID, universe.name);
 
-      if (primaryCluster.userIntent.enableNodeToNodeEncrypt) {
-        // create self signed rootCA in case it is not provided by the user.
-        if (taskParams.rootCA == null) {
-          taskParams.rootCA =
-              CertificateHelper.createRootCA(
-                  taskParams.nodePrefix, customer.uuid, appConfig.getString("yb.storage.path"));
-        }
-
-        CertificateInfo cert = CertificateInfo.get(taskParams.rootCA);
-        if (cert.certType == CertificateInfo.Type.CustomServerCert) {
-          throw new PlatformServiceException(
-              BAD_REQUEST,
-              "CustomServerCert are only supported for Client to Server Communication.");
-        }
-
-        if (cert.certType == CertificateInfo.Type.CustomCertHostPath) {
-          if (!taskParams
-              .getPrimaryCluster()
-              .userIntent
-              .providerType
-              .equals(Common.CloudType.onprem)) {
-            throw new PlatformServiceException(
-                BAD_REQUEST,
-                "CustomCertHostPath certificates are only supported for onprem providers.");
-          }
-          checkValidRootCA(taskParams.rootCA);
-        }
-      }
-
-      if (primaryCluster.userIntent.enableClientToNodeEncrypt) {
-        if (taskParams.clientRootCA == null) {
-          if (taskParams.rootCA != null && taskParams.rootAndClientRootCASame) {
-            // Setting ClientRootCA to RootCA incase rootAndClientRootCA is true
-            taskParams.clientRootCA = taskParams.rootCA;
-          } else {
-            // create self signed clientRootCA in case it is not provided by the user
-            // and root and clientRoot CA needs to be different
-            taskParams.clientRootCA =
-                CertificateHelper.createClientRootCA(
-                    taskParams.nodePrefix, customer.uuid, appConfig.getString("yb.storage.path"));
-          }
-        }
-
-        CertificateInfo cert = CertificateInfo.get(taskParams.clientRootCA);
-        if (cert.certType == CertificateInfo.Type.CustomCertHostPath) {
-          if (!taskParams
-              .getPrimaryCluster()
-              .userIntent
-              .providerType
-              .equals(Common.CloudType.onprem)) {
-            throw new PlatformServiceException(
-                BAD_REQUEST,
-                "CustomCertHostPath certificates are only supported for onprem providers.");
-          }
-          checkValidRootCA(taskParams.rootCA);
-        }
-
-        // Setting rootCA to ClientRootCA in case node to node encryption is disabled.
-        // This is necessary to set to ensure backward compatibity as existing parts of
-        // codebase (kubernetes) uses rootCA for Client to Node Encryption
-        if (taskParams.rootCA == null && taskParams.rootAndClientRootCASame) {
-          taskParams.rootCA = taskParams.clientRootCA;
-        }
-
-        // Generate client certs if rootAndClientRootCASame is true and rootCA is self-signed.
-        // This is there only for legacy support, no need if rootCA and clientRootCA are different.
-        if (taskParams.rootAndClientRootCASame) {
-          CertificateInfo rootCert = CertificateInfo.get(taskParams.rootCA);
-          if (rootCert.certType == CertificateInfo.Type.SelfSigned) {
-            CertificateHelper.createClientCertificate(
-                taskParams.rootCA,
-                String.format(
-                    CertificateHelper.CERT_PATH,
-                    appConfig.getString("yb.storage.path"),
-                    customer.uuid.toString(),
-                    taskParams.rootCA.toString()),
-                CertificateHelper.DEFAULT_CLIENT,
-                null,
-                null);
+      if (taskParams.runtimeFlags != null) {
+        // iterate through the flags and set via runtime config
+        for (Map.Entry<String, String> entry : taskParams.runtimeFlags.entrySet()) {
+          if (entry.getValue() != null) {
+            settableRuntimeConfigFactory
+                .forUniverse(universe)
+                .setValue(entry.getKey(), entry.getValue());
           }
         }
       }
 
-      if (primaryCluster.userIntent.enableNodeToNodeEncrypt
-          || primaryCluster.userIntent.enableClientToNodeEncrypt) {
-        // Set the flag to mark the universe as using TLS enabled and therefore not allowing
-        // insecure connections.
-        taskParams.allowInsecure = false;
+      Cluster primaryCluster = taskParams.getPrimaryCluster();
+
+      if (taskParams.enableYbc) {
+        taskParams.ybcSoftwareVersion =
+            StringUtils.isNotBlank(taskParams.ybcSoftwareVersion)
+                ? taskParams.ybcSoftwareVersion
+                : ybcManager.getStableYbcVersion();
       }
 
-      // TODO: (Daniel) - Move this out to an async task
-      if (primaryCluster.userIntent.enableVolumeEncryption
-          && primaryCluster.userIntent.providerType.equals(Common.CloudType.aws)) {
-        byte[] cmkArnBytes =
-            keyManager.generateUniverseKey(
-                taskParams.encryptionAtRestConfig.kmsConfigUUID,
-                universe.universeUUID,
-                taskParams.encryptionAtRestConfig);
-        if (cmkArnBytes == null || cmkArnBytes.length == 0) {
-          primaryCluster.userIntent.enableVolumeEncryption = false;
+      if (primaryCluster != null) {
+        UniverseDefinitionTaskParams.UserIntent primaryIntent = primaryCluster.userIntent;
+        primaryIntent.masterGFlags = trimFlags(primaryIntent.masterGFlags);
+        primaryIntent.tserverGFlags = trimFlags(primaryIntent.tserverGFlags);
+        if (taskParams.enableYbc
+            && Util.compareYbVersions(
+                    primaryIntent.ybSoftwareVersion, Util.YBC_COMPATIBLE_DB_VERSION, true)
+                < 0) {
+          taskParams.enableYbc = false;
+          LOG.error(
+              "Ybc installation is skipped on universe with DB version lower than "
+                  + Util.YBC_COMPATIBLE_DB_VERSION);
+        }
+        if (primaryCluster.userIntent.providerType.equals(Common.CloudType.kubernetes)) {
+          taskType = TaskType.CreateKubernetesUniverse;
+          universe.updateConfig(
+              ImmutableMap.of(Universe.HELM2_LEGACY, Universe.HelmLegacy.V3.toString()));
+          universe.save();
+          // TODO(bhavin192): remove the flag once the new naming style
+          // is stable enough.
+          if (runtimeConfigFactory.globalRuntimeConf().getBoolean("yb.use_new_helm_naming")) {
+            if (Util.compareYbVersions(primaryIntent.ybSoftwareVersion, "2.8.0.0") >= 0) {
+              taskParams.useNewHelmNamingStyle = true;
+            }
+            // TODO(bhavin192): check if
+            // taskParams.useNewHelmNamingStyle is set to true for
+            // ybSoftwareVersion < 2.8.0.0? If so, respond with error.
+          }
         } else {
-          // TODO: (Daniel) - Update this to be inside of encryptionAtRestConfig
-          taskParams.cmkArn = new String(cmkArnBytes);
+          if (primaryCluster.userIntent.enableIPV6) {
+            throw new PlatformServiceException(
+                BAD_REQUEST, "IPV6 not supported for platform deployed VMs.");
+          }
+        }
+
+        setUpXClusterSettings(taskParams);
+
+        checkForCertificates(customer, taskParams);
+
+        if (primaryCluster.userIntent.enableNodeToNodeEncrypt
+            || primaryCluster.userIntent.enableClientToNodeEncrypt) {
+          // Set the flag to mark the universe as using TLS enabled and therefore not
+          // allowing insecure connections.
+          taskParams.allowInsecure = false;
+        }
+
+        // TODO: (Daniel) - Move this out to an async task
+        if (primaryCluster.userIntent.enableVolumeEncryption
+            && primaryCluster.userIntent.providerType.equals(Common.CloudType.aws)) {
+          byte[] cmkArnBytes =
+              keyManager.generateUniverseKey(
+                  taskParams.encryptionAtRestConfig.kmsConfigUUID,
+                  universe.universeUUID,
+                  taskParams.encryptionAtRestConfig);
+          if (cmkArnBytes == null || cmkArnBytes.length == 0) {
+            primaryCluster.userIntent.enableVolumeEncryption = false;
+          } else {
+            // TODO: (Daniel) - Update this to be inside of encryptionAtRestConfig
+            taskParams.cmkArn = new String(cmkArnBytes);
+          }
+        }
+        if (Universe.shouldEnableHttpsUI(
+            primaryIntent.enableNodeToNodeEncrypt, primaryIntent.ybSoftwareVersion)) {
+          universe.updateConfig(ImmutableMap.of(Universe.HTTPS_ENABLED_UI, "true"));
         }
       }
-    }
 
-    universe.updateConfig(ImmutableMap.of(Universe.TAKE_BACKUPS, "true"));
+      universe.updateConfig(ImmutableMap.of(Universe.TAKE_BACKUPS, "true"));
+      universe.save();
+      // If cloud enabled and deployment AZs have two subnets, mark the cluster as a
+      // non legacy cluster for proper operations.
+      if (cloudEnabled) {
+        Provider provider =
+            Provider.getOrBadRequest(UUID.fromString(primaryCluster.userIntent.provider));
+        AvailabilityZone zone = provider.regions.get(0).zones.get(0);
+        if (zone.secondarySubnet != null) {
+          universe.updateConfig(ImmutableMap.of(Universe.DUAL_NET_LEGACY, "false"));
+          universe.save();
+        }
+      }
+
+      universe.updateConfig(
+          ImmutableMap.of(
+              Universe.USE_CUSTOM_IMAGE,
+              Boolean.toString(taskParams.nodeDetailsSet.stream().allMatch(n -> n.ybPrebuiltAmi))));
+      universe.save();
+
+      Ebean.commitTransaction();
+
+    } catch (Exception e) {
+      LOG.info("Universe wasn't created because of the error: {}", e.getMessage());
+      throw e;
+    } finally {
+      Ebean.endTransaction();
+    }
 
     // Submit the task to create the universe.
     UUID taskUUID = commissioner.submit(taskType, taskParams);
@@ -398,6 +685,14 @@ public class UniverseCRUDHandler {
    */
   public UUID update(Customer customer, Universe u, UniverseDefinitionTaskParams taskParams) {
     checkCanEdit(customer, u);
+    checkTaskParamsForUpdate(u, taskParams);
+    if (u.isYbcEnabled()) {
+      taskParams.installYbc = true;
+      taskParams.enableYbc = true;
+      taskParams.ybcSoftwareVersion = u.getUniverseDetails().ybcSoftwareVersion;
+      taskParams.ybcInstalled = true;
+    }
+
     if (taskParams.getPrimaryCluster() == null) {
       // Update of a read only cluster.
       return updateCluster(customer, u, taskParams);
@@ -408,6 +703,9 @@ public class UniverseCRUDHandler {
 
   private UUID updatePrimaryCluster(
       Customer customer, Universe u, UniverseDefinitionTaskParams taskParams) {
+
+    checkGeoPartitioningParameters(customer, taskParams, OpType.UPDATE);
+
     // Update Primary cluster
     Cluster primaryCluster = taskParams.getPrimaryCluster();
     TaskType taskType = TaskType.EditUniverse;
@@ -428,8 +726,13 @@ public class UniverseCRUDHandler {
     Cluster cluster = getOnlyReadReplicaOrBadRequest(taskParams.getReadOnlyClusters());
     PlacementInfoUtil.updatePlacementInfo(
         taskParams.getNodesInCluster(cluster.uuid), cluster.placementInfo);
-    return submitEditUniverse(
-        customer, u, taskParams, TaskType.EditUniverse, CustomerTask.TargetType.Cluster);
+    TaskType taskType = TaskType.EditUniverse;
+    if (cluster.userIntent.providerType.equals(Common.CloudType.kubernetes)) {
+      taskType = TaskType.EditKubernetesUniverse;
+      notHelm2LegacyOrBadRequest(u);
+      checkHelmChartExists(cluster.userIntent.ybSoftwareVersion);
+    }
+    return submitEditUniverse(customer, u, taskParams, taskType, CustomerTask.TargetType.Cluster);
   }
 
   /** Merge node exporter related information from current universe details to the task params */
@@ -595,61 +898,96 @@ public class UniverseCRUDHandler {
     LOG.info("Create cluster for {} in {}.", customer.uuid, universe.universeUUID);
     // Get the user submitted form data.
 
-    if (taskParams.clusters == null || taskParams.clusters.size() != 1)
+    if (taskParams.clusters == null || taskParams.clusters.size() != 1) {
       throw new PlatformServiceException(
           BAD_REQUEST,
           "Invalid 'clusters' field/size: "
               + taskParams.clusters
               + " for "
               + universe.universeUUID);
+    }
 
-    List<Cluster> newReadOnlyClusters = taskParams.clusters;
+    if (universe.isYbcEnabled()) {
+      taskParams.installYbc = true;
+      taskParams.enableYbc = true;
+      taskParams.ybcSoftwareVersion = universe.getUniverseDetails().ybcSoftwareVersion;
+      taskParams.ybcInstalled = true;
+    }
+
+    List<Cluster> newReadOnlyClusters = taskParams.getReadOnlyClusters();
+    List<Cluster> newAddOnClusters = taskParams.getAddOnClusters();
     List<Cluster> existingReadOnlyClusters = universe.getUniverseDetails().getReadOnlyClusters();
     LOG.info(
-        "newReadOnly={}, existingRO={}.",
+        "newReadOnly={}, existingReadOnly={}, newAddOn={}",
         newReadOnlyClusters.size(),
-        existingReadOnlyClusters.size());
+        existingReadOnlyClusters.size(),
+        newAddOnClusters.size());
 
-    if (existingReadOnlyClusters.size() > 0 && newReadOnlyClusters.size() > 0) {
+    if (newReadOnlyClusters.size() > 0 && newAddOnClusters.size() > 0) {
       throw new PlatformServiceException(
-          BAD_REQUEST, "Can only have one read-only cluster per universe for now.");
+          BAD_REQUEST, "Cannot create both read-only and add-on clusters at the same time.");
     }
 
-    Cluster cluster = getOnlyReadReplicaOrBadRequest(newReadOnlyClusters);
-    if (cluster.uuid == null) {
-      String errMsg = "UUID of read-only cluster should be non-null.";
+    if (newReadOnlyClusters.size() > 0) {
+      return createReadReplicaCluster(
+          customer, universe, taskParams, existingReadOnlyClusters, newReadOnlyClusters);
+    } else if (newAddOnClusters.size() > 0) {
+      return createAddOnCluster(customer, universe, taskParams, newAddOnClusters);
+    } else {
+      throw new PlatformServiceException(BAD_REQUEST, "Unknown cluster type specified");
+    }
+  }
+
+  public UUID createAddOnCluster(
+      Customer customer,
+      Universe universe,
+      UniverseDefinitionTaskParams taskParams,
+      List<Cluster> newAddOnClusters) {
+
+    if (newAddOnClusters.size() > 1) {
+      throw new PlatformServiceException(
+          BAD_REQUEST, "Cannot create more than one add-on cluster at a time.");
+    }
+
+    Cluster addOnCluster = newAddOnClusters.get(0);
+    if (addOnCluster.uuid == null) {
+      String errMsg = "UUID of add-on cluster should be non-null.";
       LOG.error(errMsg);
       throw new PlatformServiceException(BAD_REQUEST, errMsg);
     }
 
-    if (cluster.clusterType != UniverseDefinitionTaskParams.ClusterType.ASYNC) {
+    if (addOnCluster.clusterType != ClusterType.ADDON) {
       String errMsg =
-          "Read-only cluster type should be "
-              + UniverseDefinitionTaskParams.ClusterType.ASYNC
+          "AddOn cluster type should be "
+              + ClusterType.ADDON
               + " but is "
-              + cluster.clusterType;
+              + addOnCluster.clusterType;
       LOG.error(errMsg);
       throw new PlatformServiceException(BAD_REQUEST, errMsg);
     }
+    Cluster primaryCluster = universe.getUniverseDetails().getPrimaryCluster();
+    taskParams.clusters.add(primaryCluster);
+    // validateConsistency(primaryCluster, readOnlyCluster); // TODO: do we need this?
 
     // Set the provider code.
-    Cluster c = taskParams.clusters.get(0);
-    Provider provider = Provider.getOrBadRequest(UUID.fromString(c.userIntent.provider));
-    c.userIntent.providerType = Common.CloudType.valueOf(provider.code);
-    c.validate();
+    Provider provider = Provider.getOrBadRequest(UUID.fromString(addOnCluster.userIntent.provider));
+    addOnCluster.userIntent.providerType = Common.CloudType.valueOf(provider.code);
+    addOnCluster.validate(
+        !runtimeConfigFactory.forCustomer(customer).getBoolean("yb.cloud.enabled"));
 
-    if (c.userIntent.providerType.equals(Common.CloudType.kubernetes)) {
-      try {
-        checkK8sProviderAvailability(provider, customer);
-      } catch (IllegalArgumentException e) {
-        throw new PlatformServiceException(BAD_REQUEST, e.getMessage());
-      }
+    TaskType taskType = TaskType.AddOnClusterCreate;
+    if (addOnCluster.userIntent.providerType.equals(Common.CloudType.kubernetes)) {
+      // TODO: Do we need to support this?
+      throw new PlatformServiceException(
+          BAD_REQUEST, "Kubernetes provider is not supported for add-on clusters.");
     }
 
-    PlacementInfoUtil.updatePlacementInfo(taskParams.getNodesInCluster(c.uuid), c.placementInfo);
+    // TODO: do we need this?
+    PlacementInfoUtil.updatePlacementInfo(
+        taskParams.getNodesInCluster(addOnCluster.uuid), addOnCluster.placementInfo);
 
     // Submit the task to create the cluster.
-    UUID taskUUID = commissioner.submit(TaskType.ReadOnlyClusterCreate, taskParams);
+    UUID taskUUID = commissioner.submit(taskType, taskParams);
     LOG.info(
         "Submitted create cluster for {}:{}, task uuid = {}.",
         universe.universeUUID,
@@ -672,28 +1010,171 @@ public class UniverseCRUDHandler {
     return taskUUID;
   }
 
+  public UUID createReadReplicaCluster(
+      Customer customer,
+      Universe universe,
+      UniverseDefinitionTaskParams taskParams,
+      List<Cluster> existingReadOnlyClusters,
+      List<Cluster> newReadOnlyClusters) {
+
+    if (existingReadOnlyClusters.size() > 0 && newReadOnlyClusters.size() > 0) {
+      throw new PlatformServiceException(
+          BAD_REQUEST, "Can only have one read-only cluster per universe for now.");
+    }
+
+    Cluster readOnlyCluster = getOnlyReadReplicaOrBadRequest(newReadOnlyClusters);
+    if (readOnlyCluster.uuid == null) {
+      String errMsg = "UUID of read-only cluster should be non-null.";
+      LOG.error(errMsg);
+      throw new PlatformServiceException(BAD_REQUEST, errMsg);
+    }
+
+    if (readOnlyCluster.clusterType != UniverseDefinitionTaskParams.ClusterType.ASYNC) {
+      String errMsg =
+          "Read-only cluster type should be "
+              + UniverseDefinitionTaskParams.ClusterType.ASYNC
+              + " but is "
+              + readOnlyCluster.clusterType;
+      LOG.error(errMsg);
+      throw new PlatformServiceException(BAD_REQUEST, errMsg);
+    }
+    Cluster primaryCluster = universe.getUniverseDetails().getPrimaryCluster();
+    taskParams.clusters.add(primaryCluster);
+    validateConsistency(primaryCluster, readOnlyCluster);
+
+    // Set the provider code.
+    Provider provider =
+        Provider.getOrBadRequest(UUID.fromString(readOnlyCluster.userIntent.provider));
+    readOnlyCluster.userIntent.providerType = Common.CloudType.valueOf(provider.code);
+    readOnlyCluster.validate(
+        !runtimeConfigFactory.forCustomer(customer).getBoolean("yb.cloud.enabled"));
+
+    TaskType taskType = TaskType.ReadOnlyClusterCreate;
+    if (readOnlyCluster.userIntent.providerType.equals(Common.CloudType.kubernetes)) {
+      try {
+        checkK8sProviderAvailability(provider, customer);
+        taskType = TaskType.ReadOnlyKubernetesClusterCreate;
+      } catch (IllegalArgumentException e) {
+        throw new PlatformServiceException(BAD_REQUEST, e.getMessage());
+      }
+    }
+
+    PlacementInfoUtil.updatePlacementInfo(
+        taskParams.getNodesInCluster(readOnlyCluster.uuid), readOnlyCluster.placementInfo);
+
+    // Submit the task to create the cluster.
+    UUID taskUUID = commissioner.submit(taskType, taskParams);
+    LOG.info(
+        "Submitted create cluster for {}:{}, task uuid = {}.",
+        universe.universeUUID,
+        universe.name,
+        taskUUID);
+
+    // Add this task uuid to the user universe.
+    CustomerTask.create(
+        customer,
+        universe.universeUUID,
+        taskUUID,
+        CustomerTask.TargetType.Cluster,
+        CustomerTask.TaskType.Create,
+        universe.name);
+    LOG.info(
+        "Saved task uuid {} in customer tasks table for universe {}:{}",
+        taskUUID,
+        universe.universeUUID,
+        universe.name);
+    return taskUUID;
+  }
+
+  static void validateConsistency(Cluster primaryCluster, Cluster cluster) {
+    checkEquals(c -> c.userIntent.enableYSQL, primaryCluster, cluster, "Ysql setting");
+    checkEquals(c -> c.userIntent.enableYSQLAuth, primaryCluster, cluster, "Ysql auth setting");
+    checkEquals(c -> c.userIntent.enableYCQL, primaryCluster, cluster, "Ycql setting");
+    checkEquals(c -> c.userIntent.enableYCQLAuth, primaryCluster, cluster, "Ycql auth setting");
+    checkEquals(c -> c.userIntent.enableYEDIS, primaryCluster, cluster, "Yedis setting");
+    checkEquals(
+        c -> c.userIntent.enableClientToNodeEncrypt,
+        primaryCluster,
+        cluster,
+        "Client to node encrypt setting");
+    checkEquals(
+        c -> c.userIntent.enableNodeToNodeEncrypt,
+        primaryCluster,
+        cluster,
+        "Node to node encrypt setting");
+    checkEquals(
+        c -> c.userIntent.assignPublicIP, primaryCluster, cluster, "Assign public IP setting");
+  }
+
+  private static void checkEquals(
+      Function<Cluster, Object> extractor,
+      Cluster primaryCluster,
+      Cluster readonlyCluster,
+      String errorPrefix) {
+    if (!Objects.equals(extractor.apply(primaryCluster), extractor.apply(readonlyCluster))) {
+      String error =
+          errorPrefix
+              + " should be the same for primary and readonly replica "
+              + extractor.apply(primaryCluster)
+              + " vs "
+              + extractor.apply(readonlyCluster);
+      LOG.error(error);
+      throw new PlatformServiceException(BAD_REQUEST, error);
+    }
+  }
+
   public UUID clusterDelete(
       Customer customer, Universe universe, UUID clusterUUID, Boolean isForceDelete) {
-    List<Cluster> existingReadOnlyClusters = universe.getUniverseDetails().getReadOnlyClusters();
+    List<Cluster> existingNonPrimaryClusters =
+        universe.getUniverseDetails().getNonPrimaryClusters();
 
-    Cluster cluster = getOnlyReadReplicaOrBadRequest(existingReadOnlyClusters);
-    UUID uuid = cluster.uuid;
-    if (!uuid.equals(clusterUUID)) {
-      String errMsg =
-          "Uuid " + clusterUUID + " to delete cluster not found, only " + uuid + " found.";
+    Cluster cluster =
+        existingNonPrimaryClusters
+            .stream()
+            .filter(c -> c.uuid.equals(clusterUUID))
+            .findFirst()
+            .orElse(null);
+    if (cluster == null) {
+      String errMsg = "Uuid " + clusterUUID + " to delete cluster not found.";
       LOG.error(errMsg);
       throw new PlatformServiceException(BAD_REQUEST, errMsg);
     }
 
     // Create the Commissioner task to destroy the universe.
-    ReadOnlyClusterDelete.Params taskParams = new ReadOnlyClusterDelete.Params();
-    taskParams.universeUUID = universe.universeUUID;
-    taskParams.clusterUUID = clusterUUID;
-    taskParams.isForceDelete = isForceDelete;
-    taskParams.expectedUniverseVersion = universe.version;
+    UUID taskUUID;
+    if (cluster.userIntent.providerType.equals(Common.CloudType.kubernetes)) {
+      ReadOnlyKubernetesClusterDelete.Params taskParams =
+          new ReadOnlyKubernetesClusterDelete.Params();
+      taskParams.universeUUID = universe.universeUUID;
+      taskParams.clusterUUID = clusterUUID;
+      taskParams.isForceDelete = isForceDelete;
+      taskParams.expectedUniverseVersion = universe.version;
+      taskUUID = commissioner.submit(TaskType.ReadOnlyKubernetesClusterDelete, taskParams);
+    } else {
+      switch (cluster.clusterType) {
+        case ASYNC:
+          ReadOnlyClusterDelete.Params taskParams = new ReadOnlyClusterDelete.Params();
+          taskParams.universeUUID = universe.universeUUID;
+          taskParams.clusterUUID = clusterUUID;
+          taskParams.isForceDelete = isForceDelete;
+          taskParams.expectedUniverseVersion = universe.version;
+          // Submit the task to delete the cluster.
+          taskUUID = commissioner.submit(TaskType.ReadOnlyClusterDelete, taskParams);
+          break;
+        case ADDON:
+          AddOnClusterDelete.Params addonParams = new AddOnClusterDelete.Params();
+          addonParams.universeUUID = universe.universeUUID;
+          addonParams.clusterUUID = clusterUUID;
+          addonParams.isForceDelete = isForceDelete;
+          addonParams.expectedUniverseVersion = universe.version;
+          // Submit the task to delete the cluster.
+          taskUUID = commissioner.submit(TaskType.AddOnClusterDelete, addonParams);
+          break;
+        default:
+          throw new PlatformServiceException(BAD_REQUEST, "Invalid cluster type");
+      }
+    }
 
-    // Submit the task to delete the cluster.
-    UUID taskUUID = commissioner.submit(TaskType.ReadOnlyClusterDelete, taskParams);
     LOG.info(
         "Submitted delete cluster for {} in {}, task uuid = {}.",
         clusterUUID,
@@ -737,7 +1218,7 @@ public class UniverseCRUDHandler {
     boolean isNamespaceSet = false;
     for (Region r : Region.getByProvider(providerToCheck.uuid)) {
       for (AvailabilityZone az : AvailabilityZone.getAZsForRegion(r.uuid)) {
-        if (az.getConfig().containsKey("KUBENAMESPACE")) {
+        if (az.getUnmaskedConfig().containsKey("KUBENAMESPACE")) {
           isNamespaceSet = true;
         }
       }
@@ -746,7 +1227,7 @@ public class UniverseCRUDHandler {
     if (isNamespaceSet) {
       for (UUID universeUUID : Universe.getAllUUIDs(customer)) {
         Universe u = Universe.getOrBadRequest(universeUUID);
-        List<Cluster> clusters = u.getUniverseDetails().getReadOnlyClusters();
+        List<Cluster> clusters = u.getUniverseDetails().getNonPrimaryClusters();
         clusters.add(u.getUniverseDetails().getPrimaryCluster());
         for (Cluster c : clusters) {
           UUID providerUUID = UUID.fromString(c.userIntent.provider);
@@ -823,18 +1304,7 @@ public class UniverseCRUDHandler {
               "VM image upgrade is only supported for AWS / GCP, got: " + provider.toString());
         }
 
-        boolean hasEphemeralStorage = false;
-        if (provider == Common.CloudType.gcp) {
-          if (primaryIntent.deviceInfo.storageType == PublicCloudConstants.StorageType.Scratch) {
-            hasEphemeralStorage = true;
-          }
-        } else {
-          if (taskParams.getPrimaryCluster().isAwsClusterWithEphemeralStorage()) {
-            hasEphemeralStorage = true;
-          }
-        }
-
-        if (hasEphemeralStorage) {
+        if (UniverseDefinitionTaskParams.hasEphemeralStorage(primaryIntent)) {
           throw new PlatformServiceException(
               BAD_REQUEST, "Cannot upgrade a universe with ephemeral storage");
         }
@@ -847,11 +1317,6 @@ public class UniverseCRUDHandler {
         customerTaskType = CustomerTask.TaskType.UpgradeVMImage;
         break;
       case ResizeNode:
-        if (!runtimeConfigFactory.forUniverse(universe).getBoolean("yb.cloud.enabled")) {
-          throw new PlatformServiceException(
-              Http.Status.METHOD_NOT_ALLOWED, "Smart resizing is disabled");
-        }
-
         Common.CloudType providerType =
             universe.getUniverseDetails().getPrimaryCluster().userIntent.providerType;
         if (!(providerType.equals(Common.CloudType.gcp)
@@ -921,12 +1386,12 @@ public class UniverseCRUDHandler {
               BAD_REQUEST, "Certs can only be rotated for onprem." + taskParams.taskType);
         }
         CertificateInfo cert = CertificateInfo.get(taskParams.certUUID);
-        if (cert.certType != CertificateInfo.Type.CustomCertHostPath) {
+        if (cert.certType != CertConfigType.CustomCertHostPath) {
           throw new PlatformServiceException(
               BAD_REQUEST, "Need a custom cert. Cannot use self-signed." + taskParams.taskType);
         }
         cert = CertificateInfo.get(universe.getUniverseDetails().rootCA);
-        if (cert.certType != CertificateInfo.Type.CustomCertHostPath) {
+        if (cert.certType != CertConfigType.CustomCertHostPath) {
           throw new PlatformServiceException(
               BAD_REQUEST, "Only custom certs can be rotated." + taskParams.taskType);
         }
@@ -1003,16 +1468,12 @@ public class UniverseCRUDHandler {
     if (taskParams.size == 0) {
       throw new PlatformServiceException(BAD_REQUEST, "Size cannot be 0.");
     }
-
     UniverseDefinitionTaskParams.UserIntent primaryIntent =
         taskParams.getPrimaryCluster().userIntent;
     if (taskParams.size <= primaryIntent.deviceInfo.volumeSize) {
       throw new PlatformServiceException(BAD_REQUEST, "Size can only be increased.");
     }
-    if (primaryIntent.deviceInfo.storageType == PublicCloudConstants.StorageType.Scratch) {
-      throw new PlatformServiceException(BAD_REQUEST, "Scratch type disk cannot be modified.");
-    }
-    if (taskParams.getPrimaryCluster().isAwsClusterWithEphemeralStorage()) {
+    if (UniverseDefinitionTaskParams.hasEphemeralStorage(primaryIntent)) {
       throw new PlatformServiceException(BAD_REQUEST, "Cannot modify instance volumes.");
     }
 
@@ -1031,8 +1492,7 @@ public class UniverseCRUDHandler {
         .userIntent
         .providerType
         .equals(Common.CloudType.kubernetes)) {
-      throw new PlatformServiceException(
-          BAD_REQUEST, "Kubernetes disk size increase not yet supported.");
+      taskType = TaskType.UpdateKubernetesDiskSize;
     }
 
     UUID taskUUID = commissioner.submit(taskType, taskParams);
@@ -1062,36 +1522,48 @@ public class UniverseCRUDHandler {
 
   public UUID tlsConfigUpdate(
       Customer customer, Universe universe, TlsConfigUpdateParams taskParams) {
+
+    LOG.info("tlsConfigUpdate: {}", Json.toJson(CommonUtils.maskObject(taskParams)));
+
     UniverseDefinitionTaskParams universeDetails = universe.getUniverseDetails();
     UserIntent userIntent = universeDetails.getPrimaryCluster().userIntent;
-
-    boolean tlsToggle =
-        ((taskParams.enableNodeToNodeEncrypt != null
-                && taskParams.enableNodeToNodeEncrypt != userIntent.enableNodeToNodeEncrypt)
-            || (taskParams.enableClientToNodeEncrypt != null
-                && taskParams.enableClientToNodeEncrypt != userIntent.enableClientToNodeEncrypt));
-    boolean certsRotate =
-        ((taskParams.rootCA != null && !taskParams.rootCA.equals(universeDetails.rootCA))
-                || (taskParams.clientRootCA != null
-                    && !taskParams.clientRootCA.equals(universeDetails.clientRootCA)))
-            || taskParams.createNewRootCA
-            || taskParams.createNewClientRootCA;
 
     if (taskParams.rootAndClientRootCASame == null) {
       throw new PlatformServiceException(
           Status.BAD_REQUEST, "rootAndClientRootCASame cannot be null.");
     }
 
+    boolean nodeToNodeChange =
+        taskParams.enableNodeToNodeEncrypt != null
+            && taskParams.enableNodeToNodeEncrypt != userIntent.enableNodeToNodeEncrypt;
+    boolean clientToNodeChange =
+        taskParams.enableClientToNodeEncrypt != null
+            && taskParams.enableClientToNodeEncrypt != userIntent.enableClientToNodeEncrypt;
+    boolean tlsToggle = (nodeToNodeChange || clientToNodeChange);
+
+    boolean rootCaChange =
+        taskParams.rootCA != null && !taskParams.rootCA.equals(universeDetails.rootCA);
+    boolean clientRootCaChange =
+        !taskParams.rootAndClientRootCASame
+            && taskParams.clientRootCA != null
+            && !taskParams.clientRootCA.equals(universeDetails.clientRootCA);
+    boolean certsRotate =
+        rootCaChange
+            || clientRootCaChange
+            || taskParams.createNewRootCA
+            || taskParams.createNewClientRootCA
+            || taskParams.selfSignedServerCertRotate
+            || taskParams.selfSignedClientCertRotate;
+
     if (tlsToggle && certsRotate) {
-      if ((universeDetails.rootCA == null && taskParams.rootCA != null)
-          || (universeDetails.rootCA == null && taskParams.createNewRootCA)
-          || (universeDetails.clientRootCA == null && taskParams.clientRootCA != null)
-          || (universeDetails.clientRootCA == null && taskParams.createNewClientRootCA)) {
-        certsRotate = false;
-      } else {
+      if (((rootCaChange || taskParams.createNewRootCA) && universeDetails.rootCA != null)
+          || ((clientRootCaChange || taskParams.createNewClientRootCA)
+              && universeDetails.clientRootCA != null)) {
         throw new PlatformServiceException(
             Status.BAD_REQUEST,
             "Cannot enable/disable TLS along with cert rotation. Perform them individually.");
+      } else {
+        certsRotate = false;
       }
     }
 
@@ -1100,21 +1572,46 @@ public class UniverseCRUDHandler {
           Status.BAD_REQUEST, "No changes in Tls parameters, cannot perform upgrade.");
     }
 
+    if (certsRotate
+        && ((rootCaChange && taskParams.selfSignedServerCertRotate)
+            || (clientRootCaChange && taskParams.selfSignedClientCertRotate))) {
+      throw new PlatformServiceException(
+          Status.BAD_REQUEST,
+          "Cannot update rootCA/clientRootCA when "
+              + "selfSignedServerCertRotate/selfSignedClientCertRotate is set to true");
+    }
+
+    if (certsRotate
+        && ((taskParams.createNewRootCA && taskParams.selfSignedServerCertRotate)
+            || (taskParams.createNewClientRootCA && taskParams.selfSignedClientCertRotate))) {
+      throw new PlatformServiceException(
+          Status.BAD_REQUEST,
+          "Cannot create new rootCA/clientRootCA when "
+              + "selfSignedServerCertRotate/selfSignedClientCertRotate is set to true");
+    }
+
     if (tlsToggle) {
       boolean isRootCA =
-          CertificateHelper.isRootCARequired(
+          EncryptionInTransitUtil.isRootCARequired(
               taskParams.enableNodeToNodeEncrypt,
               taskParams.enableClientToNodeEncrypt,
               taskParams.rootAndClientRootCASame);
       boolean isClientRootCA =
-          CertificateHelper.isClientRootCARequired(
+          EncryptionInTransitUtil.isClientRootCARequired(
               taskParams.enableNodeToNodeEncrypt,
               taskParams.enableClientToNodeEncrypt,
               taskParams.rootAndClientRootCASame);
 
-      TlsToggleParams tlsToggleParams = new TlsToggleParams();
-      tlsToggleParams.enableNodeToNodeEncrypt = taskParams.enableNodeToNodeEncrypt;
-      tlsToggleParams.enableClientToNodeEncrypt = taskParams.enableClientToNodeEncrypt;
+      // taskParams has the same subset of overridable fields as TlsToggleParams.
+      // taskParams is already merged with universe details.
+      TlsToggleParams tlsToggleParams;
+      try {
+        tlsToggleParams =
+            Json.mapper().treeToValue(Json.mapper().valueToTree(taskParams), TlsToggleParams.class);
+      } catch (JsonProcessingException e) {
+        throw new PlatformServiceException(BAD_REQUEST, e.getMessage());
+      }
+
       tlsToggleParams.allowInsecure =
           !(taskParams.enableNodeToNodeEncrypt || taskParams.enableClientToNodeEncrypt);
       tlsToggleParams.rootCA =
@@ -1123,59 +1620,189 @@ public class UniverseCRUDHandler {
           isClientRootCA
               ? (!taskParams.createNewClientRootCA ? taskParams.clientRootCA : null)
               : null;
-      tlsToggleParams.rootAndClientRootCASame = taskParams.rootAndClientRootCASame;
-      tlsToggleParams.upgradeOption = taskParams.upgradeOption;
-      tlsToggleParams.sleepAfterMasterRestartMillis = taskParams.sleepAfterMasterRestartMillis;
-      tlsToggleParams.sleepAfterTServerRestartMillis = taskParams.sleepAfterTServerRestartMillis;
       return upgradeUniverseHandler.toggleTls(tlsToggleParams, customer, universe);
     }
 
-    if (certsRotate) {
-      boolean isRootCA =
-          CertificateHelper.isRootCARequired(
-              userIntent.enableNodeToNodeEncrypt,
-              userIntent.enableClientToNodeEncrypt,
-              taskParams.rootAndClientRootCASame);
-      boolean isClientRootCA =
-          CertificateHelper.isClientRootCARequired(
-              userIntent.enableNodeToNodeEncrypt,
-              userIntent.enableClientToNodeEncrypt,
-              taskParams.rootAndClientRootCASame);
+    boolean isRootCA =
+        EncryptionInTransitUtil.isRootCARequired(
+            userIntent.enableNodeToNodeEncrypt,
+            userIntent.enableClientToNodeEncrypt,
+            taskParams.rootAndClientRootCASame);
+    boolean isClientRootCA =
+        EncryptionInTransitUtil.isClientRootCARequired(
+            userIntent.enableNodeToNodeEncrypt,
+            userIntent.enableClientToNodeEncrypt,
+            taskParams.rootAndClientRootCASame);
 
-      if (isRootCA && taskParams.createNewRootCA) {
-        taskParams.rootCA =
-            CertificateHelper.createRootCA(
-                universeDetails.nodePrefix,
-                customer.uuid,
-                runtimeConfigFactory.staticApplicationConf().getString("yb.storage.path"));
-      }
-
-      if (isClientRootCA && taskParams.createNewClientRootCA) {
-        taskParams.clientRootCA =
-            CertificateHelper.createClientRootCA(
-                universeDetails.nodePrefix,
-                customer.uuid,
-                runtimeConfigFactory.staticApplicationConf().getString("yb.storage.path"));
-      }
-
-      CertsRotateParams certsRotateParams = new CertsRotateParams();
-      certsRotateParams.rootCA = isRootCA ? taskParams.rootCA : null;
-      certsRotateParams.clientRootCA = isClientRootCA ? taskParams.clientRootCA : null;
-      certsRotateParams.rootAndClientRootCASame = taskParams.rootAndClientRootCASame;
-      certsRotateParams.upgradeOption = taskParams.upgradeOption;
-      certsRotateParams.sleepAfterMasterRestartMillis = taskParams.sleepAfterMasterRestartMillis;
-      certsRotateParams.sleepAfterTServerRestartMillis = taskParams.sleepAfterTServerRestartMillis;
-      return upgradeUniverseHandler.rotateCerts(certsRotateParams, customer, universe);
+    if (isRootCA && taskParams.createNewRootCA) {
+      taskParams.rootCA =
+          CertificateHelper.createRootCA(
+              runtimeConfigFactory.staticApplicationConf(),
+              universeDetails.nodePrefix,
+              customer.uuid);
     }
 
-    return null;
+    if (isClientRootCA && taskParams.createNewClientRootCA) {
+      taskParams.clientRootCA =
+          CertificateHelper.createClientRootCA(
+              runtimeConfigFactory.staticApplicationConf(),
+              universeDetails.nodePrefix,
+              customer.uuid);
+    }
+    // taskParams has the same subset of overridable fields as CertsRotateParams.
+    // taskParams is already merged with universe details.
+    CertsRotateParams certsRotateParams;
+    try {
+      certsRotateParams =
+          Json.mapper().treeToValue(Json.mapper().valueToTree(taskParams), CertsRotateParams.class);
+    } catch (JsonProcessingException e) {
+      throw new PlatformServiceException(BAD_REQUEST, e.getMessage());
+    }
+    LOG.info("CertsRotateParams : {}", Json.toJson(CommonUtils.maskObject(certsRotateParams)));
+    return upgradeUniverseHandler.rotateCerts(certsRotateParams, customer, universe);
   }
 
   private void checkHelmChartExists(String ybSoftwareVersion) {
     try {
-      kubernetesManager.getHelmPackagePath(ybSoftwareVersion);
+      kubernetesManagerFactory.getManager().getHelmPackagePath(ybSoftwareVersion);
     } catch (RuntimeException e) {
       throw new PlatformServiceException(BAD_REQUEST, e.getMessage());
+    }
+  }
+
+  // This compares and validates an input node with the existing node that is not in ToBeAddedState.
+  private void checkNodesForUpdate(
+      Cluster cluster, NodeDetails existingNode, NodeDetails inputNode) {
+    if (inputNode.cloudInfo == null) {
+      String errMsg = String.format("Node name %s must have cloudInfo", inputNode.nodeName);
+      LOG.error(errMsg);
+      throw new PlatformServiceException(BAD_REQUEST, errMsg);
+    }
+    if (existingNode.cloudInfo != null
+        && !Objects.equals(inputNode.cloudInfo.private_ip, existingNode.cloudInfo.private_ip)) {
+      String errMsg =
+          String.format(
+              "Illegal attempt to change private ip to %s for node %s",
+              inputNode.cloudInfo.private_ip, inputNode.nodeName);
+      LOG.error(errMsg);
+      throw new PlatformServiceException(BAD_REQUEST, errMsg);
+    }
+    // TODO compare other node fields here.
+  }
+
+  // This validates the input nodes in a cluster by comparing with the existing nodes in the
+  // universe.
+  private void checkNodesInClusterForUpdate(
+      Cluster cluster, Set<NodeDetails> existingNodes, Set<NodeDetails> inputNodes) {
+    AtomicInteger inputNodesInToBeRemoved = new AtomicInteger();
+    Set<String> forbiddenIps =
+        Arrays.stream(appConfig.getString("yb.security.forbidden_ips", "").split("[, ]"))
+            .filter(StringUtils::isNotBlank)
+            .collect(Collectors.toSet());
+
+    // Collect all the nodes which are not in ToBeAdded state and validate.
+    Map<String, NodeDetails> inputNodesMap =
+        inputNodes
+            .stream()
+            .filter(
+                node -> {
+                  if (node.state != NodeState.ToBeAdded) {
+                    if (node.state == NodeState.ToBeRemoved) {
+                      inputNodesInToBeRemoved.incrementAndGet();
+                    }
+                    return true;
+                  }
+                  // Nodes in ToBeAdded must not have names.
+                  if (StringUtils.isNotBlank(node.nodeName)) {
+                    String errMsg = String.format("Node name %s cannot be present", node.nodeName);
+                    LOG.error(errMsg);
+                    throw new PlatformServiceException(BAD_REQUEST, errMsg);
+                  }
+                  if (node.cloudInfo != null
+                      && node.cloudInfo.private_ip != null
+                      && forbiddenIps.contains(node.cloudInfo.private_ip)) {
+                    String errMsg =
+                        String.format("Forbidden ip %s for node", node.cloudInfo.private_ip);
+                    LOG.error(errMsg);
+                    throw new PlatformServiceException(BAD_REQUEST, errMsg);
+                  }
+                  return false;
+                })
+            .collect(
+                Collectors.toMap(
+                    NodeDetails::getNodeName,
+                    Function.identity(),
+                    (existing, replacement) -> {
+                      String errMsg = "Duplicate node name " + existing;
+                      LOG.error(errMsg);
+                      throw new PlatformServiceException(BAD_REQUEST, errMsg);
+                    }));
+
+    // Ensure all the input nodes for a cluster in the input are not set to ToBeRemoved.
+    // If some nodes are in other state, the count will always be smaller.
+    if (inputNodes.size() > 0 && inputNodesInToBeRemoved.get() == inputNodes.size()) {
+      String errMsg = "All nodes cannot be removed for cluster " + cluster.uuid;
+      LOG.error(errMsg);
+      throw new PlatformServiceException(BAD_REQUEST, errMsg);
+    }
+
+    // Ensure all the nodes in the cluster are present in the input.
+    existingNodes
+        .stream()
+        .filter(existingNode -> existingNode.state != NodeState.ToBeAdded)
+        .forEach(
+            existingNode -> {
+              NodeDetails inputNode = inputNodesMap.remove(existingNode.getNodeName());
+              if (inputNode == null) {
+                String errMsg = String.format("Node %s is missing", existingNode.getNodeName());
+                LOG.error(errMsg);
+                throw new PlatformServiceException(BAD_REQUEST, errMsg);
+              }
+              checkNodesForUpdate(cluster, existingNode, inputNode);
+            });
+
+    // Ensure unknown nodes are in the input.
+    if (!inputNodesMap.isEmpty()) {
+      String errMsg = "Unknown nodes " + StringUtils.join(inputNodesMap.keySet(), ",");
+      throw new PlatformServiceException(BAD_REQUEST, errMsg);
+    }
+  }
+
+  // TODO This is used by calls originating from the UI that are not in swagger APIs. More
+  // validations may be needed later like checking the fields of all NodeDetails objects because
+  // the existing nodes in the universe are replaced by these nodes in the task params. UI sends
+  // all the nodes irrespective of the cluster. Only the cluster getting updated, is sent in the
+  // request.
+  private void checkTaskParamsForUpdate(
+      Universe universe, UniverseDefinitionTaskParams taskParams) {
+
+    UniverseDefinitionTaskParams universeDetails = universe.getUniverseDetails();
+
+    Set<UUID> taskParamClustersUuids =
+        taskParams
+            .clusters
+            .stream()
+            .map(c -> c.uuid)
+            .collect(Collectors.toCollection(HashSet::new));
+
+    universeDetails
+        .clusters
+        .stream()
+        .forEach(
+            c -> {
+              taskParamClustersUuids.remove(c.uuid);
+              checkNodesInClusterForUpdate(
+                  c,
+                  universeDetails.getNodesInCluster(c.uuid),
+                  taskParams.getNodesInCluster(c.uuid));
+            });
+
+    if (!taskParamClustersUuids.isEmpty()) {
+      // Unknown clusters are found. There can be fewer clusters in the input but all those clusters
+      // must already be in the universe.
+      String errMsg = "Unknown cluster " + StringUtils.join(taskParamClustersUuids, ",");
+      LOG.error(errMsg);
+      throw new PlatformServiceException(BAD_REQUEST, errMsg);
     }
   }
 }

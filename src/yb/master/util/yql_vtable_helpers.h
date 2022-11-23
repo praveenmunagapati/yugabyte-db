@@ -11,16 +11,22 @@
 // under the License.
 //
 
-#ifndef YB_MASTER_UTIL_YQL_VTABLE_HELPERS_H
-#define YB_MASTER_UTIL_YQL_VTABLE_HELPERS_H
+#pragma once
 
 #include <future>
 
-#include "yb/master/master.pb.h"
+// This include is needed because we use std::shared_future<Result<IpAddress>>, and IpAddress
+// is an alias for boost::asio::ip::address. If we just include net_fwd.h, we get this compilation
+// error with GCC 11:
+// https://gist.githubusercontent.com/mbautin/ed9e5d17f39fc0066eba77ce15cbbef9/raw
+#include <boost/asio/ip/address.hpp>
+
+#include "yb/common/value.pb.h"
+
+#include "yb/master/master_heartbeat.fwd.h"
+#include "yb/master/master_fwd.h"
 
 #include "yb/util/net/net_fwd.h"
-#include "yb/util/net/inetaddress.h"
-#include "yb/util/result.h"
 #include "yb/util/uuid.h"
 
 namespace yb {
@@ -70,7 +76,7 @@ QLValuePB GetValue(const T& t, DataType data_type) {
 
 QLValuePB GetTokensValue(size_t index, size_t node_count);
 
-QLValuePB GetReplicationValue(int replication_factor);
+QLValuePB GetReplicationValue(size_t replication_factor);
 
 bool RemoteEndpointMatchesTServer(const TSInformationPB& ts_info,
                                   const InetAddress& remote_endpoint);
@@ -86,5 +92,3 @@ PublicPrivateIPFutures GetPublicPrivateIPFutures(
 }  // namespace util
 }  // namespace master
 }  // namespace yb
-
-#endif // YB_MASTER_UTIL_YQL_VTABLE_HELPERS_H

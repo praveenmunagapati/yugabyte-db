@@ -29,13 +29,13 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-
 #include "yb/util/slice.h"
 
-#include "yb/gutil/stringprintf.h"
 #include "yb/util/status.h"
+#include "yb/util/status_format.h"
+#include "yb/util/flags.h"
 
-DEFINE_int32(non_graph_characters_percentage_to_use_hexadecimal_rendering, 10,
+DEFINE_UNKNOWN_int32(non_graph_characters_percentage_to_use_hexadecimal_rendering, 10,
              "Non graph charaters percentage to use hexadecimal rendering");
 
 namespace yb {
@@ -54,7 +54,7 @@ void Slice::CopyToBuffer(std::string* buffer) const {
 
 // Return a string that contains the copy of the referenced data.
 std::string Slice::ToBuffer() const {
-  return std::string(cdata(), size());
+  return std::string(static_cast<std::string_view>(*this));
 }
 
 std::string Slice::ToString(bool hex) const {
@@ -79,7 +79,7 @@ std::string Slice::ToDebugString(size_t max_len) const {
     abbreviated = true;
   }
 
-  int num_not_graph = 0;
+  size_t num_not_graph = 0;
   for (size_t i = 0; i < bytes_to_print; i++) {
     if (!isgraph(begin_[i])) {
       ++num_not_graph;
@@ -94,7 +94,7 @@ std::string Slice::ToDebugString(size_t max_len) const {
 
   std::string ret;
   ret.reserve(size);
-  for (int i = 0; i < bytes_to_print; i++) {
+  for (size_t i = 0; i < bytes_to_print; i++) {
     auto ch = begin_[i];
     if (!isgraph(ch)) {
       if (ch == '\r') {
@@ -139,6 +139,59 @@ Status Slice::consume_byte(char c) {
   return Status::OK();
 }
 
+uint8_t Slice::operator[](size_t n) const {
+  DCHECK_LT(n, size());
+  return begin_[n];
+}
+
+void Slice::remove_prefix(size_t n) {
+  DCHECK_LE(n, size());
+  begin_ += n;
+}
+
+Slice Slice::Prefix(size_t n) const {
+  DCHECK_LE(n, size());
+  return Slice(begin_, n);
+}
+
+Slice Slice::WithoutPrefix(size_t n) const {
+  DCHECK_LE(n, size());
+  return Slice(begin_ + n, end_);
+}
+
+void Slice::remove_suffix(size_t n) {
+  DCHECK_LE(n, size());
+  end_ -= n;
+}
+
+Slice Slice::Suffix(size_t n) const {
+  DCHECK_LE(n, size());
+  return Slice(end_ - n, end_);
+}
+
+Slice Slice::WithoutSuffix(size_t n) const {
+  DCHECK_LE(n, size());
+  return Slice(begin_, end_ - n);
+}
+
+void Slice::truncate(size_t n) {
+  DCHECK_LE(n, size());
+  end_ = begin_ + n;
+}
+
+char Slice::consume_byte() {
+  DCHECK_GT(end_, begin_);
+  return *begin_++;
+}
+
+void Slice::AppendTo(std::string* out) const {
+  out->append(cdata(), size());
+}
+
+void Slice::AssignTo(std::string* out) const {
+  out->assign(cdata(), size());
+}
+
 std::string SliceParts::ToDebugHexString() const {
   std::string result;
   for (int i = 0; i != num_parts; ++i) {
@@ -155,15 +208,20 @@ size_t SliceParts::SumSizes() const {
   return result;
 }
 
-void SliceParts::CopyAllTo(void* out) const {
-  char* buf = static_cast<char*>(out);
+char* SliceParts::CopyAllTo(char* out) const {
   for (int i = 0; i != num_parts; ++i) {
     if (!parts[i].size()) {
       continue;
     }
-    memcpy(buf, parts[i].data(), parts[i].size());
-    buf += parts[i].size();
+    memcpy(out, parts[i].data(), parts[i].size());
+    out += parts[i].size();
   }
+  return out;
+}
+
+Slice SliceParts::TheOnlyPart() const {
+  CHECK_EQ(num_parts, 1);
+  return parts[0];
 }
 
 }  // namespace yb

@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_COMMON_JSON_UTIL_H
-#define YB_COMMON_JSON_UTIL_H
+#pragma once
 
 #include <rapidjson/document.h>
 
@@ -24,11 +23,11 @@ class QLValuePB;
 
 namespace common {
 
-CHECKED_STATUS ConvertQLValuePBToRapidJson(const QLValuePB& value_pb,
-                                           rapidjson::Value* value,
-                                           rapidjson::Document::AllocatorType* alloc);
+Status ConvertQLValuePBToRapidJson(const QLValuePB& value_pb,
+                                   rapidjson::Value* value,
+                                   rapidjson::Document::AllocatorType* alloc);
 
-inline CHECKED_STATUS ConvertQLValuePBToRapidJson(const QLValuePB& value_pb,
+inline Status ConvertQLValuePBToRapidJson(const QLValuePB& value_pb,
                                                   rapidjson::Document* document) {
   return ConvertQLValuePBToRapidJson(value_pb, document, &document->GetAllocator());
 }
@@ -36,7 +35,15 @@ inline CHECKED_STATUS ConvertQLValuePBToRapidJson(const QLValuePB& value_pb,
 std::string WriteRapidJsonToString(const rapidjson::Value& value);
 std::string PrettyWriteRapidJsonToString(const rapidjson::Value& document);
 
+template <typename JsonObject>
+void AddMember(
+    rapidjson::Document::StringRefType name, const std::string& string_val, JsonObject* object,
+    rapidjson::Document::AllocatorType* allocator) {
+  rapidjson::Value val;
+  val.SetString(
+      string_val.c_str(), static_cast<rapidjson::SizeType>(string_val.length()), *allocator);
+  object->AddMember(name, val, *allocator);
+}
+
 } // namespace common
 } // namespace yb
-
-#endif // YB_COMMON_JSON_UTIL_H

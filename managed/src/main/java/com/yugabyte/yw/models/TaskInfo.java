@@ -9,6 +9,8 @@ import static play.mvc.Http.Status.BAD_REQUEST;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.google.common.collect.Sets;
+import com.yugabyte.yw.commissioner.TaskExecutor.TaskCache;
 import com.yugabyte.yw.commissioner.UserTaskDetails;
 import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskDetails;
 import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskGroupType;
@@ -49,25 +51,50 @@ public class TaskInfo extends Model {
   private static final FetchGroup<TaskInfo> GET_SUBTASKS_FG =
       FetchGroup.of(TaskInfo.class, "uuid, subTaskGroupType, taskState");
 
+  public static final Set<State> COMPLETED_STATES =
+      Sets.immutableEnumSet(State.Success, State.Failure, State.Aborted);
+
+  public static final Set<State> ERROR_STATES = Sets.immutableEnumSet(State.Failure, State.Aborted);
+
+  public static final Set<State> INCOMPLETE_STATES =
+      Sets.immutableEnumSet(State.Created, State.Initializing, State.Running, State.Abort);
+
   /** These are the various states of the task and taskgroup. */
   public enum State {
     @EnumValue("Created")
-    Created,
+    Created(3),
 
     @EnumValue("Initializing")
-    Initializing,
+    Initializing(1),
 
     @EnumValue("Running")
-    Running,
+    Running(4),
 
     @EnumValue("Success")
-    Success,
+    Success(2),
 
     @EnumValue("Failure")
-    Failure,
+    Failure(7),
 
     @EnumValue("Unknown")
-    Unknown,
+    Unknown(0),
+
+    @EnumValue("Abort")
+    Abort(5),
+
+    @EnumValue("Aborted")
+    Aborted(6);
+
+    // State override precedence to report the aggregated state for a SubGroupType.
+    private final int precedence;
+
+    private State(int precedence) {
+      this.precedence = precedence;
+    }
+
+    public int getPrecedence() {
+      return precedence;
+    }
   }
 
   // The task UUID.
@@ -163,17 +190,28 @@ public class TaskInfo extends Model {
     return subTaskGroupType;
   }
 
-  @JsonIgnore
   public JsonNode getTaskDetails() {
     return details;
+  }
+
+  @JsonIgnore
+  public String getErrorMessage() {
+    if (details == null || taskState == State.Success) {
+      return null;
+    }
+    JsonNode node = details.get("errorString");
+    if (node == null || node.isNull()) {
+      return null;
+    }
+    return node.asText();
   }
 
   public State getTaskState() {
     return taskState;
   }
 
-  boolean hasCompleted() {
-    return taskState == State.Success || taskState == State.Failure;
+  public boolean hasCompleted() {
+    return COMPLETED_STATES.contains(taskState);
   }
 
   public TaskType getTaskType() {
@@ -256,13 +294,12 @@ public class TaskInfo extends Model {
   }
 
   public List<TaskInfo> getIncompleteSubTasks() {
-    Object[] incompleteStates = {State.Created, State.Initializing, State.Running};
     return TaskInfo.find
         .query()
         .select(GET_SUBTASKS_FG)
         .where()
         .eq("parent_uuid", getTaskUUID())
-        .in("task_state", incompleteStates)
+        .in("task_state", INCOMPLETE_STATES)
         .findList();
   }
 
@@ -275,46 +312,61 @@ public class TaskInfo extends Model {
     return sb.toString();
   }
 
+  public UserTaskDetails getUserTaskDetails() {
+    return getUserTaskDetails(null);
+  }
+
   /**
    * Retrieve the UserTaskDetails for the task mapped to this TaskInfo object. Should only be called
    * on the user-level parent task, since only that task will have subtasks. Nothing will break if
-   * called on a SubTask, it just won't give you much useful information.
+   * called on a SubTask, it just won't give you much useful information. Some subtask group types
+   * are repeated later in the task that must be fixed. So, a subTask group cannot be marked
+   * Success.
    *
    * @return UserTaskDetails object for this TaskInfo, including info on the state on each of the
    *     subTaskGroups.
    */
-  public UserTaskDetails getUserTaskDetails() {
+  public UserTaskDetails getUserTaskDetails(TaskCache taskCache) {
     UserTaskDetails taskDetails = new UserTaskDetails();
     List<TaskInfo> result = getSubTasks();
     Map<SubTaskGroupType, SubTaskDetails> userTasksMap = new HashMap<>();
-    boolean customerTaskFailure = taskState.equals(State.Failure);
+    SubTaskGroupType lastGroupType = SubTaskGroupType.Invalid;
     for (TaskInfo taskInfo : result) {
       SubTaskGroupType subTaskGroupType = taskInfo.getSubTaskGroupType();
       if (subTaskGroupType == SubTaskGroupType.Invalid) {
         continue;
       }
-      SubTaskDetails subTask = userTasksMap.get(subTaskGroupType);
+      SubTaskDetails subTask = null;
+      if (userTasksMap.containsKey(subTaskGroupType)) {
+        // The type is already seen, group it with the last task if it is present.
+        // This is done not to move back the progress for the group type on the UI
+        // if the type shows up later.
+        subTask =
+            lastGroupType == SubTaskGroupType.Invalid
+                ? userTasksMap.get(subTaskGroupType)
+                : userTasksMap.get(lastGroupType);
+      }
       if (subTask == null) {
         subTask = createSubTask(subTaskGroupType);
         taskDetails.add(subTask);
-      } else if (subTask.getState().equals(State.Failure.name())
-          || subTask.getState().equals(State.Running.name())) {
-        continue;
+        userTasksMap.put(subTaskGroupType, subTask);
+        // Move only when it is new.
+        // This works for patterns like A B A B C.
+        lastGroupType = subTaskGroupType;
       }
-      switch (taskInfo.getTaskState()) {
-        case Failure:
-          subTask.setState(State.Failure);
-          break;
-        case Running:
-          subTask.setState(State.Running);
-          break;
-        case Created:
-          subTask.setState(customerTaskFailure ? State.Unknown : State.Created);
-          break;
-        default:
-          break;
+      if (taskCache != null) {
+        // Populate extra details about task progress from Task Cache.
+        JsonNode cacheData = taskCache.get(taskInfo.getTaskUUID().toString());
+        subTask.populateDetails(cacheData);
       }
-      userTasksMap.put(subTaskGroupType, subTask);
+      if (subTask.getState().getPrecedence() < taskInfo.getTaskState().getPrecedence()) {
+        State overrideState = taskInfo.getTaskState();
+        if (subTask.getState() == State.Success && taskInfo.getTaskState() == State.Created) {
+          // SubTask was already running, so skip to running to fix this very short transition.
+          overrideState = State.Running;
+        }
+        subTask.setState(overrideState);
+      }
     }
     return taskDetails;
   }
@@ -327,7 +379,10 @@ public class TaskInfo extends Model {
   public double getPercentCompleted() {
     int numSubtasks = TaskInfo.find.query().where().eq("parent_uuid", getTaskUUID()).findCount();
     if (numSubtasks == 0) {
-      return 100.0;
+      if (getTaskState() == TaskInfo.State.Success) {
+        return 100.0;
+      }
+      return 0.0;
     }
     int numSubtasksCompleted =
         TaskInfo.find
@@ -337,5 +392,28 @@ public class TaskInfo extends Model {
             .eq("task_state", TaskInfo.State.Success)
             .findCount();
     return numSubtasksCompleted * 100.0 / numSubtasks;
+  }
+
+  public static List<TaskInfo> findDuplicateDeleteBackupTasks(UUID customerUUID, UUID backupUUID) {
+    return TaskInfo.find
+        .query()
+        .where()
+        .eq("task_type", TaskType.DeleteBackup)
+        .ne("task_state", State.Failure)
+        .ne("task_state", State.Aborted)
+        .eq("details->>'customerUUID'", customerUUID.toString())
+        .eq("details->>'backupUUID'", backupUUID.toString())
+        .findList();
+  }
+
+  public static List<TaskInfo> findIncompleteDeleteBackupTasks(UUID customerUUID, UUID backupUUID) {
+    return TaskInfo.find
+        .query()
+        .where()
+        .in("task_type", TaskType.DeleteBackup, TaskType.DeleteBackupYb)
+        .in("task_state", INCOMPLETE_STATES)
+        .eq("details->>'customerUUID'", customerUUID.toString())
+        .eq("details->>'backupUUID'", backupUUID.toString())
+        .findList();
   }
 }

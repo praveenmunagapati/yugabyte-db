@@ -15,10 +15,9 @@
 // Structure definitions for a Postgres table descriptor.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_PGGATE_PG_TOOLS_H_
-#define YB_YQL_PGGATE_PG_TOOLS_H_
+#pragma once
 
-#include "yb/common/common.pb.h"
+#include "yb/common/transaction.pb.h"
 
 struct PgExecParameters;
 
@@ -27,7 +26,10 @@ namespace pggate {
 
 RowMarkType GetRowMarkType(const PgExecParameters* exec_params);
 
+struct Bound {
+  uint64_t value;
+  bool is_inclusive;
+};
+
 } // namespace pggate
 } // namespace yb
-
-#endif  // YB_YQL_PGGATE_PG_TOOLS_H_

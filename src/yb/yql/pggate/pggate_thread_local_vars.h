@@ -19,10 +19,9 @@
 // Currently this is used within DocDB where PG/YSQL is used as a library for
 // evaluating YSQL expression.
 
-#ifndef YB_YQL_PGGATE_PGGATE_THREAD_LOCAL_VARS_H
-#define YB_YQL_PGGATE_PGGATE_THREAD_LOCAL_VARS_H
+#pragma once
 
-#include "yb/yql/pggate/ybc_pg_typedefs.h"
+
 
 namespace yb {
 namespace pggate {
@@ -76,5 +75,3 @@ void PgSetThreadLocalStrTokPtr(char *new_pg_strtok_ptr);
 
 } // namespace pggate
 } // namespace yb
-
-#endif // YB_YQL_PGGATE_PGGATE_THREAD_LOCAL_VARS_H

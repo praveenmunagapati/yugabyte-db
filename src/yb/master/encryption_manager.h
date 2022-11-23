@@ -11,54 +11,65 @@
 // under the License.
 //
 
-#ifndef YB_MASTER_ENCRYPTION_MANAGER_H
-#define YB_MASTER_ENCRYPTION_MANAGER_H
+#pragma once
 
 #include <unordered_set>
 
-#include "yb/util/status.h"
-#include "yb/util/net/net_util.h"
-#include "yb/util/locks.h"
+#include "yb/encryption/encryption_fwd.h"
 
+#include "yb/master/master_encryption.fwd.h"
 #include "yb/master/master_fwd.h"
+#include "yb/master/master_heartbeat.fwd.h"
 
 #include "yb/rpc/rpc_fwd.h"
 
+#include "yb/util/status_fwd.h"
+#include "yb/util/locks.h"
+
 namespace yb {
-
-class UniverseKeysPB;
-
 namespace master {
 
 using HostPortSet = std::unordered_set<HostPort, HostPortHash>;
 
 class EncryptionManager {
  public:
+  enum class EncryptionState {
+    kUnknown,
+    kNeverEnabled,
+    kEnabled,
+    kEnabledUnkownIfKeyIsInMem,
+    kEnabledKeyNotInMem,
+    kDisabled
+  };
+
   EncryptionManager();
 
-  CHECKED_STATUS AddUniverseKeys(const AddUniverseKeysRequestPB* req,
-                                 AddUniverseKeysResponsePB* resp);
+  Status AddUniverseKeys(const AddUniverseKeysRequestPB* req,
+                         AddUniverseKeysResponsePB* resp);
 
-  CHECKED_STATUS GetUniverseKeyRegistry(const GetUniverseKeyRegistryRequestPB* req,
-                                        GetUniverseKeyRegistryResponsePB* resp);
+  Status GetUniverseKeyRegistry(const GetUniverseKeyRegistryRequestPB* req,
+                                GetUniverseKeyRegistryResponsePB* resp);
 
-  CHECKED_STATUS HasUniverseKeyInMemory(const HasUniverseKeyInMemoryRequestPB* req,
-                                        HasUniverseKeyInMemoryResponsePB* resp);
+  Status HasUniverseKeyInMemory(const HasUniverseKeyInMemoryRequestPB* req,
+                                HasUniverseKeyInMemoryResponsePB* resp);
 
-  CHECKED_STATUS ChangeEncryptionInfo(const ChangeEncryptionInfoRequestPB* req,
-                                      EncryptionInfoPB* encryption_info);
+  Status ChangeEncryptionInfo(const ChangeEncryptionInfoRequestPB* req,
+                              EncryptionInfoPB* encryption_info);
 
-  CHECKED_STATUS IsEncryptionEnabled(const EncryptionInfoPB& encryption_info,
-                                     IsEncryptionEnabledResponsePB* resp);
+  Status IsEncryptionEnabled(const EncryptionInfoPB& encryption_info,
+                             IsEncryptionEnabledResponsePB* resp);
 
-  CHECKED_STATUS FillHeartbeatResponseEncryption(const EncryptionInfoPB& encryption_info,
-                                                 TSHeartbeatResponsePB* resp);
+  EncryptionState GetEncryptionState(
+      const EncryptionInfoPB& encryption_info, IsEncryptionEnabledResponsePB* encryption_resp);
 
-  CHECKED_STATUS GetUniverseKeyRegistry(rpc::ProxyCache* proxy_cache);
+  Status FillHeartbeatResponseEncryption(const EncryptionInfoPB& encryption_info,
+                                         TSHeartbeatResponsePB* resp);
 
-  void PopulateUniverseKeys(const UniverseKeysPB& universe_key_registry);
+  Status GetUniverseKeyRegistry(rpc::ProxyCache* proxy_cache);
 
-  CHECKED_STATUS AddPeersToGetUniverseKeyFrom(const HostPortSet& hps);
+  void PopulateUniverseKeys(const encryption::UniverseKeysPB& universe_key_registry);
+
+  Status AddPeersToGetUniverseKeyFrom(const HostPortSet& hps);
 
  private:
   Result<std::string> GetLatestUniverseKey(const EncryptionInfoPB* encryption_info);
@@ -73,10 +84,8 @@ class EncryptionManager {
 
   mutable simple_spinlock universe_key_mutex_;
 
-  std::unique_ptr<UniverseKeysPB> universe_keys_ PT_GUARDED_BY(universe_key_mutex_);
+  std::unique_ptr<encryption::UniverseKeysPB> universe_keys_ PT_GUARDED_BY(universe_key_mutex_);
 };
 
 } // namespace master
 } // namespace yb
-
-#endif // YB_MASTER_ENCRYPTION_MANAGER_H

@@ -11,14 +11,22 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_STOL_UTILS_H
-#define YB_UTIL_STOL_UTILS_H
+#pragma once
 
 #include "yb/util/result.h"
+#include "yb/util/status_format.h"
 
 namespace yb {
 
 Result<int64_t> CheckedStoll(Slice slice);
+Result<uint64_t> CheckedStoull(Slice slice);
+Result<int64_t> DoCheckedStol(Slice value, int64_t*);
+Result<uint64_t> DoCheckedStol(Slice value, uint64_t*);
+
+template <class T>
+Result<T> CheckedStol(Slice value) {
+  return DoCheckedStol(value, static_cast<T*>(nullptr));
+}
 
 template <class Int>
 Result<Int> CheckedStoInt(Slice slice) {
@@ -41,5 +49,3 @@ inline Result<int32_t> CheckedStoi(Slice slice) {
 Result<long double> CheckedStold(Slice slice);
 
 } // namespace yb
-
-#endif // YB_UTIL_STOL_UTILS_H

@@ -4067,10 +4067,12 @@
   proname => 'inet_server_port', proisstrict => 'f', provolatile => 's',
   prorettype => 'int4', proargtypes => '', prosrc => 'inet_server_port' },
 { oid => '8019', descr => 'list available servers for clients to connect',
-  proname => 'yb_servers', provolatile => 'v', prorettype => 'record',
-  proargtypes => '', proallargtypes => '{text,int8,int8,text,text,text,text,text}',
-  proargmodes => '{o,o,o,o,o,o,o,o}',proparallel => 's',
-  proargnames => '{host,port,num_connections,node_type,cloud,region,zone,public_ip}',
+  proname => 'yb_servers', proretset => 't', provolatile => 'v',
+  prorettype => 'record',
+  proargtypes => '',
+  proallargtypes => '{text,int8,int8,text,text,text,text,text,text}',
+  proargmodes => '{o,o,o,o,o,o,o,o,o}',
+  proargnames => '{host,port,num_connections,node_type,cloud,region,zone,public_ip,uuid}',
   prosrc => 'yb_servers' },
 
 { oid => '2627',
@@ -5180,6 +5182,15 @@
   proargmodes => '{i,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o,o}',
   proargnames => '{pid,datid,pid,usesysid,application_name,state,query,wait_event_type,wait_event,xact_start,query_start,backend_start,state_change,client_addr,client_hostname,client_port,backend_xid,backend_xmin,backend_type,ssl,sslversion,sslcipher,sslbits,sslcompression,sslclientdn}',
   prosrc => 'pg_stat_get_activity' },
+{ oid => '8041',
+  descr => 'statistics: terminated queries for the given database',
+  proname => 'yb_pg_stat_get_queries', prorows => '100', proisstrict => 'f',
+  proretset => 't', provolatile => 's', proparallel => 'r',
+  prorettype => 'record', proargtypes => 'oid',
+  proallargtypes => '{oid,oid,int4,text,text,timestamptz,timestamptz}',
+  proargmodes => '{i,o,o,o,o,o,o}',
+  proargnames => '{db_oid,db_oid,backend_pid,query_text,termination_reason,query_start,query_end}',
+  prosrc => 'yb_pg_stat_get_queries'},
 { oid => '3318',
   descr => 'statistics: information about progress of backends running maintenance command',
   proname => 'pg_stat_get_progress_info', prorows => '100', proretset => 't',
@@ -10283,13 +10294,10 @@
   proisstrict => 'f', prorettype => 'bool', proargtypes => 'oid int4 int4 any',
   proargmodes => '{i,i,i,v}', prosrc => 'satisfies_hash_partition' },
 
-{ oid => '8020', descr => 'function to compute internal hash code of given values',
+{ oid => '8020', descr => 'function to compute internal hash code of given values', oid_symbol => 'YB_HASH_CODE_OID',
   proname => 'yb_hash_code', provariadic => 'any', proisstrict => 'f',
   prorettype => 'int4', proargtypes => 'any', proallargtypes => '{any}',
   proargmodes => '{v}', prosrc => 'yb_hash_code' },
-
-# Yugabyte system calls use OIDS starting from YB_MIN_UNUSED_OID in "catalog.h".
-# Run `src/include/catalog/unused_oids` to seek available OID values.
 
 { oid => '8013', descr => 'system call getrusage from the current session',
   proname => 'yb_getrusage', provolatile => 'v',
@@ -10329,4 +10337,69 @@
   prorettype => 'int8', proargtypes => '',
   prosrc => 'yb_catalog_version' },
 
+{ oid => '8031', descr => 'is the given table stored in the local region',
+  proname => 'yb_is_local_table', prorettype => 'bool', proargtypes => 'oid',
+  prosrc => 'yb_is_local_table', provolatile => 's' },
+
+# getting YB specific objects properties functions
+{ oid => '8033', descr => 'get the YB table properties',
+  proname => 'yb_table_properties', provolatile => 's',
+  prorettype => 'record', proargtypes => 'oid',
+  proallargtypes => '{oid,int8,int8,bool,oid,oid}',
+  proargmodes => '{i,o,o,o,o,o}',
+  proargnames => '{table_oid,num_tablets,num_hash_key_columns,is_colocated,tablegroup_oid,colocation_id}',
+  prosrc => 'yb_table_properties' },
+
+{ oid => '8034', descr => 'is the database colocated in the YB server?',
+  proname => 'yb_is_database_colocated', provolatile => 's',
+  prorettype => 'bool', proargtypes => '',
+  prosrc => 'yb_is_database_colocated' },
+
+# getting YB range-split table SPLIT AT clause
+{ oid => '8040', descr => 'get the YB range-split table SPLIT AT clause',
+  proname => 'yb_get_range_split_clause', provolatile => 'v',
+  prorettype => 'cstring', proargtypes => 'oid',
+  proallargtypes => '{oid,cstring}',
+  proargmodes => '{i,o}',
+  proargnames => '{table_oid,range_split_clause}',
+  prosrc => 'yb_get_range_split_clause' },
+
+{ oid => '8042', descr => 'get the region of the currently connected node',
+  proname => 'yb_server_region', provolatile => 's',
+  prorettype => 'varchar', proargtypes => '',
+  prosrc => 'yb_server_region' },
+
+{ oid => '8043', descr => 'get the cloud of the currently connected node',
+  proname => 'yb_server_cloud', provolatile => 's',
+  prorettype => 'varchar', proargtypes => '',
+  prosrc => 'yb_server_cloud' },
+
+{ oid => '8044', descr => 'get the zone of the currently connected node',
+  proname => 'yb_server_zone', provolatile => 's',
+  prorettype => 'varchar', proargtypes => '',
+  prosrc => 'yb_server_zone' },
+
+{ oid => '8045', descr => 'function to preserve tablegroup oid',
+  proname => 'binary_upgrade_set_next_tablegroup_oid', provolatile => 'v',
+  proparallel => 'r', prorettype => 'void', proargtypes => 'oid',
+  prosrc => 'binary_upgrade_set_next_tablegroup_oid' },
+
+{ oid => '8046', descr => 'statistics: memory usage of backend from TCMalloc, including PostgreSQL
+  memory usage + pggate memory usage + cached memory - memory that was freed but not recycled',
+  proname => 'yb_pg_stat_get_backend_allocated_mem_bytes', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'int4',
+  prosrc => 'yb_pg_stat_get_backend_allocated_mem_bytes' },
+
+{ oid => '8047', descr => 'statistics: RSS memory usage of backend retrieved from OS',
+  proname => 'yb_pg_stat_get_backend_rss_mem_bytes', provolatile => 's',
+  proparallel => 'r', prorettype => 'int8', proargtypes => 'int4',
+  prosrc => 'yb_pg_stat_get_backend_rss_mem_bytes' },
+
+{ oid => '8048', descr => 'get TCMalloc, PG and PGgate usage for the current connection',
+  proname => 'yb_heap_stats', provolatile => 'v',
+  prorettype => 'record', proargtypes => '',
+  proallargtypes => '{int8,int8,int8,int8,int8,int8,int8}',
+  proargmodes => '{o,o,o,o,o,o,o}',
+  proargnames => '{total_heap_requested, total_heap_usage, total_heap_allocation, cached_free_memory, total_heap_released, PostgreSQL_memory_usage, PostgreSQL_storage_gateway_usage}',
+  prosrc => 'yb_heap_stats' },
 ]

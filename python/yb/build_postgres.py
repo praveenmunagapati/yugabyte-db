@@ -19,19 +19,15 @@ directories.
 
 import os
 import logging
-import argparse
 import re
 import sys
 import multiprocessing
 import subprocess
-import json
 import hashlib
 import time
 import semantic_version  # type: ignore
 import shlex
 import pathlib
-
-from subprocess import check_call
 
 from yugabyte_pycommon import (  # type: ignore
     init_logging,
@@ -52,12 +48,14 @@ from yb.common_util import (
     get_absolute_path_aliases,
     EnvVarContext,
     shlex_join,
+    check_arch,
+    is_macos_arm64,
 )
 from yb import compile_commands
 from yb.compile_commands import (
     create_compile_commands_symlink, CompileCommandProcessor, get_compile_commands_file_path)
 from overrides import overrides
-from typing import List, Dict, Optional, Any, Set
+from typing import List, Dict, Optional, Any, Set, Callable
 
 
 ALLOW_REMOTE_COMPILATION = True
@@ -79,6 +77,9 @@ REMOVE_CONFIG_CACHE_MSG_RE = re.compile(r'error: run.*\brm config[.]cache\b.*and
 TRANSIENT_BUILD_ERRORS = ['missing separator.  Stop.']
 TRANSIENT_BUILD_RETRIES = 3
 
+COMPILER_AND_LINKER_FLAG_ENV_VAR_NAMES = ['CFLAGS', 'CXXFLAGS', 'LDFLAGS', 'LDFLAGS_EX']
+# CPPFLAGS are preprocessor flags.
+ALL_FLAG_ENV_VAR_NAMES = COMPILER_AND_LINKER_FLAG_ENV_VAR_NAMES + ['CPPFLAGS']
 
 # These files include generated files from the same directory as the including file itself, so their
 # directory need to be added to the list of include directories when we generate compilation
@@ -100,14 +101,17 @@ TRANSIENT_BUILD_RETRIES = 3
 # command in compile_commands.json.
 FILES_INCLUDING_GENERATED_FILES_FROM_SAME_DIR = ['guc.c', 'tuplesort.c']
 
+UNDEFINED_DYNAMIC_LOOKUP_FLAG_RE = re.compile(r'\s-undefined\s+dynamic_lookup\b')
+
 
 def sha256(s: str) -> str:
     return hashlib.sha256(s.encode('utf-8')).hexdigest()
 
 
-def adjust_error_on_warning_flag(flag: str, step: str, language: str) -> Optional[str]:
+def adjust_compiler_flag(flag: str, step: str, language: str) -> Optional[str]:
     """
-    Adjust a given compiler flag according to the build step and language.
+    Adjust a given compiler flag according to the build step and language. If this returns None,
+    the flag should be removed from the command line.
     """
     assert language in ('c', 'c++')
     assert step in BUILD_STEPS
@@ -118,12 +122,6 @@ def adjust_error_on_warning_flag(flag: str, step: str, language: str) -> Optiona
     if step == 'configure':
         if flag == '-Werror':
             # Skip this flag altogether during the configure step.
-            return None
-
-        if flag == '-fsanitize=thread':
-            # Don't actually enable TSAN in the configure step, otherwise configure will think that
-            # our pthread library is not working properly.
-            # https://gist.githubusercontent.com/mbautin/366970ac55c9d3579816d5e8563e70b4/raw
             return None
 
     if step == 'make':
@@ -137,19 +135,54 @@ def adjust_error_on_warning_flag(flag: str, step: str, language: str) -> Optiona
     return flag
 
 
-def filter_compiler_flags(compiler_flags: str, step: str, language: str) -> str:
-    """
-    This function optionaly removes flags that turn warnings into errors.
-    """
-    assert language in ('c', 'c++')
+def adjust_linker_flag(flag: str, step: str) -> Optional[str]:
     assert step in BUILD_STEPS
-    adjusted_flags = [
-        adjust_error_on_warning_flag(flag, step, language)
-        for flag in compiler_flags.split()
-    ]
-    return ' '.join([
-        flag for flag in adjusted_flags if flag is not None
+    if step == 'configure':
+        # During the configuration step, do not ignore unresolved symbols. This may cause the
+        # configure script to conclude that certain functions are present that are actually
+        # absent, e.g. fls.
+        if flag in ['-Wl,--allow-shlib-undefined', '-Wl,--unresolved-symbols=ignore-all']:
+            return None
+    return flag
+
+
+def adjust_compiler_or_linker_flags(
+        flags_str: str,
+        step: str,
+        flag_var_name: str) -> str:
+    """
+    >>> adjust_compiler_or_linker_flags('-some_flag -undefined dynamic_lookup -some_other_flag',
+    ...                                 'configure',
+    ...                                 'LDFLAGS_EX')
+    '-some_flag -some_other_flag'
+    >>> adjust_compiler_or_linker_flags('-undefined dynamic_lookup -some_other_flag',
+    ...                                 'configure',
+    ...                                 'LDFLAGS_EX')
+    '-some_other_flag'
+    """
+    assert flag_var_name in COMPILER_AND_LINKER_FLAG_ENV_VAR_NAMES
+    assert step in BUILD_STEPS
+    adjust_fn: Callable[[str], Optional[str]]
+    if flag_var_name.startswith('LD'):
+        def adjust_fn(flag: str) -> Optional[str]:
+            return adjust_linker_flag(flag, step)
+    else:
+        language = 'c++' if flag_var_name.startswith('CXX') else 'c'
+
+        def adjust_fn(flag: str) -> Optional[str]:
+            return adjust_compiler_flag(flag, step, language)
+    adjusted_optional_flag_list = [adjust_fn(flag) for flag in flags_str.split()]
+    new_flags_str = ' '.join([
+        flag for flag in adjusted_optional_flag_list if flag is not None
     ])
+    if step == 'configure' and flag_var_name.startswith('LD'):
+        # We remove the "-undefined dynamic_lookup" flag from the linker flags for the same reason
+        # as we remove other flags that tell the linker to ignore unresolved symbols. We have to
+        # do it here with a regex because it consists of two separate arguments.
+        new_flags_str = ' '.join(
+            UNDEFINED_DYNAMIC_LOOKUP_FLAG_RE.sub(' ', ' ' + new_flags_str).strip().split()
+        )
+    return new_flags_str
 
 
 class PostgresBuilder(YbBuildToolBase):
@@ -197,13 +230,18 @@ class PostgresBuilder(YbBuildToolBase):
     @overrides
     def add_command_line_args(self) -> None:
         parser = self.arg_parser
-        parser.add_argument('--cflags', help='C compiler flags')
         parser.add_argument('--clean',
                             action='store_true',
                             help='Clean PostgreSQL build and installation directories.')
+
+        # These flags automatically get propagated to the appropriate environment variables,
+        # such as CFLAGS, CXXFLAGS, LDFLAGS, LDFLAGS_EX, CPPFLAGS.
+        parser.add_argument('--cflags', help='C compiler flags')
         parser.add_argument('--cxxflags', help='C++ compiler flags')
         parser.add_argument('--ldflags', help='Linker flags for all binaries')
         parser.add_argument('--ldflags_ex', help='Linker flags for executables')
+        parser.add_argument('--cppflags', help='C/C++ preprocessor flags')
+
         parser.add_argument('--openssl_include_dir', help='OpenSSL include dir')
         parser.add_argument('--openssl_lib_dir', help='OpenSSL lib dir')
         parser.add_argument('--run_tests',
@@ -212,10 +250,21 @@ class PostgresBuilder(YbBuildToolBase):
         parser.add_argument('--step',
                             choices=BUILD_STEPS,
                             help='Run a specific step of the build process')
+        parser.add_argument('--compiler_version',
+                            help='Compiler version (e.g. 14.0.3)')
+        parser.add_argument('--compiler_family',
+                            choices=['gcc', 'clang'],
+                            help='Compiler family (e.g. clang or gcc)')
         parser.add_argument(
             '--shared_library_suffix',
             help='Shared library suffix used on the current platform. Used to set DLSUFFIX '
                  'in compile_commands.json.')
+        parser.add_argument(
+            '--exe_ld_flags_after_yb_libs',
+            help='Extra linker flags to add after the Yugabyte libraries when linking executables. '
+                 'For example, this can be used to add tcmalloc static library to satisfy missing '
+                 'symbols in Yugabyte libraries. This is relevant when building with GCC and '
+                 'linking with ld. With Clang and lld, the order of libraries does not matter.')
 
     @overrides
     def validate_and_process_args(self) -> None:
@@ -239,6 +288,7 @@ class PostgresBuilder(YbBuildToolBase):
                 "Compiler type not specified using either --compiler_type or YB_COMPILER_TYPE")
 
         self.export_compile_commands = os.environ.get('YB_EXPORT_COMPILE_COMMANDS') == '1'
+        self.skip_pg_compile_commands = os.environ.get('YB_SKIP_PG_COMPILE_COMMANDS') == '1'
         self.should_configure = self.args.step is None or self.args.step == 'configure'
         self.should_make = self.args.step is None or self.args.step == 'make'
         self.thirdparty_dir = self.args.thirdparty_dir
@@ -251,6 +301,9 @@ class PostgresBuilder(YbBuildToolBase):
             self.original_path = path_env_var_value.split(':')
             if not self.original_path:
                 logging.warning("PATH is empty")
+
+        self.compiler_family = self.args.compiler_family
+        self.compiler_version = self.args.compiler_version
 
     def adjust_cflags_in_makefile(self) -> None:
         makefile_global_path = os.path.join(self.pg_build_root, 'src/Makefile.global')
@@ -277,6 +330,12 @@ class PostgresBuilder(YbBuildToolBase):
             with open(makefile_global_path, 'w') as makefile_global_out_f:
                 makefile_global_out_f.write("\n".join(new_makefile_lines) + "\n")
 
+    def is_clang(self) -> bool:
+        return self.compiler_family == 'clang'
+
+    def is_gcc(self) -> bool:
+        return self.compiler_family == 'gcc'
+
     def set_env_vars(self, step: str) -> None:
         if step not in BUILD_STEPS:
             raise RuntimeError(
@@ -288,7 +347,7 @@ class PostgresBuilder(YbBuildToolBase):
         self.set_env_var('YB_THIRDPARTY_DIR', self.thirdparty_dir)
         self.set_env_var('YB_SRC_ROOT', YB_SRC_ROOT)
 
-        for var_name in ['CFLAGS', 'CXXFLAGS', 'LDFLAGS', 'LDFLAGS_EX']:
+        for var_name in ALL_FLAG_ENV_VAR_NAMES:
             arg_value = getattr(self.args, var_name.lower())
             self.set_env_var(var_name, arg_value)
 
@@ -301,12 +360,11 @@ class PostgresBuilder(YbBuildToolBase):
             '-Werror=int-conversion',
         ]
 
-        if self.compiler_type == 'clang':
+        if self.is_clang():
             additional_c_cxx_flags += [
-                '-Wno-builtin-requires-header'
+                '-Wno-builtin-requires-header',
+                '-Wno-shorten-64-to-32',
             ]
-
-        is_gcc = self.compiler_type.startswith('gcc')
 
         if is_make_step:
             additional_c_cxx_flags += [
@@ -315,14 +373,15 @@ class PostgresBuilder(YbBuildToolBase):
                 '-Wno-error=unused-function'
             ]
 
-            if self.build_type == 'release':
-                if self.compiler_type == 'clang':
+            if self.build_type in ['release', 'prof_gen', 'prof_use']:
+                if self.is_clang():
                     additional_c_cxx_flags += [
                         '-Wno-error=array-bounds',
-                        '-Wno-error=gnu-designator'
+                        '-Wno-error=gnu-designator',
                     ]
-                if is_gcc:
+                if self.is_gcc():
                     additional_c_cxx_flags += ['-Wno-error=strict-overflow']
+
             if self.build_type == 'asan':
                 additional_c_cxx_flags += [
                     '-fsanitize-recover=signed-integer-overflow',
@@ -338,14 +397,14 @@ class PostgresBuilder(YbBuildToolBase):
             for source_path in get_absolute_path_aliases(self.postgres_src_dir)
         ]
 
-        if is_gcc:
+        if self.is_gcc():
             additional_c_cxx_flags.append('-Wno-error=maybe-uninitialized')
 
-        for var_name in ['CFLAGS', 'CXXFLAGS']:
-            os.environ[var_name] = filter_compiler_flags(
+        for var_name in COMPILER_AND_LINKER_FLAG_ENV_VAR_NAMES:
+            os.environ[var_name] = adjust_compiler_or_linker_flags(
                     os.environ.get(var_name, '') + ' ' + ' '.join(additional_c_cxx_flags),
                     step,
-                    language='c' if var_name == 'CFLAGS' else 'c++')
+                    flag_var_name=var_name)
         if step == 'make':
             self.adjust_cflags_in_makefile()
 
@@ -393,8 +452,13 @@ class PostgresBuilder(YbBuildToolBase):
         # We need to add this directory to PATH so Postgres build could find Bison.
         thirdparty_installed_common_bin_path = os.path.join(
             self.thirdparty_dir, 'installed', 'common', 'bin')
-        new_path_str = ':'.join([thirdparty_installed_common_bin_path] + self.original_path)
-        os.environ['PATH'] = new_path_str
+        os.environ['PATH'] = ':'.join([thirdparty_installed_common_bin_path] + self.original_path)
+
+        if self.build_type == 'tsan':
+            self.set_env_var('TSAN_OPTIONS', os.getenv('TSAN_OPTIONS', '') + ' report_bugs=0')
+            logging.info("TSAN_OPTIONS for Postgres build: %s", os.getenv('TSAN_OPTIONS'))
+
+        os.environ['YB_PG_EXE_LD_FLAGS_AFTER_YB_LIBS'] = self.args.exe_ld_flags_after_yb_libs
 
     def sync_postgres_source(self) -> None:
         logging.info("Syncing postgres source code")
@@ -445,6 +509,7 @@ class PostgresBuilder(YbBuildToolBase):
                 '--with-icu',
                 '--with-ldap',
                 '--with-openssl',
+                '--with-gssapi',
                 # Options are ossp (original/old implementation), bsd (BSD) and e2fs
                 # (libuuid-based for Unix/Mac).
                 '--with-uuid=e2fs',
@@ -453,6 +518,9 @@ class PostgresBuilder(YbBuildToolBase):
                 '--with-libraries=' + self.openssl_lib_dir,
                 # We're enabling debug symbols for all types of builds.
                 '--enable-debug']
+        if is_macos_arm64():
+            configure_cmd_line.insert(0, '/opt/homebrew/bin/bash')
+
         if not get_bool_env_var('YB_NO_PG_CONFIG_CACHE'):
             configure_cmd_line.append('--config-cache')
 
@@ -461,7 +529,7 @@ class PostgresBuilder(YbBuildToolBase):
             # TODO: do we still need this limitation?
             configure_cmd_line += ['--without-readline']
 
-        if self.build_type != 'release':
+        if self.build_type not in ['release', 'prof_gen', 'prof_use']:
             configure_cmd_line += ['--enable-cassert']
         # Unset YB_SHOW_COMPILER_COMMAND_LINE when configuring postgres to avoid unintended side
         # effects from additional compiler output.
@@ -548,6 +616,9 @@ class PostgresBuilder(YbBuildToolBase):
                     ':(glob,exclude)src/postgres/**/output/*.source',
                     ':(glob,exclude)src/postgres/**/specs/*.spec',
                     ':(glob,exclude)src/postgres/**/sql/*.sql',
+                    ':(glob,exclude)src/postgres/.clang-format',
+                    ':(glob,exclude)src/postgres/src/test/regress/README',
+                    ':(glob,exclude)src/postgres/src/test/regress/yb_lint_regress_schedule.sh',
                 ])
             # Get the most recent commit that touched postgres files.
             git_hash = subprocess.check_output(
@@ -579,6 +650,8 @@ class PostgresBuilder(YbBuildToolBase):
         # Postgresql requires MAKELEVEL to be 0 or non-set when calling its make.
         # But in case YB project is built with make, MAKELEVEL is not 0 at this point.
         make_cmd = ['make', 'MAKELEVEL=0']
+        if is_macos_arm64():
+            make_cmd = ['arch', '-arm64'] + make_cmd
 
         make_parallelism_str: Optional[str] = os.environ.get('YB_MAKE_PARALLELISM')
         make_parallelism: Optional[int] = None
@@ -689,7 +762,7 @@ class PostgresBuilder(YbBuildToolBase):
                             "Not running 'make install' in the %s directory since we are only "
                             "generating the compilation database", work_dir)
 
-                if self.export_compile_commands:
+                if self.export_compile_commands and not self.skip_pg_compile_commands:
                     logging.info("Generating the compilation database in directory '%s'", work_dir)
 
                     compile_commands_path = os.path.join(work_dir, 'compile_commands.json')
@@ -806,7 +879,7 @@ class PostgresBuilder(YbBuildToolBase):
         logging.info("PostgreSQL build stamp:\n%s", initial_build_stamp)
 
         if initial_build_stamp == saved_build_stamp:
-            if self.export_compile_commands:
+            if self.export_compile_commands and not self.skip_pg_compile_commands:
                 logging.info(
                     "Even though PostgreSQL is already up-to-date in directory %s, we still need "
                     "to create compile_commands.json, so proceeding with %s",
@@ -846,6 +919,7 @@ class PostgresBuilder(YbBuildToolBase):
 
 def main() -> None:
     init_logging()
+    check_arch()
     if get_bool_env_var('YB_SKIP_POSTGRES_BUILD'):
         logging.info("Skipping PostgreSQL build (YB_SKIP_POSTGRES_BUILD is set)")
         return

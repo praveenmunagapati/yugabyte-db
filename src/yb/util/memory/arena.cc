@@ -37,8 +37,9 @@
 #include <algorithm>
 #include <mutex>
 
+#include "yb/util/alignment.h"
 #include "yb/util/debug-util.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
 
 using std::copy;
 using std::max;
@@ -48,7 +49,7 @@ using std::shared_ptr;
 using std::sort;
 using std::swap;
 
-DEFINE_int64(arena_warn_threshold_bytes, 256*1024*1024,
+DEFINE_UNKNOWN_uint64(arena_warn_threshold_bytes, 256*1024*1024,
              "Number of bytes beyond which to emit a warning for a large arena");
 TAG_FLAG(arena_warn_threshold_bytes, hidden);
 
@@ -223,6 +224,9 @@ void ArenaBase<Traits>::AddComponentUnlocked(Buffer buffer, Component* component
 
   buffer.Release();
   ReleaseStoreCurrent(component);
+  if (!second_ && component->next()) {
+    second_ = component;
+  }
   arena_footprint_ += component->full_size();
   if (PREDICT_FALSE(arena_footprint_ > FLAGS_arena_warn_threshold_bytes) && !warned_) {
     LOG(WARNING) << "Arena " << reinterpret_cast<const void *>(this)
@@ -234,23 +238,36 @@ void ArenaBase<Traits>::AddComponentUnlocked(Buffer buffer, Component* component
 }
 
 template <class Traits>
-void ArenaBase<Traits>::Reset() {
+void ArenaBase<Traits>::Reset(ResetMode mode) {
   std::lock_guard<mutex_type> lock(component_lock_);
 
-  auto* current = CHECK_NOTNULL(AcquireLoadCurrent());
-  current->Reset(buffer_allocator_);
-  arena_footprint_ = current->full_size();
+  Component* current = CHECK_NOTNULL(AcquireLoadCurrent());
+  if (mode == ResetMode::kKeepFirst && second_) {
+    auto* first = second_->SetNext(nullptr);
+    current->Destroy(buffer_allocator_);
+    current = first;
+    ReleaseStoreCurrent(first);
+    second_ = nullptr;
+  }
+
   warned_ = false;
+  if (current) {
+    current->Reset(buffer_allocator_);
 
 #ifndef NDEBUG
-  // In debug mode release the last component too for (hopefully) better
-  // detection of memory-related bugs (invalid shallow copies, etc.).
-  size_t last_size = current->full_size();
-  current->Destroy(buffer_allocator_);
-  arena_footprint_ = 0;
-  ReleaseStoreCurrent(nullptr);
-  AddComponentUnlocked(NewBuffer(last_size, 0));
+    // In debug mode release the last component too for (hopefully) better
+    // detection of memory-related bugs (invalid shallow copies, etc.).
+    size_t last_size = current->full_size();
+    current->Destroy(buffer_allocator_);
+    arena_footprint_ = 0;
+    ReleaseStoreCurrent(nullptr);
+    AddComponentUnlocked(NewBuffer(last_size, 0));
+#else
+    arena_footprint_ = current->full_size();
 #endif
+  } else {
+    arena_footprint_ = 0;
+  }
 }
 
 template <class Traits>
@@ -264,4 +281,14 @@ template class ArenaBase<ThreadSafeArenaTraits>;
 template class ArenaBase<ArenaTraits>;
 
 }  // namespace internal
+
+char* AllocatedBuffer::Allocate(size_t bytes, size_t alignment) {
+  auto allocation_size = Arena::kStartBlockSize;
+  auto* allocated = static_cast<char*>(malloc(allocation_size));
+  auto* result = align_up(allocated, alignment);
+  address = align_up(pointer_cast<char*>(result + bytes), 16);
+  size = allocated + allocation_size - address;
+  return result;
+}
+
 }  // namespace yb

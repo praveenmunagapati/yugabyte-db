@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_MEM_TRACKER_H
-#define YB_UTIL_MEM_TRACKER_H
+#pragma once
 
 #include <stdint.h>
 
@@ -49,6 +48,7 @@
 #include "yb/gutil/ref_counted.h"
 #include "yb/util/high_water_mark.h"
 #include "yb/util/locks.h"
+#include "yb/util/monotime.h"
 #include "yb/util/mutex.h"
 #include "yb/util/random.h"
 #include "yb/util/strongly_typed_bool.h"
@@ -57,6 +57,7 @@ namespace yb {
 
 class Status;
 class MemTracker;
+class MetricEntity;
 typedef std::shared_ptr<MemTracker> MemTrackerPtr;
 
 // Garbage collector is used by MemTracker to free memory allocated by caches when reached
@@ -75,9 +76,17 @@ YB_STRONGLY_TYPED_BOOL(CreateMetrics);
 YB_STRONGLY_TYPED_BOOL(OnlyChildren);
 
 typedef std::function<int64_t()> ConsumptionFunctor;
+typedef std::function<void()> UpdateMaxMemoryFunctor;
 typedef std::function<void()> PollChildrenConsumptionFunctors;
 
 struct SoftLimitExceededResult {
+  static SoftLimitExceededResult NotExceeded() {
+    return SoftLimitExceededResult {
+      .tracker_path = "", .exceeded = false, .current_capacity_pct = 0
+    };
+  }
+
+  std::string tracker_path;
   bool exceeded;
   double current_capacity_pct;
 };
@@ -86,7 +95,7 @@ struct SoftLimitExceededResult {
 // arranged into a tree structure such that the consumption tracked by a
 // MemTracker is also tracked by its ancestors.
 //
-// The MemTracker hierarchy is rooted in a single static MemTracker whose limi
+// The MemTracker hierarchy is rooted in a single static MemTracker whose limit
 // is set via gflag. The root MemTracker always exists, and it is the common
 // ancestor to all MemTrackers. All operations that discover MemTrackers begin
 // at the root and work their way down the tree, while operations that deal
@@ -357,7 +366,10 @@ class MemTracker : public std::enable_shared_from_this<MemTracker> {
 
   // Logs the usage of this tracker and all of its children (recursively).
   std::string LogUsage(
-      const std::string& prefix = "", size_t usage_threshold = 0, int indent = 0) const;
+      const std::string& prefix = "", int64_t usage_threshold = 0, int indent = 0) const;
+
+  // Logs the hard and soft memory limits. Does not include children.
+  void LogMemoryLimits() const;
 
   void EnableLogging(bool enable, bool log_stack) {
     enable_logging_ = enable;
@@ -391,7 +403,7 @@ class MemTracker : public std::enable_shared_from_this<MemTracker> {
   // gc_lock. Updates metrics if initialized.
   bool GcMemory(int64_t max_consumption);
 
-  // Called when the total release memory is larger than GC_RELEASE_SIZE.
+  // Called when the total release memory is larger than mem_tracker_tcmalloc_gc_release_bytes.
   // TcMalloc holds onto released memory and very slowly (if ever) releases it back to
   // the OS. This is problematic since it is memory we are not constantly tracking which
   // can cause us to go way over mem limits.
@@ -419,17 +431,11 @@ class MemTracker : public std::enable_shared_from_this<MemTracker> {
   // Creates the root tracker.
   static void CreateRootTracker();
 
-  // Size, in bytes, that is considered a large value for Release() (or Consume() with
-  // a negative value). If tcmalloc is used, this can trigger it to GC.
-  // A higher value will make us call into tcmalloc less often (and therefore more
-  // efficient). A lower value will mean our memory overhead is lower.
-  // TODO: this is a stopgap.
-  static const int64_t GC_RELEASE_SIZE = 128 * 1024L * 1024L;
-
   const int64_t limit_;
   const int64_t soft_limit_;
   const std::string id_;
   const ConsumptionFunctor consumption_functor_;
+
   PollChildrenConsumptionFunctors poll_children_consumption_functors_;
   const std::string descr_;
   std::shared_ptr<MemTracker> parent_;
@@ -474,9 +480,7 @@ class MemTracker : public std::enable_shared_from_this<MemTracker> {
 template<typename T, typename Alloc = std::allocator<T> >
 class MemTrackerAllocator : public Alloc {
  public:
-  typedef typename Alloc::pointer pointer;
-  typedef typename Alloc::const_pointer const_pointer;
-  typedef typename Alloc::size_type size_type;
+  using size_type = typename Alloc::size_type;
 
   explicit MemTrackerAllocator(std::shared_ptr<MemTracker> mem_tracker)
       : mem_tracker_(std::move(mem_tracker)) {}
@@ -491,15 +495,15 @@ class MemTrackerAllocator : public Alloc {
   ~MemTrackerAllocator() {
   }
 
-  pointer allocate(size_type n, const_pointer hint = 0) {
+  T* allocate(size_type n) {
     // Ideally we'd use TryConsume() here to enforce the tracker's limit.
     // However, that means throwing bad_alloc if the limit is exceeded, and
     // it's not clear that the rest of YB can handle that.
     mem_tracker_->Consume(n * sizeof(T));
-    return Alloc::allocate(n, hint);
+    return Alloc::allocate(n);
   }
 
-  void deallocate(pointer p, size_type n) {
+  void deallocate(T* p, size_type n) {
     Alloc::deallocate(p, n);
     mem_tracker_->Release(n * sizeof(T));
   }
@@ -507,7 +511,8 @@ class MemTrackerAllocator : public Alloc {
   // This allows an allocator<T> to be used for a different type.
   template <class U>
   struct rebind {
-    typedef MemTrackerAllocator<U, typename Alloc::template rebind<U>::other> other;
+    using other = MemTrackerAllocator<
+        U, typename std::allocator_traits<Alloc>::template rebind_alloc<U>>;
   };
 
   const std::shared_ptr<MemTracker>& mem_tracker() const { return mem_tracker_; }
@@ -592,7 +597,11 @@ class ScopedTrackedConsumption {
 template <class F>
 int64_t AbsRelMemLimit(int64_t value, const F& f) {
   if (value < 0) {
-    return f() * std::min<int64_t>(-value, 100) / 100;
+    auto base_memory_limit = f();
+    if (base_memory_limit < 0) {
+      return -1;
+    }
+    return base_memory_limit * std::min<int64_t>(-value, 100) / 100;
   }
   if (value == 0) {
     return -1;
@@ -631,5 +640,3 @@ bool CheckMemoryPressureWithLogging(
     const MemTrackerPtr& mem_tracker, double score, const char* error_prefix);
 
 } // namespace yb
-
-#endif // YB_UTIL_MEM_TRACKER_H

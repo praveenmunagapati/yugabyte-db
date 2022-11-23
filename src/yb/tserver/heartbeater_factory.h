@@ -11,10 +11,11 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_HEARTBEATER_FACTORY_H
-#define YB_TSERVER_HEARTBEATER_FACTORY_H
+#pragma once
 
-#include "yb/tserver/heartbeater.h"
+#include <memory>
+
+#include "yb/tserver/tserver_fwd.h"
 
 namespace yb {
 namespace tserver {
@@ -24,5 +25,3 @@ std::unique_ptr<Heartbeater> CreateHeartbeater(
 
 } // namespace tserver
 } // namespace yb
-
-#endif // YB_TSERVER_HEARTBEATER_FACTORY_H

@@ -11,15 +11,19 @@
 // under the License.
 //
 
-#ifndef YB_RPC_RPC_CALL_H
-#define YB_RPC_RPC_CALL_H
+#pragma once
+
+#include <stdint.h>
+
+#include <type_traits>
 
 #include "yb/gutil/ref_counted.h"
 
-#include "yb/util/enums.h"
-
 #include "yb/rpc/rpc_fwd.h"
 #include "yb/rpc/outbound_data.h"
+
+#include "yb/util/enums.h"
+#include "yb/util/math_util.h"
 
 namespace yb {
 
@@ -48,5 +52,3 @@ class RpcCall : public OutboundData {
 
 }  // namespace rpc
 }  // namespace yb
-
-#endif // YB_RPC_RPC_CALL_H

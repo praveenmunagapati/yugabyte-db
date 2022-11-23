@@ -137,56 +137,42 @@ YbDataTypeFromOidMod(int attnum, Oid type_id)
 	if (yb_type == YB_YQL_DATA_TYPE_UNKNOWN_DATA) {
 		HeapTuple type = typeidType(type_id);
 		Form_pg_type tp = (Form_pg_type) GETSTRUCT(type);
-		Oid basetp_oid = tp->typbasetype;
 		ReleaseSysCache(type);
 
-		switch (tp->typtype) {
-			case TYPTYPE_BASE:
-				if (tp->typbyval) {
-					/* fixed-length, pass-by-value base type */
-					return &YBCFixedLenByValTypeEntity;
-				} else {
-					switch (tp->typlen) {
-						case -2:
-							/* null-terminated, pass-by-reference base type */
-							return &YBCNullTermByRefTypeEntity;
-							break;
-						case -1:
-							/* variable-length, pass-by-reference base type */
-							return &YBCVarLenByRefTypeEntity;
-							break;
-						default:;
-							/* fixed-length, pass-by-reference base type */
-							YBCPgTypeEntity *fixed_ref_type_entity = (YBCPgTypeEntity *)palloc(
-									sizeof(YBCPgTypeEntity));
-							fixed_ref_type_entity->type_oid = InvalidOid;
-							fixed_ref_type_entity->yb_type = YB_YQL_DATA_TYPE_BINARY;
-							fixed_ref_type_entity->allow_for_primary_key = false;
-							fixed_ref_type_entity->datum_fixed_size = tp->typlen;
-							fixed_ref_type_entity->datum_to_yb = (YBCPgDatumToData)YbDatumToDocdb;
-							fixed_ref_type_entity->yb_to_datum =
-								(YBCPgDatumFromData)YbDocdbToDatum;
-							return fixed_ref_type_entity;
-							break;
-					}
+		if (tp->typtype == TYPTYPE_BASE) {
+			if (tp->typbyval) {
+				/* fixed-length, pass-by-value base type */
+				return &YBCFixedLenByValTypeEntity;
+			} else {
+				switch (tp->typlen) {
+					case -2:
+						/* null-terminated, pass-by-reference base type */
+						return &YBCNullTermByRefTypeEntity;
+						break;
+					case -1:
+						/* variable-length, pass-by-reference base type */
+						return &YBCVarLenByRefTypeEntity;
+						break;
+					default:;
+						/* fixed-length, pass-by-reference base type */
+						YBCPgTypeEntity *fixed_ref_type_entity = (YBCPgTypeEntity *)palloc(
+								sizeof(YBCPgTypeEntity));
+						fixed_ref_type_entity->type_oid = InvalidOid;
+						fixed_ref_type_entity->yb_type = YB_YQL_DATA_TYPE_BINARY;
+						fixed_ref_type_entity->allow_for_primary_key = false;
+						fixed_ref_type_entity->datum_fixed_size = tp->typlen;
+						fixed_ref_type_entity->datum_to_yb = (YBCPgDatumToData)YbDatumToDocdb;
+						fixed_ref_type_entity->yb_to_datum =
+							(YBCPgDatumFromData)YbDocdbToDatum;
+						return fixed_ref_type_entity;
+						break;
 				}
-				break;
-			case TYPTYPE_COMPOSITE:
-				basetp_oid = RECORDOID;
-				break;
-			case TYPTYPE_DOMAIN:
-				break;
-			case TYPTYPE_ENUM:
-				basetp_oid = ANYENUMOID;
-				break;
-			case TYPTYPE_RANGE:
-				basetp_oid = ANYRANGEOID;
-				break;
-			default:
-				YB_REPORT_TYPE_NOT_SUPPORTED(type_id);
-				break;
+			}
+		} else {
+			Oid primitive_type_oid =
+				YbGetPrimitiveTypeOid(type_id, tp->typtype, tp->typbasetype);
+			return YbDataTypeFromOidMod(InvalidAttrNumber, primitive_type_oid);
 		}
-		return YbDataTypeFromOidMod(InvalidAttrNumber, basetp_oid);
 	}
 
 	/* Report error if type is not supported */
@@ -196,6 +182,32 @@ YbDataTypeFromOidMod(int attnum, Oid type_id)
 
 	/* Return the type-mapping entry */
 	return type_entity;
+}
+
+const Oid YbGetPrimitiveTypeOid(Oid type_id, char typtype, Oid typbasetype) {
+	Oid primitive_type_oid;
+	switch (typtype)
+	{
+		case TYPTYPE_BASE:
+			primitive_type_oid = type_id;
+			break;
+		case TYPTYPE_COMPOSITE:
+			primitive_type_oid = RECORDOID;
+			break;
+		case TYPTYPE_DOMAIN:
+			primitive_type_oid = typbasetype;
+			break;
+		case TYPTYPE_ENUM:
+			primitive_type_oid = ANYENUMOID;
+			break;
+		case TYPTYPE_RANGE:
+			primitive_type_oid = ANYRANGEOID;
+			break;
+		default:
+			YB_REPORT_TYPE_NOT_SUPPORTED(type_id);
+			break;
+	}
+	return primitive_type_oid;
 }
 
 bool
@@ -368,11 +380,11 @@ Datum YbCStrToDatum(const char *data, int64 bytes, const YBCPgTypeAttrs *type_at
 						errmsg("Invalid data size")));
 	}
 
-	/* Convert YugaByte cstring to Postgres internal representation */
-	FunctionCallInfoData fargs;
-	FunctionCallInfo fcinfo = &fargs;
-	PG_GETARG_DATUM(0) = CStringGetDatum(data);
-	return cstring_in(fcinfo);
+	/*
+	 * data may or may not contain tailing \0.
+	 * The result will be null-terminated string in both cases.
+	 */
+	return CStringGetDatum(pnstrdup(data, bytes));
 }
 
 /*
@@ -425,8 +437,13 @@ void YbDatumToEnum(Datum datum, int64 *data, int64 *bytes) {
 
 		/*
 		 * We expect datum to only contain a enum oid and does not already contain a sort order.
+		 * For OID >= 2147483648, Postgres sign-extends datum with 0xffffffff, which is -NaN and
+		 * does not reprensent a valid sort order.
 		 */
-		Assert(!(datum >> 32));
+		Assert(!(datum >> 32) || ((datum >> 32) == 0xffffffff));
+
+		/* Clear the high 4-byte in case it is not zero. */
+		datum &= 0xffffffff;
 
 		/*
 		 * Find the sort order of this enum oid.
@@ -603,6 +620,18 @@ Datum YbIntervalToDatum(const void *data, int64 bytes, const YBCPgTypeAttrs *typ
 	return IntervalPGetDatum(result);
 }
 
+void YbDatumToGinNull(Datum datum, uint8 *data, int64 *bytes)
+{
+	*data = DatumGetUInt8(datum);
+}
+
+Datum YbGinNullToDatum(const uint8 *data,
+					   int64 bytes,
+					   const YBCPgTypeAttrs *type_attrs)
+{
+	return UInt8GetDatum(*data);
+}
+
 /*
  * Workaround: These conversion functions can be used as a quick workaround to support a type.
  * - Used for Datum that contains address or pointer of actual data structure.
@@ -704,6 +733,10 @@ static const YBCPgTypeEntity YbTypeEntityTable[] = {
 		(YBCPgDatumFromData)YbBinaryToDatum },
 
 	{ JSONOID, YB_YQL_DATA_TYPE_BINARY, false, -1,
+		(YBCPgDatumToData)YbDatumToDocdb,
+		(YBCPgDatumFromData)YbDocdbToDatum },
+
+	{ JSONARRAYOID, YB_YQL_DATA_TYPE_BINARY, false, -1,
 		(YBCPgDatumToData)YbDatumToDocdb,
 		(YBCPgDatumFromData)YbDocdbToDatum },
 
@@ -817,6 +850,10 @@ static const YBCPgTypeEntity YbTypeEntityTable[] = {
 		(YBCPgDatumFromData)YbDocdbToDatum },
 
 	{ CIDROID, YB_YQL_DATA_TYPE_BINARY, false, -1,
+		(YBCPgDatumToData)YbDatumToDocdb,
+		(YBCPgDatumFromData)YbDocdbToDatum },
+
+	{ CIDRARRAYOID, YB_YQL_DATA_TYPE_BINARY, false, -1,
 		(YBCPgDatumToData)YbDatumToDocdb,
 		(YBCPgDatumFromData)YbDocdbToDatum },
 
@@ -1233,10 +1270,6 @@ static const YBCPgTypeEntity YbTypeEntityTable[] = {
 		(YBCPgDatumToData)YbDatumToCStr,
 		(YBCPgDatumFromData)YbCStrToDatum },
 
-	{ ANYOID, YB_YQL_DATA_TYPE_INT32, true, sizeof(int32),
-		(YBCPgDatumToData)YbDatumToInt32,
-		(YBCPgDatumFromData)YbInt32ToDatum },
-
 	{ ANYARRAYOID, YB_YQL_DATA_TYPE_BINARY, false, -1,
 		(YBCPgDatumToData)YbDatumToBinary,
 		(YBCPgDatumFromData)YbBinaryToDatum },
@@ -1323,6 +1356,14 @@ static const YBCPgTypeEntity YBCVarLenByRefTypeEntity =
 	{ InvalidOid, YB_YQL_DATA_TYPE_BINARY, false, -1,
 		(YBCPgDatumToData)YbDatumToBinary,
 		(YBCPgDatumFromData)YbBinaryToDatum };
+
+/*
+ * Special type entity used for ybgin null categories.
+ */
+const YBCPgTypeEntity YBCGinNullTypeEntity =
+	{ InvalidOid, YB_YQL_DATA_TYPE_GIN_NULL, true, -1,
+		(YBCPgDatumToData)YbDatumToGinNull,
+		(YBCPgDatumFromData)YbGinNullToDatum };
 
 void YbGetTypeTable(const YBCPgTypeEntity **type_table, int *count) {
 	*type_table = YbTypeEntityTable;

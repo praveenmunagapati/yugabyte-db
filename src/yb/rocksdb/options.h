@@ -21,8 +21,7 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSDB_OPTIONS_H
-#define YB_ROCKSDB_OPTIONS_H
+#pragma once
 
 #include <stddef.h>
 #include <stdint.h>
@@ -32,11 +31,12 @@
 #include <limits>
 #include <unordered_map>
 
+#include "yb/rocksdb/rocksdb_fwd.h"
 #include "yb/rocksdb/cache.h"
 #include "yb/rocksdb/listener.h"
-#include "yb/util/slice.h"
-#include "yb/util/result.h"
 #include "yb/rocksdb/universal_compaction.h"
+
+#include "yb/util/slice.h"
 
 #ifdef max
 #undef max
@@ -77,6 +77,7 @@ class InternalKeyComparator;
 class WalFilter;
 class MemoryMonitor;
 
+struct RocksDBPriorityThreadPoolMetrics;
 struct FileMetaData;
 
 typedef std::shared_ptr<const InternalKeyComparator> InternalKeyComparatorPtr;
@@ -102,14 +103,11 @@ enum CompactionStyle : char {
   // level based compaction style
   kCompactionStyleLevel = 0x0,
   // Universal compaction style
-  // Not supported in ROCKSDB_LITE.
   kCompactionStyleUniversal = 0x1,
   // FIFO compaction style
-  // Not supported in ROCKSDB_LITE
   kCompactionStyleFIFO = 0x2,
   // Disable background compaction. Compaction jobs are submitted
   // via CompactFiles().
-  // Not supported in ROCKSDB_LITE
   kCompactionStyleNone = 0x3,
 };
 
@@ -195,8 +193,6 @@ struct ColumnFamilyOptions {
 
   // Use this if you don't need to keep the data sorted, i.e. you'll never use
   // an iterator, only Put() and Get() API calls
-  //
-  // Not supported in ROCKSDB_LITE
   ColumnFamilyOptions* OptimizeForPointLookup(
       uint64_t block_cache_size_mb);
 
@@ -214,8 +210,6 @@ struct ColumnFamilyOptions {
   // biggest performance gains.
   // Note: we might use more memory than memtable_memory_budget during high
   // write rate period
-  //
-  // OptimizeUniversalStyleCompaction is not supported in ROCKSDB_LITE
   ColumnFamilyOptions* OptimizeLevelStyleCompaction(
       uint64_t memtable_memory_budget = 512 * 1024 * 1024);
   ColumnFamilyOptions* OptimizeUniversalStyleCompaction(
@@ -832,17 +826,18 @@ typedef std::function<yb::Result<bool>(const MemTable&)> MemTableFilter;
 using IteratorReplacer =
     std::function<InternalIterator*(InternalIterator*, Arena*, const Slice&)>;
 
+using CompactionContextFactory = std::function<CompactionContextPtr(
+    CompactionFeed* feed, const CompactionContextOptions& options)>;
+
 struct DBOptions {
   // Some functions that make it easier to optimize RocksDB
 
-#ifndef ROCKSDB_LITE
   // By default, RocksDB uses only one background thread for flush and
   // compaction. Calling this function will set it up such that total of
   // `total_threads` is used. Good value for `total_threads` is the number of
   // cores. You almost definitely want to call this function if your system is
   // bottlenecked by RocksDB.
   DBOptions* IncreaseParallelism(int total_threads = 16);
-#endif  // ROCKSDB_LITE
 
   // If true, the database will be created if it is missing.
   // Default: false
@@ -1307,17 +1302,14 @@ struct DBOptions {
 
   // A global cache for table-level rows.
   // Default: nullptr (disabled)
-  // Not supported in ROCKSDB_LITE mode!
   std::shared_ptr<Cache> row_cache;
 
-#ifndef ROCKSDB_LITE
   // A filter object supplied to be invoked while processing write-ahead-logs
   // (WALs) during recovery. The filter provides a way to inspect log
   // records, ignoring a particular record or skipping replay.
   // The filter is invoked at startup and is invoked from a single-thread
   // currently.
   const WalFilter* wal_filter;
-#endif  // ROCKSDB_LITE
 
   // If true, then DB::Open / CreateColumnFamily / DropColumnFamily
   // / SetOptions will fail if options file is not detected or properly
@@ -1333,6 +1325,8 @@ struct DBOptions {
   // Boundary extractor is used to retrieve user defined values for record.
   // Also it decodes those values during load of metafile.
   std::shared_ptr<BoundaryValuesExtractor> boundary_extractor;
+
+  std::shared_ptr<CompactionContextFactory> compaction_context_factory;
 
   // Function that returns max file size for compaction.
   // Supported only for level0 of universal style compactions.
@@ -1359,6 +1353,13 @@ struct DBOptions {
   // The filters are currently used to expire files in time-series DBs that have
   // completely expired based on their table and/or column TTL.
   std::shared_ptr<CompactionFileFilterFactory> compaction_file_filter_factory;
+
+  // Metrics tracker for tasks in the priority thread pool.
+  std::shared_ptr<RocksDBPriorityThreadPoolMetrics> priority_thread_pool_metrics;
+
+  // Used for identifying disk in priorty pool. This corresponds to the hashed
+  // data root directory for the rocksdb instance.
+  uint64_t disk_group_no;
 };
 
 // Options to control the behavior of a database (passed to DB::Open)
@@ -1484,14 +1485,12 @@ struct ReadOptions {
   // added data) and is optimized for sequential reads. It will return records
   // that were inserted into the database after the creation of the iterator.
   // Default: false
-  // Not supported in ROCKSDB_LITE mode!
   bool tailing;
 
   // Specify to create a managed iterator -- a special iterator that
   // uses less resources by having the ability to free its underlying
   // resources on request.
   // Default: false
-  // Not supported in ROCKSDB_LITE mode!
   bool managed;
 
   // Enable a total order seek regardless of index format (e.g. hash index)
@@ -1645,7 +1644,7 @@ struct CompactRangeOptions {
   // if there is a compaction filter
   BottommostLevelCompaction bottommost_level_compaction =
       BottommostLevelCompaction::kIfHaveCompactionFilter;
+
+  bool skip_flush = false;
 };
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_OPTIONS_H

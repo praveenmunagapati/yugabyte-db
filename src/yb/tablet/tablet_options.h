@@ -10,18 +10,22 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_TABLET_TABLET_OPTIONS_H
-#define YB_TABLET_TABLET_OPTIONS_H
 
+#pragma once
+
+#include <future>
 #include <memory>
 #include <vector>
 
 #include "yb/util/env.h"
+#include "yb/util/threadpool.h"
 #include "yb/rocksdb/env.h"
 
 #include "yb/client/client_fwd.h"
 
 #include "yb/consensus/log_fwd.h"
+
+#include "yb/docdb/local_waiting_txn_registry.h"
 
 #include "yb/server/server_fwd.h"
 
@@ -32,24 +36,31 @@ class Cache;
 class EventListener;
 class MemoryMonitor;
 class Env;
+
+struct RocksDBPriorityThreadPoolMetrics;
 }
 
 namespace yb {
 
+class AutoFlagsManager;
 class Env;
+class MemTracker;
 class MetricRegistry;
 
 namespace tablet {
 
-YB_STRONGLY_TYPED_BOOL(IsDropTable);
-
+// Common for all tablets within TabletManager.
 struct TabletOptions {
   std::shared_ptr<rocksdb::Cache> block_cache;
   std::shared_ptr<rocksdb::MemoryMonitor> memory_monitor;
   std::vector<std::shared_ptr<rocksdb::EventListener>> listeners;
   yb::Env* env = Env::Default();
   rocksdb::Env* rocksdb_env = rocksdb::Env::Default();
+  std::shared_ptr<rocksdb::RateLimiter> rate_limiter;
+  std::shared_ptr<rocksdb::RocksDBPriorityThreadPoolMetrics> priority_thread_pool_metrics;
 };
+
+using TransactionManagerProvider = std::function<client::TransactionManager&()>;
 
 struct TabletInitData {
   RaftGroupMetadataPtr metadata;
@@ -59,7 +70,7 @@ struct TabletInitData {
   std::shared_ptr<MemTracker> block_based_table_mem_tracker;
   MetricRegistry* metric_registry = nullptr;
   log::LogAnchorRegistryPtr log_anchor_registry;
-  TabletOptions tablet_options;
+  const TabletOptions tablet_options;
   std::string log_prefix_suffix;
   TransactionParticipantContext* transaction_participant_context = nullptr;
   client::LocalTabletFilter local_tablet_filter;
@@ -69,8 +80,13 @@ struct TabletInitData {
   SnapshotCoordinator* snapshot_coordinator = nullptr;
   TabletSplitter* tablet_splitter = nullptr;
   std::function<HybridTime(RaftGroupMetadata*)> allowed_history_cutoff_provider;
+  TransactionManagerProvider transaction_manager_provider;
+  LocalWaitingTxnRegistry* waiting_txn_registry = nullptr;
+  ThreadPool* wait_queue_pool = nullptr;
+  AutoFlagsManager* auto_flags_manager = nullptr;
+  ThreadPool* full_compaction_pool;
+  scoped_refptr<yb::AtomicGauge<uint64_t>> post_split_compaction_added;
 };
 
 } // namespace tablet
 } // namespace yb
-#endif // YB_TABLET_TABLET_OPTIONS_H

@@ -36,12 +36,12 @@ public class AvailabilityZone extends Model {
   public UUID uuid;
 
   @Column(length = 25, nullable = false)
-  @ApiModelProperty(value = "AZ code", example = "AWS")
+  @ApiModelProperty(value = "AZ code", example = "us-west1-a")
   public String code;
 
   @Column(length = 100, nullable = false)
   @Constraints.Required
-  @ApiModelProperty(value = "AZ name", example = "south-east-1", required = true)
+  @ApiModelProperty(value = "AZ name", example = "us-west1-a", required = true)
   public String name;
 
   @Constraints.Required
@@ -65,11 +65,11 @@ public class AvailabilityZone extends Model {
     this.active = active;
   }
 
-  @Column(length = 63)
+  @Column(length = 80)
   @ApiModelProperty(value = "AZ subnet", example = "subnet id")
   public String subnet;
 
-  @Column(length = 63)
+  @Column(length = 80)
   @ApiModelProperty(value = "AZ secondary subnet", example = "secondary subnet id")
   public String secondarySubnet;
 
@@ -80,7 +80,7 @@ public class AvailabilityZone extends Model {
 
   @ApiModelProperty(value = "Path to Kubernetes configuration file", accessMode = READ_ONLY)
   public String getKubeconfigPath() {
-    Map<String, String> configMap = this.getConfig();
+    Map<String, String> configMap = this.getUnmaskedConfig();
     return configMap.getOrDefault("KUBECONFIG", null);
   }
 
@@ -89,14 +89,13 @@ public class AvailabilityZone extends Model {
   }
 
   public void updateConfig(Map<String, String> configMap) {
-    Map<String, String> config = getConfig();
+    Map<String, String> config = getUnmaskedConfig();
     config.putAll(configMap);
     setConfig(config);
-    save();
   }
 
   @JsonIgnore
-  public Map<String, String> getConfig() {
+  public Map<String, String> getUnmaskedConfig() {
     return this.config == null ? new HashMap<>() : this.config;
   }
 

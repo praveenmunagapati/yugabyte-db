@@ -11,8 +11,10 @@
 // under the License.
 //
 
-#ifndef YB_SERVER_SKEWED_CLOCK_H
-#define YB_SERVER_SKEWED_CLOCK_H
+#pragma once
+
+#include <atomic>
+#include <chrono>
 
 #include "yb/util/physical_time.h"
 
@@ -67,5 +69,3 @@ class SkewedClockDeltaChanger {
 
 } // namespace server
 } // namespace yb
-
-#endif // YB_SERVER_SKEWED_CLOCK_H

@@ -9,22 +9,20 @@ menu:
     name: Azure Kubernetes Service
     identifier: k8s-aks-1
     weight: 624
-type: page
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 
 <ul class="nav nav-tabs-alt nav-tabs-yb">
   <li >
-    <a href="/latest/deploy/kubernetes/single-zone/aks/helm-chart" class="nav-link active">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+    <a href="../helm-chart/" class="nav-link active">
+      <i class="fa-solid fa-cubes" aria-hidden="true"></i>
       Helm chart
     </a>
   </li>
   <li >
-    <a href="/latest/deploy/kubernetes/single-zone/aks/statefulset-yaml" class="nav-link">
-      <i class="fas fa-cubes" aria-hidden="true"></i>
+    <a href="../statefulset-yaml/" class="nav-link">
+      <i class="fa-solid fa-cubes" aria-hidden="true"></i>
       StatefulSet YAML
     </a>
   </li>
@@ -40,7 +38,7 @@ Before you can deploy YugabyteDB on AKS, you need to verify that the following a
 
 - `kubectl`
   - For more information, see [Install and Set Up kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl/).
-  - [Kubernetes API v1.18.0](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.18/)
+  - [Kubernetes API](https://kubernetes.io/docs/reference/kubernetes-api/)
 - Helm 3.4 or later
   - For more information, see [Installing Helm](https://helm.sh/docs/intro/install/).
 
@@ -81,22 +79,24 @@ $ az account list-locations
 
 For the purposes of this demo we are going to choose the “West US” location.
 
-```sh
- {
-    "displayName": "West US",
-    "id": "/subscriptions/53f36dd9-85d8-4690-b45b-92733d97e6c3/locations/westus",
-    "latitude": "37.783",
-    "longitude": "-122.417",
-    "name": "westus",
-    "subscriptionId": null
-  },
+```output.json
+{
+  "displayName": "West US",
+  "id": "/subscriptions/53f36dd9-85d8-4690-b45b-92733d97e6c3/locations/westus",
+  "latitude": "37.783",
+  "longitude": "-122.417",
+  "name": "westus",
+  "subscriptionId": null
+},
 ```
 
 Next, create the resource group by running the following command, specifying the location:
 
 ```sh
 $ az group create --name yugabytedbRG --location westus
+```
 
+```output.json
 {
   "id": "/subscriptions/53f36dd9-85d8-4690-b45b-92733d97e6c3/resourceGroups/yugabytedbRG",
   "location": "westus",
@@ -116,7 +116,7 @@ You should now be able to view showing the “yugabytedbRG” resource group in 
 
 ### Step 3: Create the Kubernetes cluster
 
-You can now create a Kubernetes cluster by running the following command. 
+You can now create a Kubernetes cluster by running the following command.
 
 {{< note title="Note" >}}
 
@@ -138,7 +138,7 @@ The `--generate-ssh-keys` argument auto-generates SSH public and private key fil
 
 You should see the following output:
 
-```
+```output
 Finished service principal creation[###################]  100.0000%
  - Running ..
 ```
@@ -155,7 +155,7 @@ $ ssh-keygen -t rsa -b 2048
 
 Follow the prompts to create the` id_rsa `and `id_rsa.pub` files and note the location where they are stored. Now, run the following command:
 
-```
+```sh
 $ az aks create \
 --resource-group yugabytedbRG \
 --name yugabytedbAKSCluster \
@@ -173,11 +173,11 @@ $ az aks get-credentials --resource-group yugabytedbRG --name yugabytedbAKSClust
 
 You should see output similar to the following:
 
-```
+```output
 Merged "yugabytedbAKSCluster" as current context in /Users/yugabyte-user/.kube/config
 ```
 
-If you generated your own SSH keys, point `kubectl `to the cluster by running the following command instead:
+If you generated your own SSH keys, point `kubectl` to the cluster by running the following command instead:
 
 ```sh
 $ az aks get-credentials --resource-group yugabytedbRG --name yugabytedbAKSCluster -ssh-key-file <path_to>id_rsa
@@ -203,7 +203,7 @@ $ kubectl create clusterrolebinding yb-kubernetes-dashboard --clusterrole=cluste
 
 And then run the following Azure CLI command:
 
-```
+```sh
 $ az aks browse --resource-group yugabytedbRG --name yugabytedbAKSCluster
 ```
 
@@ -231,18 +231,18 @@ Now, make sure that you get the latest update from the `charts` repository by ru
 $ helm repo update
 ```
 
-```
+```output
 Hang tight while we grab the latest from your chart repositories...
 ...Successfully got an update from the "yugabytedb" chart repository
 ```
 
 ```sh
-$ helm search repo yugabytedb/yugabyte
+$ helm search repo yugabytedb/yugabyte --version {{<yb-version version="stable" format="short">}}
 ```
 
-```
-NAME               	CHART VERSION	APP VERSION	DESCRIPTION
-yugabytedb/yugabyte	2.1.4        	2.1.4.0-b5 	YugabyteDB is the high-performance distributed ...
+```output
+NAME                 CHART VERSION  APP VERSION   DESCRIPTION
+yugabytedb/yugabyte  {{<yb-version version="stable" format="short">}}          {{<yb-version version="stable" format="build">}}  YugabyteDB is the high-performance distributed ...
 ```
 
 #### Create the namespace
@@ -255,7 +255,7 @@ $ kubectl create namespace yb-demo
 
 The following message should appear:
 
-```
+```output
 namespace/yb-demo created
 ```
 
@@ -265,6 +265,7 @@ Next, install YugabyteDB in the `yb-demo` namespace by running the following com
 
 ```sh
 $ helm install yb-demo -n yb-demo yugabytedb/yugabyte \
+ --version {{<yb-version version="stable" format="short">}} \
  --set storage.master.count=1 \
  --set storage.tserver.count=1 \
  --set storage.master.storageClass=default \
@@ -280,7 +281,7 @@ $ helm install yb-demo -n yb-demo yugabytedb/yugabyte \
  --timeout=15m
 ```
 
-Depending on your resources, it may take some time to get everything installed, deployed, and configured. 
+Depending on your resources, it may take some time to get everything installed, deployed, and configured.
 
 After you see a `success` message, you can verify that the YugabyteDB pods are running by running the following command:
 
@@ -292,7 +293,7 @@ $ kubectl get pods --namespace yb-demo
 
 To access the YugabyteDB Admin UI, run the following command to locate the **External IP** entry associated with `yb-master-ui` and port `7000`.
 
-```
+```sh
 $ kubectl get services --namespace yb-demo
 ```
 

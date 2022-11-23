@@ -25,8 +25,7 @@
  *--------------------------------------------------------------------------------------------------
  */
 
-#ifndef YBCEXPR_H
-#define YBCEXPR_H
+#pragma once
 
 #include "postgres.h"
 #include "nodes/execnodes.h"
@@ -34,13 +33,6 @@
 #include "yb/yql/pggate/ybc_pg_typedefs.h"
 
 #include "yb/yql/pggate/ybc_pggate.h"
-
-typedef struct YBExprParamDesc {
-	int32_t attno;
-	int32_t typid;
-	int32_t typmod;
-	int32_t collid;
-} YBExprParamDesc;
 
 // Construct column reference expression.
 extern YBCPgExpr YBCNewColumnRef(YBCPgStatement ybc_stmt, int16_t attr_num,
@@ -55,22 +47,17 @@ extern YBCPgExpr YBCNewConstant(YBCPgStatement ybc_stmt, Oid type_id,
 extern YBCPgExpr YBCNewConstantVirtual(YBCPgStatement ybc_stmt, Oid type_id,
 									   YBCPgDatumKind kind);
 
-// Construct a generic eval_expr call for given a PG Expr and its expected type and attno.
-extern YBCPgExpr YBCNewEvalSingleParamExprCall(YBCPgStatement ybc_stmt, 
-                                               Expr *expr, 
-                                               int32_t attno, 
-                                               int32_t type_id, 
-                                               int32_t type_mod,
-                                               int32_t collation_id);
+extern Expr *YbExprInstantiateParams(Expr* expr, EState *estate);
+extern PushdownExprs *YbInstantiateRemoteParams(PushdownExprs *remote,
+												EState *estate);
 
-YBCPgExpr YBCNewEvalExprCall(YBCPgStatement ybc_stmt,
-                             Expr *pg_expr,
-                             YBExprParamDesc *params,
-                             int num_params);
+extern bool YbCanPushdownExpr(Expr *pg_expr, List **params);
+
+extern bool YbIsTransactionalExpr(Node *pg_expr);
+
+YBCPgExpr YBCNewEvalExprCall(YBCPgStatement ybc_stmt, Expr *pg_expr);
 
 extern YbPgExecOutParam *YbCreateExecOutParam();
 
 extern void YbWriteExecOutParam(YbPgExecOutParam *out_param,
 								const YbcPgExecOutParamValue *value);
-
-#endif							/* YBCEXPR_H */

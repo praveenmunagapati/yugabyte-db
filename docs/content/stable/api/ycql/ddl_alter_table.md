@@ -7,8 +7,7 @@ menu:
   stable:
     parent: api-cassandra
     weight: 1220
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 ## Synopsis
@@ -46,7 +45,7 @@ Where
 ## Semantics
 
 - An error is raised if `table_name` does not exist in the associated keyspace.
-- Columns that are part of `PRIMARY KEY` cannot be be altered.
+- Columns that are part of `PRIMARY KEY` cannot be altered.
 - When adding a column, its value for all existing rows in the table defaults to `null`.
 - After dropping a column, all values currently stored for that column in the table are discarded (if any).
 
@@ -147,8 +146,8 @@ CREATE TABLE example.employees (
 ## See also
 
 - [`CREATE TABLE`](../ddl_create_table)
-- [`DELETE`](../dml_delete)
+- [`DELETE`](../dml_delete/)
 - [`DROP TABLE`](../ddl_drop_table)
 - [`INSERT`](../dml_insert)
-- [`SELECT`](../dml_select)
-- [`UPDATE`](../dml_update)
+- [`SELECT`](../dml_select/)
+- [`UPDATE`](../dml_update/)

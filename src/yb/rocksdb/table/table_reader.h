@@ -21,12 +21,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#ifndef YB_ROCKSDB_TABLE_TABLE_READER_H
-#define YB_ROCKSDB_TABLE_TABLE_READER_H
+#pragma once
 
 #include <memory>
 
-#include "yb/util/slice.h"
+#include "yb/rocksdb/status.h"
+
+#include "yb/util/result.h"
 
 namespace rocksdb {
 
@@ -37,6 +38,8 @@ struct ReadOptions;
 struct TableProperties;
 class GetContext;
 class InternalIterator;
+class RandomAccessFileReader;
+class WritableFile;
 
 // A Table is a sorted map from strings to strings.  Tables are
 // immutable and persistent.  A Table may be safely accessed from
@@ -49,7 +52,7 @@ class TableReader {
   virtual bool IsSplitSst() const = 0;
 
   // Set data file reader for SST split into data and metadata files.
-  virtual void SetDataFileReader(unique_ptr<RandomAccessFileReader>&& data_file) = 0;
+  virtual void SetDataFileReader(std::unique_ptr<RandomAccessFileReader>&& data_file) = 0;
 
   // Returns a new iterator over the table contents.
   // The result of NewIterator() is initially invalid (caller must
@@ -123,5 +126,3 @@ class TableReader {
 };
 
 }  // namespace rocksdb
-
-#endif  // YB_ROCKSDB_TABLE_TABLE_READER_H

@@ -29,18 +29,13 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_RW_SEMAPHORE_H
-#define YB_UTIL_RW_SEMAPHORE_H
+#pragma once
 
 #include <boost/smart_ptr/detail/yield_k.hpp>
 #include <glog/logging.h>
 
 #include "yb/gutil/atomicops.h"
-#include "yb/gutil/macros.h"
 #include "yb/gutil/port.h"
-#include "yb/util/debug-util.h"
-
-#include "yb/util/thread.h"
 
 namespace yb {
 
@@ -144,7 +139,7 @@ class rw_semaphore {
     WaitPendingReaders();
 
 #ifndef NDEBUG
-    writer_tid_ = Thread::CurrentThreadId();
+    AssignWriterTid();
 #endif // NDEBUG
     RecordLockHolderStack();
   }
@@ -204,9 +199,10 @@ class rw_semaphore {
  private:
   volatile Atomic32 state_;
 #ifndef NDEBUG
+  void AssignWriterTid();
+
   int64_t writer_tid_ = kInvalidThreadId;
 #endif // NDEBUG
 };
 
 } // namespace yb
-#endif /* YB_UTIL_RW_SEMAPHORE_H */

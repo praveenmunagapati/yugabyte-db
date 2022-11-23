@@ -3,8 +3,8 @@
 package com.yugabyte.yw.commissioner.tasks.upgrade;
 
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
-import com.yugabyte.yw.commissioner.SubTaskGroup;
 import com.yugabyte.yw.commissioner.UpgradeTaskBase;
+import com.yugabyte.yw.commissioner.tasks.UniverseTaskBase.ServerType;
 import com.yugabyte.yw.commissioner.UserTaskDetails.SubTaskGroupType;
 import com.yugabyte.yw.forms.SystemdUpgradeParams;
 import com.yugabyte.yw.models.helpers.NodeDetails;
@@ -45,8 +45,21 @@ public class SystemdUpgrade extends UpgradeTaskBase {
           // Verify the request params and fail if invalid
           taskParams().verifyParams(getUniverse());
 
+          if (taskParams().ybcInstalled) {
+            createServerControlTasks(nodes.getRight(), ServerType.CONTROLLER, "stop")
+                .setSubTaskGroupType(getTaskSubGroupType());
+          }
           // Rolling Upgrade Systemd
-          createRollingUpgradeTaskFlow(this::createSystemdUpgradeTasks, nodes, false);
+          createRollingUpgradeTaskFlow(
+              (nodes1, processTypes) -> createSystemdUpgradeTasks(nodes1, getSingle(processTypes)),
+              nodes,
+              UpgradeContext.builder()
+                  .reconfigureMaster(false)
+                  .runBeforeStopping(false)
+                  .processInactiveMaster(false)
+                  .skipStartingProcesses(true)
+                  .build(),
+              false);
 
           // Persist useSystemd changes
           createPersistSystemdUpgradeTask(true).setSubTaskGroupType(getTaskSubGroupType());
@@ -58,11 +71,18 @@ public class SystemdUpgrade extends UpgradeTaskBase {
       return;
     }
 
+    // Needed for read replica details
+    taskParams().clusters = getUniverse().getUniverseDetails().clusters;
+
     // Conditional Provisioning
-    createSetupServerTasks(nodes, true /* isSystemdUpgrade */)
+    createSetupServerTasks(nodes, p -> p.isSystemdUpgrade = true)
         .setSubTaskGroupType(SubTaskGroupType.Provisioning);
+
     // Conditional Configuring
-    createConfigureServerTasks(nodes, false, false, false, true /* isSystemdUpgrade */)
+    createConfigureServerTasks(nodes, params -> params.isSystemdUpgrade = true)
         .setSubTaskGroupType(SubTaskGroupType.ConfigureUniverse);
+
+    // Start using SystemD
+    createServerControlTasks(nodes, processType, "start", params -> params.useSystemd = true);
   }
 }

@@ -19,6 +19,7 @@ import com.yugabyte.yw.common.PlatformServiceException;
 import com.yugabyte.yw.common.Util;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.models.Universe;
+import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
 import java.util.Arrays;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -67,11 +68,27 @@ public class AllowedActionsHelper {
    * @return error string if the node is not allowed to perform the action otherwise null.
    */
   private String nodeActionErrOrNull(NodeActionType action) {
-    if (action == NodeActionType.STOP || action == NodeActionType.REMOVE) {
+    // Temporarily no validation for Hard Reboot task to unblock cloud.
+    // Starting a discussion on desired impl of removeMasterErrOrNull and
+    // removeSingleNodeErrOrNull. We will add validation after.
+    if (action == NodeActionType.STOP
+        || action == NodeActionType.REMOVE
+        || action == NodeActionType.REBOOT) {
       String errorMsg = removeMasterErrOrNull(action);
-      if (errorMsg != null) return errorMsg;
-      errorMsg = removeSingleNodeErrOrNull1(action);
-      if (errorMsg != null) return errorMsg;
+      if (errorMsg != null) {
+        return errorMsg;
+      }
+      errorMsg = removeSingleNodeErrOrNull(action);
+      if (errorMsg != null) {
+        return errorMsg;
+      }
+    }
+
+    if (action == NodeActionType.DELETE) {
+      String errorMsg = deleteSingleNodeErrOrNull(action);
+      if (errorMsg != null) {
+        return errorMsg;
+      }
     }
 
     if (action == START_MASTER) {
@@ -83,13 +100,15 @@ public class AllowedActionsHelper {
       // TODO: Clean this up as this null is probably test artifact
       return errorMsg(action, "It is in null state");
     }
-    if (!node.state.allowedActions().contains(action)) {
+    try {
+      node.validateActionOnState(action);
+    } catch (RuntimeException ex) {
       return errorMsg(action, "It is in " + node.state + " state");
     }
     return null;
   }
 
-  private String removeSingleNodeErrOrNull1(NodeActionType action) {
+  private String removeSingleNodeErrOrNull(NodeActionType action) {
     UniverseDefinitionTaskParams.Cluster cluster = universe.getCluster(node.placementUuid);
     if (cluster.clusterType == PRIMARY) {
       if (node.isMaster) {
@@ -99,7 +118,7 @@ public class AllowedActionsHelper {
                 .getUniverseDetails()
                 .getNodesInCluster(cluster.uuid)
                 .stream()
-                .filter((n) -> n != node && n.state == Live)
+                .filter(n -> n != node && n.state == Live)
                 .count();
         if (numNodesUp == 0) {
           return errorMsg(action, "It is a last live node in a PRIMARY cluster");
@@ -119,7 +138,7 @@ public class AllowedActionsHelper {
                 .getUniverseDetails()
                 .getNodesInCluster(cluster.uuid)
                 .stream()
-                .filter((n) -> n.isMaster && n.state == Live)
+                .filter(n -> n.isMaster && n.state == Live)
                 .count();
         if (numMasterNodesUp <= (cluster.userIntent.replicationFactor + 1) / 2) {
           return errorMsg(
@@ -135,6 +154,23 @@ public class AllowedActionsHelper {
     return null;
   }
 
+  private String deleteSingleNodeErrOrNull(NodeActionType action) {
+    UniverseDefinitionTaskParams.Cluster cluster = universe.getCluster(node.placementUuid);
+    if ((cluster.clusterType == PRIMARY) && (node.state == NodeState.Decommissioned)) {
+      int nodesInCluster = universe.getUniverseDetails().getNodesInCluster(cluster.uuid).size();
+      if (nodesInCluster <= cluster.userIntent.replicationFactor) {
+        return errorMsg(
+            action,
+            "Unable to have less nodes than RF (count = "
+                + nodesInCluster
+                + ", replicationFactor = "
+                + cluster.userIntent.replicationFactor
+                + ")");
+      }
+    }
+    return null;
+  }
+
   /** @return err message if disallowed or null */
   private String startMasterErrOrNull() {
     if (node.isMaster) {
@@ -145,6 +181,9 @@ public class AllowedActionsHelper {
     }
     if (!Util.areMastersUnderReplicated(node, universe)) {
       return errorMsg(START_MASTER, "There are already enough masters");
+    }
+    if (node.dedicatedTo != null) {
+      return errorMsg(START_MASTER, "Node is dedicated, use START instead");
     }
     return null;
   }

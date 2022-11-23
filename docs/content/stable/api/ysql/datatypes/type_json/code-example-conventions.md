@@ -8,8 +8,7 @@ menu:
     identifier: code-example-conventions
     parent: api-ysql-datatypes-json
     weight: 30
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 ## Note about the code examples
@@ -40,7 +39,7 @@ For these reasons, each code example is presented as a `DO` block with this patt
 
 ## Note about SQL array literals
 
-RFC 7159 defines the syntax for a JSON _array_ as a comma-separated list of items surrounded by `[]` and  the syntax for a JSON _object_ as a comma-separated list of key-value pairs surrounded by `{}`. The literal for a SQL array is a `text` value with an inner syntax, typecasted the array's data type: the value starts with `{` and ends with `}` and contains a comma-separated list whose items are not themselves single-quoted but are all taken to be values of the array's data type. So this SQL array value:
+RFC 7159 defines the syntax for a JSON _array_ as a comma-separated list of items surrounded by `[]` and  the syntax for a JSON _object_ as a comma-separated list of key-value pairs surrounded by `{}`. The literal for a SQL array is a `text` value with an inner syntax, typecast the array's data type: the value starts with `{` and ends with `}` and contains a comma-separated list whose items are not themselves single-quoted but are all taken to be values of the array's data type. So this SQL array value:
 
 ```
 array['a', 'b', 'c']::text[]

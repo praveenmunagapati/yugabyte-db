@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_MEMORY_TRACKED_SHARED_PTR_IMPL_H_
-#define YB_UTIL_MEMORY_TRACKED_SHARED_PTR_IMPL_H_
+#pragma once
 
 #include "yb/util/memory/tracked_shared_ptr.h"
 
@@ -113,7 +112,7 @@ void TrackedSharedPtr<T>::Dump() {
               << " stack_trace: " << entry.first.stack_trace->Symbolize();
   }
   LOG(INFO) << "<<<";
-  CHECK(num_instances_ == instances_.size());
+  CHECK_EQ(num_instances_, instances_.size());
 }
 
 template <class T>
@@ -149,5 +148,3 @@ void TrackedSharedPtr<T>::UnregisterInstance() {
 }
 
 }  // namespace yb
-
-#endif // YB_UTIL_MEMORY_TRACKED_SHARED_PTR_IMPL_H_

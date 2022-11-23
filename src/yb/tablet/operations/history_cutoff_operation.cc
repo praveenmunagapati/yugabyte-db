@@ -17,21 +17,25 @@
 
 #include "yb/docdb/consensus_frontier.h"
 
+#include "yb/rocksdb/db.h"
+
 #include "yb/tablet/tablet.h"
 #include "yb/tablet/tablet_retention_policy.h"
+
+#include "yb/util/logging.h"
 
 namespace yb {
 namespace tablet {
 
 template <>
-void RequestTraits<consensus::HistoryCutoffPB>::SetAllocatedRequest(
-    consensus::ReplicateMsg* replicate, consensus::HistoryCutoffPB* request) {
-  replicate->set_allocated_history_cutoff(request);
+void RequestTraits<consensus::LWHistoryCutoffPB>::SetAllocatedRequest(
+    consensus::LWReplicateMsg* replicate, consensus::LWHistoryCutoffPB* request) {
+  replicate->ref_history_cutoff(request);
 }
 
 template <>
-consensus::HistoryCutoffPB* RequestTraits<consensus::HistoryCutoffPB>::MutableRequest(
-    consensus::ReplicateMsg* replicate) {
+consensus::LWHistoryCutoffPB* RequestTraits<consensus::LWHistoryCutoffPB>::MutableRequest(
+    consensus::LWReplicateMsg* replicate) {
   return replicate->mutable_history_cutoff();
 }
 

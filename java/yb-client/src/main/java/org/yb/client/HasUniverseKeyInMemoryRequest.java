@@ -13,12 +13,11 @@
 
 package org.yb.client;
 
-import com.google.protobuf.ByteString;
 import com.google.protobuf.Message;
-import org.jboss.netty.buffer.ChannelBuffer;
+import io.netty.buffer.ByteBuf;
+import org.yb.master.MasterEncryptionOuterClass;
+import org.yb.master.MasterTypes;
 import org.yb.util.Pair;
-
-import org.yb.master.Master;
 
 public class HasUniverseKeyInMemoryRequest extends YRpc<HasUniverseKeyInMemoryResponse> {
   private String universeKeyId;
@@ -29,10 +28,10 @@ public class HasUniverseKeyInMemoryRequest extends YRpc<HasUniverseKeyInMemoryRe
   }
 
   @Override
-  ChannelBuffer serialize(Message header) {
+  ByteBuf serialize(Message header) {
     assert header.isInitialized();
-    final Master.HasUniverseKeyInMemoryRequestPB.Builder builder =
-            Master.HasUniverseKeyInMemoryRequestPB.newBuilder();
+    final MasterEncryptionOuterClass.HasUniverseKeyInMemoryRequestPB.Builder builder =
+            MasterEncryptionOuterClass.HasUniverseKeyInMemoryRequestPB.newBuilder();
     builder.setVersionId(universeKeyId);
     return toChannelBuffer(header, builder.build());
   }
@@ -48,10 +47,10 @@ public class HasUniverseKeyInMemoryRequest extends YRpc<HasUniverseKeyInMemoryRe
   @Override
   Pair<HasUniverseKeyInMemoryResponse, Object> deserialize(
           CallResponse callResponse, String uuid) throws Exception {
-    final Master.HasUniverseKeyInMemoryResponsePB.Builder respBuilder =
-            Master.HasUniverseKeyInMemoryResponsePB.newBuilder();
+    final MasterEncryptionOuterClass.HasUniverseKeyInMemoryResponsePB.Builder respBuilder =
+            MasterEncryptionOuterClass.HasUniverseKeyInMemoryResponsePB.newBuilder();
     readProtobuf(callResponse.getPBMessage(), respBuilder);
-    Master.MasterErrorPB serverError = respBuilder.hasError() ? respBuilder.getError() : null;
+    MasterTypes.MasterErrorPB serverError = respBuilder.hasError() ? respBuilder.getError() : null;
     HasUniverseKeyInMemoryResponse response = new HasUniverseKeyInMemoryResponse(
             deadlineTracker.getElapsedMillis(), uuid, serverError, respBuilder.getHasKey());
     return new Pair<HasUniverseKeyInMemoryResponse, Object>(response, serverError);

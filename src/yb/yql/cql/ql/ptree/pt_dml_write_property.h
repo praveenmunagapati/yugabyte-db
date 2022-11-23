@@ -11,16 +11,11 @@
 // under the License.
 //
 
-#ifndef YB_YQL_CQL_QL_PTREE_PT_DML_WRITE_PROPERTY_H_
-#define YB_YQL_CQL_QL_PTREE_PT_DML_WRITE_PROPERTY_H_
+#pragma once
 
-#include "yb/common/schema.h"
-#include "yb/client/client.h"
 #include "yb/gutil/strings/substitute.h"
-#include "yb/master/master.pb.h"
+
 #include "yb/yql/cql/ql/ptree/list_node.h"
-#include "yb/yql/cql/ql/ptree/pt_expr.h"
-#include "yb/yql/cql/ql/ptree/pt_name.h"
 #include "yb/yql/cql/ql/ptree/pt_property.h"
 #include "yb/yql/cql/ql/ptree/tree_node.h"
 
@@ -47,12 +42,12 @@ class PTDmlWriteProperty : public PTProperty {
   // Constructor and destructor.
   // Constructor for DmlWritePropertyType::kDmlWriteProperty.
   PTDmlWriteProperty(MemoryContext *memctx,
-                  YBLocation::SharedPtr loc,
-                  const MCSharedPtr<MCString>& lhs_,
-                  const PTExpr::SharedPtr& rhs_);
+                     YBLocationPtr loc,
+                     const MCSharedPtr<MCString>& lhs_,
+                     const PTExprPtr& rhs_);
 
   PTDmlWriteProperty(MemoryContext *memctx,
-                  YBLocation::SharedPtr loc);
+                     YBLocationPtr loc);
 
   virtual ~PTDmlWriteProperty();
 
@@ -63,7 +58,7 @@ class PTDmlWriteProperty : public PTProperty {
   }
 
   // Node semantics analysis.
-  virtual CHECKED_STATUS Analyze(SemContext *sem_context) override;
+  virtual Status Analyze(SemContext *sem_context) override;
   void PrintSemanticAnalysisResult(SemContext *sem_context);
 
   DmlWritePropertyType property_type() const {
@@ -71,7 +66,7 @@ class PTDmlWriteProperty : public PTProperty {
   }
 
  protected:
-  bool IsValidProperty(const string& property_name) {
+  bool IsValidProperty(const std::string& property_name) {
     return kPropertyDataTypes.find(property_name) != kPropertyDataTypes.end();
   }
 
@@ -81,7 +76,7 @@ class PTDmlWriteProperty : public PTProperty {
   static const std::map<std::string, PTDmlWriteProperty::KVProperty> kPropertyDataTypes;
 };
 
-std::ostream& operator<<(ostream& os, const DmlWritePropertyType& property_type);
+std::ostream& operator<<(std::ostream& os, const DmlWritePropertyType& property_type);
 
 class PTDmlWritePropertyListNode : public TreeListNode<PTDmlWriteProperty> {
  public:
@@ -91,8 +86,8 @@ class PTDmlWritePropertyListNode : public TreeListNode<PTDmlWriteProperty> {
   typedef MCSharedPtr<const PTDmlWritePropertyListNode> SharedPtrConst;
 
   explicit PTDmlWritePropertyListNode(MemoryContext *memory_context,
-                                   YBLocation::SharedPtr loc,
-                                   const MCSharedPtr<PTDmlWriteProperty>& tnode = nullptr)
+                                      YBLocationPtr loc,
+                                      const MCSharedPtr<PTDmlWriteProperty>& tnode = nullptr)
       : TreeListNode<PTDmlWriteProperty>(memory_context, loc, tnode) {
   }
 
@@ -115,7 +110,7 @@ class PTDmlWritePropertyListNode : public TreeListNode<PTDmlWriteProperty> {
     return MCMakeShared<PTDmlWritePropertyListNode>(memctx, std::forward<TypeArgs>(args)...);
   }
 
-  virtual CHECKED_STATUS Analyze(SemContext *sem_context) override;
+  virtual Status Analyze(SemContext *sem_context) override;
 
   bool ignore_null_jsonb_attributes();
 };
@@ -131,7 +126,7 @@ class PTDmlWritePropertyMap : public PTDmlWriteProperty {
   typedef MCSharedPtr<const PTDmlWritePropertyMap> SharedPtrConst;
 
   PTDmlWritePropertyMap(MemoryContext *memctx,
-                     YBLocation::SharedPtr loc);
+                        YBLocationPtr loc);
 
   virtual ~PTDmlWritePropertyMap();
 
@@ -142,7 +137,7 @@ class PTDmlWritePropertyMap : public PTDmlWriteProperty {
   }
 
   // Node semantics analysis.
-  virtual CHECKED_STATUS Analyze(SemContext *sem_context) override;
+  virtual Status Analyze(SemContext *sem_context) override;
   void PrintSemanticAnalysisResult(SemContext *sem_context);
 
   void SetPropertyName(MCSharedPtr<MCString> property_name) {
@@ -173,5 +168,3 @@ struct Options {
 
 } // namespace ql
 } // namespace yb
-
-#endif // YB_YQL_CQL_QL_PTREE_PT_DML_WRITE_PROPERTY_H_

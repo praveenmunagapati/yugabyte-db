@@ -30,6 +30,9 @@
 # under the License.
 #
 
+set(YB_PCH_PREFIX server)
+set(YB_PCH_DEP_LIBS opid_proto)
+
 YB_INCLUDE_EXTENSIONS()
 
 #########################################
@@ -75,30 +78,31 @@ target_link_libraries(server_base_proto
   yb_common_proto
   protobuf
   rpc_header_proto
-  version_info_proto
-  wire_protocol_proto)
+  version_info_proto)
 
 #########################################
 # server_process
 #########################################
 
 set(SERVER_PROCESS_SRCS
+  call_home.cc
   default-path-handlers.cc
   generic_service.cc
   glog_metrics.cc
+  monitored_task.cc
+  pgsql_webserver_wrapper.cc
   pprof-path-handlers.cc
-  rpcz-path-handler.cc
   rpc_server.cc
+  rpcz-path-handler.cc
   server_base.cc
   server_base_options.cc
   skewed_clock.cc
   tcmalloc_metrics.cc
+  total_mem_watcher.cc
   tracing-path-handlers.cc
   webserver.cc
-  pgsql_webserver_wrapper.cc
   webserver_options.cc
   webui_util.cc
-  total_mem_watcher.cc
   ${RPC_SRCS_EXTENSIONS}
 )
 
@@ -113,14 +117,12 @@ target_link_libraries(server_process
   yb_util
   squeasel)
 
+if("${YB_TCMALLOC_ENABLED}" STREQUAL "1")
+  target_link_libraries(server_process profiler)
+endif()
+
 # This module depends on tcmalloc and profiler directly, so need to make
 # sure that they get linked in the right order.
-if("${YB_TCMALLOC_ENABLED}" STREQUAL "1")
-  message("Adding tcmalloc as a dependency of server_process")
-  target_link_libraries(server_process tcmalloc profiler)
-else()
-  message("Not adding tcmalloc as a dependency of server_process")
-endif()
 
 #########################################
 # server_process tests

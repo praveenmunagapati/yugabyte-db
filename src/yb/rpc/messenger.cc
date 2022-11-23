@@ -32,18 +32,15 @@
 
 #include "yb/rpc/messenger.h"
 
-#include <arpa/inet.h>
-#include <sys/socket.h>
 #include <sys/types.h>
-#include <unistd.h>
 
 #include <list>
 #include <mutex>
 #include <set>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 
-#include <gflags/gflags.h>
 #include <glog/logging.h>
 
 #include "yb/gutil/map-util.h"
@@ -51,9 +48,8 @@
 #include "yb/gutil/strings/substitute.h"
 
 #include "yb/rpc/acceptor.h"
-#include "yb/rpc/connection.h"
 #include "yb/rpc/constants.h"
-#include "yb/rpc/proxy.h"
+#include "yb/rpc/reactor.h"
 #include "yb/rpc/rpc_header.pb.h"
 #include "yb/rpc/rpc_metrics.h"
 #include "yb/rpc/rpc_service.h"
@@ -61,17 +57,19 @@
 #include "yb/rpc/tcp_stream.h"
 #include "yb/rpc/yb_rpc.h"
 
+#include "yb/util/debug-util.h"
 #include "yb/util/errno.h"
-#include "yb/util/flag_tags.h"
-#include "yb/util/logging.h"
+#include "yb/util/flags.h"
+#include "yb/util/format.h"
 #include "yb/util/metrics.h"
 #include "yb/util/monotime.h"
 #include "yb/util/net/dns_resolver.h"
 #include "yb/util/net/socket.h"
-#include "yb/util/scope_exit.h"
+#include "yb/util/result.h"
 #include "yb/util/size_literals.h"
 #include "yb/util/status.h"
-#include "yb/util/threadpool.h"
+#include "yb/util/status_format.h"
+#include "yb/util/status_log.h"
 #include "yb/util/thread_restrictions.h"
 #include "yb/util/trace.h"
 
@@ -79,23 +77,24 @@ using namespace std::literals;
 using namespace std::placeholders;
 using namespace yb::size_literals;
 
-using std::string;
+using std::shared_lock;
 using std::shared_ptr;
+using std::string;
 using strings::Substitute;
 
 DECLARE_int32(num_connections_to_server);
-DEFINE_int32(rpc_default_keepalive_time_ms, 65000,
+DEFINE_UNKNOWN_int32(rpc_default_keepalive_time_ms, 65000,
              "If an RPC connection from a client is idle for this amount of time, the server "
              "will disconnect the client. Setting flag to 0 disables this clean up.");
 TAG_FLAG(rpc_default_keepalive_time_ms, advanced);
-DEFINE_uint64(io_thread_pool_size, 4, "Size of allocated IO Thread Pool.");
+DEFINE_UNKNOWN_uint64(io_thread_pool_size, 4, "Size of allocated IO Thread Pool.");
 
-DEFINE_int64(outbound_rpc_memory_limit, 0, "Outbound RPC memory limit");
+DEFINE_UNKNOWN_int64(outbound_rpc_memory_limit, 0, "Outbound RPC memory limit");
 
-DEFINE_int32(rpc_queue_limit, 10000, "Queue limit for rpc server");
-DEFINE_int32(rpc_workers_limit, 1024, "Workers limit for rpc server");
+DEFINE_NON_RUNTIME_int32(rpc_queue_limit, 10000, "Queue limit for rpc server");
+DEFINE_NON_RUNTIME_int32(rpc_workers_limit, 1024, "Workers limit for rpc server");
 
-DEFINE_int32(socket_receive_buffer_size, 0, "Socket receive buffer size, 0 to use default");
+DEFINE_UNKNOWN_int32(socket_receive_buffer_size, 0, "Socket receive buffer size, 0 to use default");
 
 namespace yb {
 namespace rpc {
@@ -117,6 +116,9 @@ MessengerBuilder::MessengerBuilder(std::string name)
       num_connections_to_server_(GetAtomicFlag(&FLAGS_num_connections_to_server)) {
   AddStreamFactory(TcpStream::StaticProtocol(), TcpStream::Factory());
 }
+
+MessengerBuilder::~MessengerBuilder() = default;
+MessengerBuilder::MessengerBuilder(const MessengerBuilder&) = default;
 
 MessengerBuilder& MessengerBuilder::set_connection_keepalive_time(
     CoarseMonoClock::Duration keepalive) {
@@ -247,6 +249,10 @@ Status Messenger::ListenAddress(
 }
 
 Status Messenger::StartAcceptor() {
+  for (const auto& p : rpc_services_) {
+    p.second->FillEndpoints(&rpc_endpoints_);
+  }
+
   std::lock_guard<percpu_rwlock> guard(lock_);
   if (acceptor_) {
     return acceptor_->Start();
@@ -397,16 +403,11 @@ rpc::ThreadPool& Messenger::ThreadPool(ServicePriority priority) {
 }
 
 // Register a new RpcService to handle inbound requests.
-Status Messenger::RegisterService(const string& service_name,
-                                  const scoped_refptr<RpcService>& service) {
+Status Messenger::RegisterService(
+    const std::string& service_name, const scoped_refptr<RpcService>& service) {
   DCHECK(service);
-  std::lock_guard<percpu_rwlock> guard(lock_);
-  if (InsertIfNotPresent(&rpc_services_, service_name, service)) {
-    UpdateServicesCache(&guard);
-    return Status::OK();
-  } else {
-    return STATUS_SUBSTITUTE(AlreadyPresent, "Service $0 is already present", service_name);
-  }
+  rpc_services_.emplace(service_name, service);
+  return Status::OK();
 }
 
 void Messenger::ShutdownThreadPools() {
@@ -418,40 +419,18 @@ void Messenger::ShutdownThreadPools() {
 }
 
 void Messenger::UnregisterAllServices() {
-  decltype(rpc_services_) rpc_services_copy; // Drain rpc services here,
-                                             // to avoid deleting them in locked state.
-  {
-    std::lock_guard<percpu_rwlock> guard(lock_);
-    rpc_services_.swap(rpc_services_copy);
-    UpdateServicesCache(&guard);
-  }
+  CHECK_OK(rpc_services_counter_.DisableAndWaitForOps(CoarseTimePoint::max(), Stop::kTrue));
+  rpc_services_counter_.UnlockExclusiveOpMutex();
 
-  for (const auto& p : rpc_services_copy) {
+  for (const auto& p : rpc_services_) {
     p.second->StartShutdown();
   }
-  for (const auto& p : rpc_services_copy) {
+  for (const auto& p : rpc_services_) {
     p.second->CompleteShutdown();
   }
-  rpc_services_copy.clear();
-}
 
-// Unregister an RpcService.
-Status Messenger::UnregisterService(const string& service_name) {
-  scoped_refptr<RpcService> service;
-  {
-    std::lock_guard<percpu_rwlock> guard(lock_);
-    auto it = rpc_services_.find(service_name);
-    if (it == rpc_services_.end()) {
-      return STATUS(ServiceUnavailable, Substitute("service $0 not registered on $1",
-                   service_name, name_));
-    }
-    service = it->second;
-    rpc_services_.erase(it);
-    UpdateServicesCache(&guard);
-  }
-  service->StartShutdown();
-  service->CompleteShutdown();
-  return Status::OK();
+  rpc_services_.clear();
+  rpc_endpoints_.clear();
 }
 
 class NotifyDisconnectedReactorTask : public ReactorTask {
@@ -489,35 +468,50 @@ void Messenger::QueueOutboundCall(OutboundCallPtr call) {
   reactor->QueueOutboundCall(std::move(call));
 }
 
-void Messenger::QueueInboundCall(InboundCallPtr call) {
-  auto service = rpc_service(call->service_name());
-  if (PREDICT_FALSE(!service)) {
-    Status s = STATUS_FORMAT(ServiceUnavailable,
-                             "Service $0 not registered on $1",
-                             call->service_name(),
-                             name_);
+void Messenger::Handle(InboundCallPtr call, Queue queue) {
+  ScopedRWOperation op(&rpc_services_counter_, CoarseTimePoint::min());
+  if (!op.ok()) {
+    call->RespondFailure(ErrorStatusPB::FATAL_SERVER_SHUTTING_DOWN, MoveStatus(op));
+    return;
+  }
+  auto it = rpc_endpoints_.find(call->serialized_remote_method());
+  if (it == rpc_endpoints_.end()) {
+    auto remote_method = ParseRemoteMethod(call->serialized_remote_method());
+    Status s;
+    ErrorStatusPB::RpcErrorCodePB error_code = ErrorStatusPB::ERROR_NO_SUCH_SERVICE;
+    if (remote_method.ok()) {
+      if (rpc_services_.count(remote_method->service.ToBuffer())) {
+        error_code = ErrorStatusPB::ERROR_NO_SUCH_METHOD;
+        s = STATUS_FORMAT(
+            InvalidArgument, "Call on service $0 received from $1 with an invalid method name: $2",
+            remote_method->service.ToBuffer(),
+            call->remote_address(),
+            remote_method->method.ToBuffer());
+      } else {
+        s = STATUS_FORMAT(
+            ServiceUnavailable, "Service $0 not registered on $1",
+            remote_method->service.ToBuffer(), name_);
+      }
+    } else {
+      s = remote_method.status();
+    }
     LOG(WARNING) << s;
-    call->RespondFailure(ErrorStatusPB::ERROR_NO_SUCH_SERVICE, s);
+    call->RespondFailure(error_code, s);
     return;
   }
 
   // The RpcService will respond to the client on success or failure.
-  service->QueueInboundCall(std::move(call));
+  call->set_method_index(it->second.second);
+  it->second.first->QueueInboundCall(std::move(call));
 }
 
-void Messenger::Handle(InboundCallPtr call) {
-  auto service = rpc_service(call->service_name());
-  if (PREDICT_FALSE(!service)) {
-    Status s = STATUS_FORMAT(ServiceUnavailable,
-                             "Service $0 not registered on $1",
-                             call->service_name(),
-                             name_);
-    LOG(WARNING) << s;
-    call->RespondFailure(ErrorStatusPB::ERROR_NO_SUCH_SERVICE, s);
-    return;
+RpcServicePtr Messenger::TEST_rpc_service(const std::string& service_name) const {
+  ScopedRWOperation op(&rpc_services_counter_, CoarseTimePoint::min());
+  if (!op.ok()) {
+    return nullptr;
   }
-
-  service->Handle(std::move(call));
+  auto it = rpc_services_.find(service_name);
+  return it != rpc_services_.end() ? it->second : nullptr;
 }
 
 const std::shared_ptr<MemTracker>& Messenger::parent_mem_tracker() {
@@ -554,12 +548,13 @@ Messenger::Messenger(const MessengerBuilder &bld)
       connection_context_factory_(bld.connection_context_factory_),
       stream_factories_(bld.stream_factories_),
       listen_protocol_(bld.listen_protocol_),
+      rpc_services_counter_(name_ + " endpoints"),
       metric_entity_(bld.metric_entity_),
       io_thread_pool_(name_, FLAGS_io_thread_pool_size),
       scheduler_(&io_thread_pool_.io_service()),
       normal_thread_pool_(new rpc::ThreadPool(name_, bld.queue_limit_, bld.workers_limit_)),
       resolver_(new DnsResolver(&io_thread_pool_.io_service())),
-      rpc_metrics_(new RpcMetrics(bld.metric_entity_)),
+      rpc_metrics_(std::make_shared<RpcMetrics>(bld.metric_entity_)),
       num_connections_to_server_(bld.num_connections_to_server_) {
 #ifndef NDEBUG
   creation_stack_trace_.Collect(/* skip_frames */ 1);
@@ -592,8 +587,8 @@ size_t Messenger::max_concurrent_requests() const {
 }
 
 Reactor* Messenger::RemoteToReactor(const Endpoint& remote, uint32_t idx) {
-  uint32_t hashCode = hash_value(remote);
-  int reactor_idx = (hashCode + idx) % reactors_.size();
+  auto hash_code = hash_value(remote);
+  auto reactor_idx = (hash_code + idx) % reactors_.size();
   // This is just a static partitioning; where each connection
   // to a remote is assigned to a particular reactor. We could
   // get a lot fancier with assigning Sockaddrs to Reactors,
@@ -692,20 +687,8 @@ ScheduledTaskId Messenger::ScheduleOnReactor(
   return kInvalidTaskId;
 }
 
-void Messenger::UpdateServicesCache(std::lock_guard<percpu_rwlock>* guard) {
-  DCHECK_ONLY_NOTNULL(guard);
-
-  rpc_services_cache_.Set(rpc_services_);
-}
-
-scoped_refptr<RpcService> Messenger::rpc_service(const string& service_name) const {
-  auto cache = rpc_services_cache_.get();
-  auto it = cache->find(service_name);
-  if (it != cache->end()) {
-    // Since our cache is a cache of whole rpc_services_ map, we could check only it.
-    return it->second;
-  }
-  return scoped_refptr<RpcService>();
+scoped_refptr<MetricEntity> Messenger::metric_entity() const {
+  return metric_entity_;
 }
 
 } // namespace rpc

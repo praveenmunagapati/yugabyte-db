@@ -11,18 +11,19 @@
 // under the License.
 //
 
-#ifndef YB_DOCDB_BOUNDED_ROCKSDB_ITERATOR_H_
-#define YB_DOCDB_BOUNDED_ROCKSDB_ITERATOR_H_
+#pragma once
 
-#include <boost/optional/optional.hpp>
+#include <stdint.h>
 
-#include "yb/docdb/doc_key.h"
-#include "yb/docdb/key_bytes.h"
+#include <string>
+#include <vector>
 
-#include "yb/rocksdb/db.h"
+#include "yb/docdb/docdb_fwd.h"
+
+#include "yb/rocksdb/iterator.h"
+#include "yb/rocksdb/options.h"
 
 namespace yb {
-
 namespace docdb {
 
 class BoundedRocksDbIterator : public rocksdb::Iterator {
@@ -81,5 +82,3 @@ class BoundedRocksDbIterator : public rocksdb::Iterator {
 
 } // namespace docdb
 } // namespace yb
-
-#endif // YB_DOCDB_BOUNDED_ROCKSDB_ITERATOR_H_

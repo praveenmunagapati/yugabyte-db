@@ -6,6 +6,7 @@ import akka.stream.javadsl.Source;
 import akka.util.ByteString;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
 import java.net.HttpURLConnection;
@@ -17,6 +18,8 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 import play.libs.Json;
 import play.libs.ws.WSClient;
 import play.libs.ws.WSRequest;
@@ -25,11 +28,18 @@ import play.mvc.Http;
 
 /** Helper class API specific stuff */
 @Singleton
+@Slf4j
 public class ApiHelper {
 
   private static final Duration DEFAULT_GET_REQUEST_TIMEOUT = Duration.ofSeconds(10);
 
-  @Inject WSClient wsClient;
+  @Getter(onMethod_ = {@VisibleForTesting})
+  private final WSClient wsClient;
+
+  @Inject
+  public ApiHelper(WSClient wsClient) {
+    this.wsClient = wsClient;
+  }
 
   public boolean postRequest(String url) {
     try {
@@ -50,13 +60,13 @@ public class ApiHelper {
 
   public JsonNode postRequest(String url, JsonNode data, Map<String, String> headers) {
     WSRequest request = requestWithHeaders(url, headers);
-    CompletionStage<JsonNode> jsonPromise = request.post(data).thenApply(WSResponse::asJson);
+    CompletionStage<String> jsonPromise = request.post(data).thenApply(WSResponse::getBody);
     return handleJSONPromise(jsonPromise);
   }
 
   public JsonNode putRequest(String url, JsonNode data, Map<String, String> headers) {
     WSRequest request = requestWithHeaders(url, headers);
-    CompletionStage<JsonNode> jsonPromise = request.put(data).thenApply(WSResponse::asJson);
+    CompletionStage<String> jsonPromise = request.put(data).thenApply(WSResponse::getBody);
     return handleJSONPromise(jsonPromise);
   }
 
@@ -110,20 +120,26 @@ public class ApiHelper {
 
   public JsonNode getRequest(String url, Map<String, String> headers, Map<String, String> params) {
     WSRequest request = requestWithHeaders(url, headers);
+    request.setFollowRedirects(true);
     if (!params.isEmpty()) {
       for (Map.Entry<String, String> entry : params.entrySet()) {
         request.setQueryParameter(entry.getKey(), entry.getValue());
       }
     }
-    CompletionStage<JsonNode> jsonPromise = request.get().thenApply(WSResponse::asJson);
+    CompletionStage<String> jsonPromise = request.get().thenApply(WSResponse::getBody);
     return handleJSONPromise(jsonPromise);
   }
 
-  private JsonNode handleJSONPromise(CompletionStage<JsonNode> jsonPromise) {
+  private JsonNode handleJSONPromise(CompletionStage<String> jsonPromise) {
     try {
-      return jsonPromise.toCompletableFuture().get();
+      String jsonString = jsonPromise.toCompletableFuture().get();
+      return Json.parse(jsonString);
     } catch (InterruptedException | ExecutionException e) {
+      log.warn("Unexpected exception while parsing response", e);
       return ApiResponse.errorJSON(e.getMessage());
+    } catch (RuntimeException e) {
+      log.warn("Unexpected exception while parsing response", e);
+      throw e;
     }
   }
 
@@ -131,7 +147,7 @@ public class ApiHelper {
     WSRequest request = wsClient.url(url);
     if (!headers.isEmpty()) {
       for (Map.Entry<String, String> entry : headers.entrySet()) {
-        request.setHeader(entry.getKey(), entry.getValue());
+        request.addHeader(entry.getKey(), entry.getValue());
       }
     }
     return request;
@@ -172,8 +188,13 @@ public class ApiHelper {
       List<Http.MultipartFormData.Part<Source<ByteString, ?>>> partsList) {
     WSRequest request = wsClient.url(url);
     headers.forEach(request::addHeader);
-    CompletionStage<JsonNode> post =
-        request.post(Source.from(partsList)).thenApply(WSResponse::asJson);
+    CompletionStage<String> post =
+        request.post(Source.from(partsList)).thenApply(WSResponse::getBody);
     return handleJSONPromise(post);
+  }
+
+  public CompletionStage<WSResponse> getSimpleRequest(String url, Map<String, String> headers) {
+    WSRequest request = requestWithHeaders(url, headers).setFollowRedirects(true);
+    return request.get();
   }
 }

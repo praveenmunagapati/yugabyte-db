@@ -30,23 +30,21 @@
 // under the License.
 //
 
-#ifndef YB_MASTER_SYS_CATALOG_TEST_BASE_H_
-#define YB_MASTER_SYS_CATALOG_TEST_BASE_H_
+#pragma once
 
 #include <gtest/gtest.h>
 
 #include "yb/common/wire_protocol.h"
-#include "yb/master/catalog_manager.h"
 #include "yb/master/master.h"
-#include "yb/master/master.proxy.h"
 #include "yb/master/mini_master.h"
 #include "yb/master/sys_catalog.h"
+#include "yb/rpc/messenger.h"
+#include "yb/rpc/proxy.h"
 #include "yb/server/rpc_server.h"
 #include "yb/util/net/sockaddr.h"
-#include "yb/util/status.h"
+#include "yb/util/result.h"
+#include "yb/util/status_fwd.h"
 #include "yb/util/test_util.h"
-#include "yb/rpc/messenger.h"
-#include "yb/common/common.pb.h"
 
 using yb::rpc::Messenger;
 using yb::rpc::MessengerBuilder;
@@ -71,7 +69,6 @@ class SysCatalogTest : public YBTest {
     MessengerBuilder bld("Client");
     client_messenger_ = ASSERT_RESULT(bld.Build());
     rpc::ProxyCache proxy_cache(client_messenger_.get());
-    proxy_.reset(new MasterServiceProxy(&proxy_cache, mini_master_->bound_rpc_addr()));
   }
 
   void TearDown() override {
@@ -85,7 +82,6 @@ class SysCatalogTest : public YBTest {
   std::unique_ptr<Messenger> client_messenger_;
   std::unique_ptr<MiniMaster> mini_master_;
   Master* master_;
-  std::unique_ptr<MasterServiceProxy> proxy_;
 };
 
 const int64_t kLeaderTerm = 1;
@@ -115,7 +111,7 @@ std::pair<std::string, std::string> AssertMetadataEqualsHelper(C* ti_a, C* ti_b)
 #define ASSERT_METADATA_EQ(a, b) do { \
     auto string_reps = AssertMetadataEqualsHelper((a), (b)); \
     GTEST_ASSERT_( \
-      ::testing::internal::EqHelper<GTEST_IS_NULL_LITERAL_(a)>::Compare \
+      ::testing::internal::EqHelper::Compare \
           (#a, #b, string_reps.first, string_reps.second), \
           GTEST_FATAL_FAILURE_); \
   } while (false)
@@ -124,5 +120,3 @@ std::pair<std::string, std::string> AssertMetadataEqualsHelper(C* ti_a, C* ti_b)
 
 } // namespace master
 } // namespace yb
-
-#endif // YB_MASTER_SYS_CATALOG_TEST_BASE_H_

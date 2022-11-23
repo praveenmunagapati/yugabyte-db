@@ -2,15 +2,18 @@
 
 package com.yugabyte.yw.forms;
 
+import com.yugabyte.yw.metrics.MetricSettings;
 import io.swagger.annotations.ApiModel;
 import io.swagger.annotations.ApiModelProperty;
 import java.util.List;
+import java.util.UUID;
+import lombok.Data;
 import play.data.validation.Constraints;
 
 @ApiModel(description = "Metrics request data")
+@Data
 public class MetricQueryParams {
-  @Constraints.Required()
-  @ApiModelProperty(value = "Metrics", required = true)
+  @ApiModelProperty(value = "Metrics")
   private List<String> metrics;
 
   @Constraints.Required()
@@ -23,46 +26,30 @@ public class MetricQueryParams {
   @ApiModelProperty(value = "Node prefix")
   private String nodePrefix;
 
-  @ApiModelProperty(value = "Node name")
-  private String nodeName;
+  @ApiModelProperty(value = "Cluster UUIDs")
+  private List<UUID> clusterUuids;
 
-  public List<String> getMetrics() {
-    return metrics;
-  }
+  @ApiModelProperty(value = "Region code")
+  private List<String> regionCodes;
 
-  public void setMetrics(List<String> metrics) {
-    this.metrics = metrics;
-  }
+  @ApiModelProperty(value = "Availability zone code")
+  private List<String> availabilityZones;
 
-  public Long getStart() {
-    return start;
-  }
+  @ApiModelProperty(value = "Node names")
+  private List<String> nodeNames;
 
-  public void setStart(Long start) {
-    this.start = start;
-  }
+  @ApiModelProperty(value = "XCluster config UUID for replication lag queries")
+  private UUID xClusterConfigUuid;
 
-  public Long getEnd() {
-    return end;
-  }
+  @ApiModelProperty(value = "Table name")
+  private String tableName;
 
-  public void setEnd(Long end) {
-    this.end = end;
-  }
+  @ApiModelProperty(value = "Table id")
+  private String tableId;
 
-  public String getNodePrefix() {
-    return nodePrefix;
-  }
+  @ApiModelProperty(value = "Is Recharts")
+  private boolean isRecharts;
 
-  public void setNodePrefix(String nodePrefix) {
-    this.nodePrefix = nodePrefix;
-  }
-
-  public String getNodeName() {
-    return nodeName;
-  }
-
-  public void setNodeName(String nodeName) {
-    this.nodeName = nodeName;
-  }
+  @ApiModelProperty(value = "List of metrics with custom settings")
+  private List<MetricSettings> metricsWithSettings;
 }

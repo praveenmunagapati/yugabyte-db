@@ -8,8 +8,7 @@ menu:
     identifier: synthetic-data
     parent: bacon-numbers
     weight: 10
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 Before trying the code in this section, make sure that you have created the supporting infrastructure:
@@ -71,7 +70,7 @@ begin
     ('Twelfth Night');
 
   insert into cast_members(actor, movie) values
- 
+
     ( 'Alfie'  ,  'Hamlet'                 ),
     ( 'Alfie'  ,  'Macbeth'                ),
     ( 'Alfie'  ,  'Measure for Measure'    ),
@@ -121,15 +120,15 @@ Confirm that the expected actors are represented:
 ```plpgsql
 with v(actor) as (
   select node_1 from edges
-  union all
+  union
   select node_2 from edges)
-select distinct actor from v order by 1;
+select actor from v order by 1;
 ```
 
 This is the result:
 
 ```
- actor 
+ actor
 -------
  Alfie
  Chloe
@@ -150,7 +149,7 @@ order by 1;
 This is the result:
 
 ```
-         movie          
+         movie
 ------------------------
  As You Like It
  Coriolanus
@@ -173,7 +172,7 @@ List the edges that have _"node_1 < node_2"_:
 select
   node_1,
   node_2,
-  replace(translate(movies::text, '{"}', ''), ',', ' > ')  as movies
+  replace(translate(movies::text, '{"}', ''), ',', ' | ')  as movies
 from edges
 where node_1 < node_2
 order by 1, 2;
@@ -184,16 +183,16 @@ The same crude technique to make the paths more readily human-readable is used h
 You see the expected nine edges:
 
 ```
- node_1 | node_2 |                       movies                       
+ node_1 | node_2 |                       movies
 --------+--------+----------------------------------------------------
  Alfie  | Chloe  | Hamlet
- Alfie  | Helen  | Hamlet > Measure for Measure > Taming of the Shrew
+ Alfie  | Helen  | Hamlet | Measure for Measure | Taming of the Shrew
  Alfie  | Steve  | Macbeth
- Chloe  | Emily  | Julius Caesar > Merry Wives of Windsor
- Chloe  | Helen  | Hamlet > Romeo and Juliet
- Emily  | James  | As You Like It > Coriolanus > Othello
- Helen  | James  | King Lear > Twelfth Night
- Helen  | Steve  | King Lear > The Tempest
+ Chloe  | Emily  | Julius Caesar | Merry Wives of Windsor
+ Chloe  | Helen  | Hamlet | Romeo and Juliet
+ Emily  | James  | As You Like It | Coriolanus | Othello
+ Helen  | James  | King Lear | Twelfth Night
+ Helen  | Steve  | King Lear | The Tempest
  James  | Steve  | King Lear
 ```
 
@@ -203,7 +202,7 @@ Now list the edges that have the opposite direction:
 select
   node_1,
   node_2,
-  replace(translate(movies::text, '{"}', ''), ',', ' > ')  as movies
+  replace(translate(movies::text, '{"}', ''), ',', ' | ')  as movies
 from edges
 where node_1 > node_2
 order by 2, 1;
@@ -212,16 +211,16 @@ order by 2, 1;
 Again, you see the expected nine edges:
 
 ```
- node_1 | node_2 |                       movies                       
+ node_1 | node_2 |                       movies
 --------+--------+----------------------------------------------------
  Chloe  | Alfie  | Hamlet
- Helen  | Alfie  | Hamlet > Measure for Measure > Taming of the Shrew
+ Helen  | Alfie  | Hamlet | Measure for Measure | Taming of the Shrew
  Steve  | Alfie  | Macbeth
- Emily  | Chloe  | Julius Caesar > Merry Wives of Windsor
- Helen  | Chloe  | Hamlet > Romeo and Juliet
- James  | Emily  | As You Like It > Coriolanus > Othello
- James  | Helen  | King Lear > Twelfth Night
- Steve  | Helen  | King Lear > The Tempest
+ Emily  | Chloe  | Julius Caesar | Merry Wives of Windsor
+ Helen  | Chloe  | Hamlet | Romeo and Juliet
+ James  | Emily  | As You Like It | Coriolanus | Othello
+ James  | Helen  | King Lear | Twelfth Night
+ Steve  | Helen  | King Lear | The Tempest
  Steve  | James  | King Lear
 ```
 
@@ -243,7 +242,7 @@ select count(*) as "total number of paths" from raw_paths;
 This is the result.
 
 ```
- total number of paths 
+ total number of paths
 -----------------------
                     44
 ```
@@ -260,7 +259,7 @@ order by 1;
 This is the result:
 
 ```
- repeat_nr | number_of_paths 
+ repeat_nr | number_of_paths
 -----------+-----------------
          0 |               2
          1 |               4

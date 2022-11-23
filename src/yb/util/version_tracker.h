@@ -13,8 +13,11 @@
 //
 //
 
-#ifndef YB_UTIL_VERSION_TRACKER_H
-#define YB_UTIL_VERSION_TRACKER_H
+#pragma once
+
+#include <stddef.h>
+
+#include <atomic>
 
 namespace yb {
 
@@ -102,5 +105,3 @@ VersionTrackerCheckOut<Value> VersionTracker<Value>::CheckOut() {
 }
 
 } // namespace yb
-
-#endif // YB_UTIL_VERSION_TRACKER_H

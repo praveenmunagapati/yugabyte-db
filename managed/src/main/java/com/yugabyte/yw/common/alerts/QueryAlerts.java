@@ -12,17 +12,18 @@ package com.yugabyte.yw.common.alerts;
 
 import static com.yugabyte.yw.common.metrics.MetricService.buildMetricTemplate;
 
-import akka.actor.ActorSystem;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Lists;
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
 import com.yugabyte.yw.common.AlertManager;
+import com.yugabyte.yw.common.PlatformScheduler;
 import com.yugabyte.yw.common.metrics.MetricService;
 import com.yugabyte.yw.metrics.MetricQueryHelper;
 import com.yugabyte.yw.metrics.data.AlertData;
 import com.yugabyte.yw.metrics.data.AlertState;
 import com.yugabyte.yw.models.Alert;
+import com.yugabyte.yw.models.Alert.State;
 import com.yugabyte.yw.models.AlertConfiguration;
 import com.yugabyte.yw.models.AlertDefinition;
 import com.yugabyte.yw.models.AlertLabel;
@@ -32,6 +33,7 @@ import com.yugabyte.yw.models.filters.AlertDefinitionFilter;
 import com.yugabyte.yw.models.filters.AlertFilter;
 import com.yugabyte.yw.models.helpers.KnownAlertLabels;
 import com.yugabyte.yw.models.helpers.PlatformMetrics;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -43,16 +45,12 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import lombok.Value;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections.MapUtils;
 import org.apache.commons.lang3.StringUtils;
-import scala.concurrent.ExecutionContext;
-import scala.concurrent.duration.Duration;
 
 @Singleton
 @Slf4j
@@ -62,11 +60,7 @@ public class QueryAlerts {
   private static final int ALERTS_BATCH = 1000;
   private static final String SUMMARY_ANNOTATION_NAME = "summary";
 
-  private AtomicBoolean running = new AtomicBoolean(false);
-
-  private final ActorSystem actorSystem;
-
-  private final ExecutionContext executionContext;
+  private final PlatformScheduler platformScheduler;
 
   private final MetricQueryHelper queryHelper;
 
@@ -82,61 +76,49 @@ public class QueryAlerts {
 
   @Inject
   public QueryAlerts(
-      ExecutionContext executionContext,
-      ActorSystem actorSystem,
+      PlatformScheduler platformScheduler,
       AlertService alertService,
       MetricQueryHelper queryHelper,
       MetricService metricService,
       AlertDefinitionService alertDefinitionService,
       AlertConfigurationService alertConfigurationService,
       AlertManager alertManager) {
-    this.actorSystem = actorSystem;
-    this.executionContext = executionContext;
+    this.platformScheduler = platformScheduler;
     this.queryHelper = queryHelper;
     this.alertService = alertService;
     this.metricService = metricService;
     this.alertDefinitionService = alertDefinitionService;
     this.alertConfigurationService = alertConfigurationService;
     this.alertManager = alertManager;
-    this.initialize();
   }
 
-  private void initialize() {
-    this.actorSystem
-        .scheduler()
-        .schedule(
-            // Start 30 seconds later to allow Prometheus to get Platform metrics
-            // and evaluate alerts based on them.
-            Duration.create(YB_QUERY_ALERTS_INTERVAL_SEC, TimeUnit.SECONDS),
-            Duration.create(YB_QUERY_ALERTS_INTERVAL_SEC, TimeUnit.SECONDS),
-            this::scheduleRunner,
-            this.executionContext);
+  public void start() {
+    platformScheduler.schedule(
+        getClass().getSimpleName(),
+        Duration.ofSeconds(YB_QUERY_ALERTS_INTERVAL_SEC),
+        Duration.ofSeconds(YB_QUERY_ALERTS_INTERVAL_SEC),
+        this::scheduleRunner);
   }
 
   @VisibleForTesting
   void scheduleRunner() {
-    if (HighAvailabilityConfig.isFollower()) {
-      log.debug("Skipping querying for alerts for follower platform");
-      return;
-    }
-    if (running.compareAndSet(false, true)) {
-      try {
-        try {
-          List<UUID> activeAlertsUuids = processActiveAlerts();
-          resolveAlerts(activeAlertsUuids);
-          metricService.setOkStatusMetric(buildMetricTemplate(PlatformMetrics.ALERT_QUERY_STATUS));
-        } catch (Exception e) {
-          metricService.setStatusMetric(
-              buildMetricTemplate(PlatformMetrics.ALERT_QUERY_STATUS),
-              "Error querying for alerts: " + e.getMessage());
-          log.error("Error querying for alerts", e);
-        }
-        alertManager.sendNotifications();
-      } catch (Exception e) {
-        log.error("Error processing alerts", e);
-      } finally {
-        running.set(false);
+    try {
+      if (HighAvailabilityConfig.isFollower()) {
+        log.debug("Skipping querying for alerts for follower platform");
+        return;
       }
+      try {
+        List<UUID> activeAlertsUuids = processActiveAlerts();
+        resolveAlerts(activeAlertsUuids);
+        metricService.setOkStatusMetric(buildMetricTemplate(PlatformMetrics.ALERT_QUERY_STATUS));
+      } catch (Exception e) {
+        metricService.setFailureStatusMetric(
+            buildMetricTemplate(PlatformMetrics.ALERT_QUERY_STATUS));
+        log.error("Error querying for alerts", e);
+      }
+      alertManager.sendNotifications();
+    } catch (Exception e) {
+      log.error("Error processing alerts", e);
     }
   }
 
@@ -153,6 +135,7 @@ public class QueryAlerts {
             .filter(alertData -> getCustomerUuid(alertData) != null)
             .filter(alertData -> getConfigurationUuid(alertData) != null)
             .filter(alertData -> getDefinitionUuid(alertData) != null)
+            .filter(alertData -> getSourceUuid(alertData) != null)
             .collect(Collectors.toList());
     if (alerts.size() > validAlerts.size()) {
       log.warn(
@@ -197,7 +180,7 @@ public class QueryAlerts {
       AlertFilter alertFilter =
           AlertFilter.builder()
               .definitionUuids(definitionUuids)
-              .state(Alert.State.ACTIVE, Alert.State.ACKNOWLEDGED)
+              .states(State.getFiringStates())
               .build();
       Map<AlertKey, Alert> existingAlertsByKey =
           alertService
@@ -372,7 +355,8 @@ public class QueryAlerts {
               .setDefinitionUuid(definitionUuid)
               .setConfigurationUuid(configurationUuid)
               .setName(alertData.getLabels().get(KnownAlertLabels.DEFINITION_NAME.labelName()))
-              .setSourceName(alertData.getLabels().get(KnownAlertLabels.SOURCE_NAME.labelName()));
+              .setSourceName(alertData.getLabels().get(KnownAlertLabels.SOURCE_NAME.labelName()))
+              .setSourceUUID(UUID.fromString(alertKey.getSourceUuid()));
     }
     AlertConfiguration.Severity severity = getSeverity(alertData);
     AlertConfiguration.TargetType configurationType = getConfigurationType(alertData);
@@ -391,6 +375,13 @@ public class QueryAlerts {
         .setConfigurationType(configurationType)
         .setMessage(message)
         .setLabels(labels);
+    State state =
+        alert.getLabelValue(KnownAlertLabels.MAINTENANCE_WINDOW_UUIDS) != null
+            ? State.SUSPENDED
+            : State.ACTIVE;
+    if (alert.getState() != State.ACKNOWLEDGED) {
+      alert.setState(state);
+    }
     return alert;
   }
 

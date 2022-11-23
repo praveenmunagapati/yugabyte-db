@@ -14,8 +14,7 @@
 // This file contains the CQLServiceImpl class that implements the CQL server to handle requests
 // from Cassandra clients using the CQL native protocol.
 
-#ifndef YB_YQL_CQL_CQLSERVER_CQL_SERVICE_H_
-#define YB_YQL_CQL_CQLSERVER_CQL_SERVICE_H_
+#pragma once
 
 #include <vector>
 
@@ -23,18 +22,15 @@
 
 #include "yb/client/client_fwd.h"
 
-#include "yb/yql/cql/cqlserver/cql_processor.h"
+#include "yb/util/object_pool.h"
+
+#include "yb/yql/cql/cqlserver/cqlserver_fwd.h"
 #include "yb/yql/cql/cqlserver/cql_server_options.h"
 #include "yb/yql/cql/cqlserver/cql_service.service.h"
 #include "yb/yql/cql/cqlserver/cql_statement.h"
 #include "yb/yql/cql/cqlserver/system_query_cache.h"
-#include "yb/yql/cql/ql/statement.h"
+#include "yb/yql/cql/ql/parser/parser_fwd.h"
 #include "yb/yql/cql/ql/util/cql_message.h"
-
-#include "yb/util/object_pool.h"
-#include "yb/util/string_case.h"
-
-#include "yb/client/async_initializer.h"
 
 namespace yb {
 
@@ -59,6 +55,8 @@ class CQLServiceImpl : public CQLServerServiceIf,
 
   void Shutdown() override;
 
+  void FillEndpoints(const rpc::RpcServicePtr& service, rpc::RpcEndpointMap* map) override;
+
   // Processing all incoming request from RPC and sending response back.
   void Handle(yb::rpc::InboundCallPtr call) override;
 
@@ -70,10 +68,11 @@ class CQLServiceImpl : public CQLServerServiceIf,
 
   // Allocate a prepared statement. If the statement already exists, return it instead.
   std::shared_ptr<CQLStatement> AllocatePreparedStatement(
-      const ql::CQLMessage::QueryId& id, const std::string& keyspace, const std::string& query);
+      const ql::CQLMessage::QueryId& id, const std::string& query, ql::QLEnv* ql_env);
 
   // Look up a prepared statement by its id. Nullptr will be returned if the statement is not found.
-  std::shared_ptr<const CQLStatement> GetPreparedStatement(const ql::CQLMessage::QueryId& id);
+  Result<std::shared_ptr<const CQLStatement>> GetPreparedStatement(
+      const ql::CQLMessage::QueryId& id, SchemaVersion version);
 
   std::shared_ptr<ql::Statement> GetAuthPreparedStatement() const { return auth_prepared_stmt_; }
 
@@ -106,7 +105,7 @@ class CQLServiceImpl : public CQLServerServiceIf,
   // Return the messenger.
   rpc::Messenger* messenger() { return messenger_; }
 
-  client::TransactionPool* TransactionPool();
+  client::TransactionPool& TransactionPool();
 
   server::Clock* clock();
 
@@ -187,5 +186,3 @@ class CQLServiceImpl : public CQLServerServiceIf,
 
 }  // namespace cqlserver
 }  // namespace yb
-
-#endif  // YB_YQL_CQL_CQLSERVER_CQL_SERVICE_H_

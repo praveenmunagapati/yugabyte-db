@@ -36,20 +36,21 @@
 #include <limits>
 #include <vector>
 
-
 #include "yb/gutil/map-util.h"
 #include "yb/gutil/strings/substitute.h"
-#include "yb/tablet/tablet.h"
-#include "yb/tablet/tablet_peer.h"
+
 #include "yb/tablet/operations/operation_driver.h"
-#include "yb/util/flag_tags.h"
+#include "yb/tablet/tablet.h"
+
+#include "yb/util/flags.h"
 #include "yb/util/logging.h"
 #include "yb/util/mem_tracker.h"
 #include "yb/util/metrics.h"
 #include "yb/util/monotime.h"
+#include "yb/util/status_log.h"
 #include "yb/util/tsan_util.h"
 
-DEFINE_int64(tablet_operation_memory_limit_mb, 1024,
+DEFINE_UNKNOWN_int64(tablet_operation_memory_limit_mb, 1024,
              "Maximum amount of memory that may be consumed by all in-flight "
              "operations belonging to a particular tablet. When this limit "
              "is reached, new operations will be rejected and clients will "
@@ -100,9 +101,15 @@ METRIC_DEFINE_counter(tablet, operation_memory_pressure_rejections,
                       "Number of operations rejected because the tablet's "
                       "operation memory limit was reached.");
 
+METRIC_DEFINE_gauge_uint64(tablet, change_auto_flags_config_operations_inflight,
+                           "AutoFlags config change",
+                           yb::MetricUnit::kOperations,
+                           "Number of AutoFlags config change operations currently in-flight");
+
 using namespace std::literals;
 using std::shared_ptr;
 using std::vector;
+using std::string;
 
 namespace yb {
 namespace tablet {
@@ -125,7 +132,8 @@ OperationTracker::Metrics::Metrics(const scoped_refptr<MetricEntity>& entity)
   INSTANTIATE(Truncate, truncate);
   INSTANTIATE(Empty, empty);
   INSTANTIATE(HistoryCutoff, history_cutoff);
-  static_assert(8 == kElementsInOperationType, "Init metrics for all operation types");
+  INSTANTIATE(ChangeAutoFlagsConfig, change_auto_flags_config);
+  static_assert(9== kElementsInOperationType, "Init metrics for all operation types");
 }
 #undef INSTANTIATE
 #undef GINIT
@@ -150,8 +158,11 @@ Status OperationTracker::Add(OperationDriver* driver) {
       metrics_->operation_memory_pressure_rejections->Increment();
     }
 
-    // May be null in unit tests.
-    Tablet* tablet = driver->operation()->tablet();
+    // May be nullptr due to TabletPeer::SetPropagatedSafeTime.
+    auto* operation = driver->operation();
+
+    // May be nullptr in unit tests even when operation is not nullptr.
+    TabletPtr tablet = operation ? operation->tablet_nullable() : nullptr;
 
     string msg = Substitute(
         "Operation failed, tablet $0 operation memory consumption ($1) "
@@ -246,7 +257,7 @@ std::vector<scoped_refptr<OperationDriver>> OperationTracker::GetPendingOperatio
 }
 
 
-int OperationTracker::GetNumPendingForTests() const {
+size_t OperationTracker::TEST_GetNumPending() const {
   std::lock_guard<std::mutex> l(mutex_);
   return pending_operations_.size();
 }

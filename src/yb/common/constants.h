@@ -11,8 +11,9 @@
 // under the License.
 //
 
-#ifndef YB_COMMON_CONSTANTS_H
-#define YB_COMMON_CONSTANTS_H
+#pragma once
+
+#include "yb/common/common_fwd.h"
 
 namespace yb {
 
@@ -20,6 +21,22 @@ namespace yb {
 // post-split tablets.
 constexpr const auto kNumSplitParts = 2;
 
-} // namespace yb
+constexpr const ColocationId kColocationIdNotSet = 0;
 
-#endif  // YB_COMMON_CONSTANTS_H
+// Minimum colocation ID to be auto-generated, IDs below are reserved just in case we want
+// some special values in the future.
+// This has been chosen to match FirstNormalObjectId from Postgres code.
+constexpr const ColocationId kFirstNormalColocationId = 16384;
+
+enum SortingType : uint8_t {
+  kNotSpecified = 0,
+  kAscending,          // ASC, NULLS FIRST
+  kDescending,         // DESC, NULLS FIRST
+  kAscendingNullsLast, // ASC, NULLS LAST
+  kDescendingNullsLast // DESC, NULLS LAST
+};
+
+static const char* const kObsoleteShortPrimaryTableId = "sys.catalog.uuid";
+
+
+} // namespace yb

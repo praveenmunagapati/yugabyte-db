@@ -9,9 +9,7 @@ menu:
     name: Python
     identifier: python-aiopg
     weight: 553
-type: page
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 <ul class="nav nav-tabs-alt nav-tabs-yb">
@@ -39,10 +37,15 @@ showAsideToc: true
       YCQL
     </a>
   </li>
+  <li>
+    <a href="{{< relref "./ysql-django.md" >}}" class="nav-link">
+      <i class="icon-postgres" aria-hidden="true"></i>
+      YSQL - Django
+    </a>
+  </li>
 </ul>
 
-The following tutorial creates a simple Python application that connects to a YugabyteDB cluster using the `aiopg
-` database adapter, performs a few basic database operations — creating a table, inserting data, and running a SQL query — and prints the results to the screen.
+The following tutorial creates a simple Python application that connects to a YugabyteDB cluster using the `aiopg` database adapter, performs a few basic database operations — creating a table, inserting data, and running a SQL query — and prints the results to the screen.
 
 ## Before you begin
 
@@ -115,7 +118,7 @@ $ python yb-sql-helloworld.py
 
 You should see the following output.
 
-```
+```output
 Created table employee
 Inserted (id, name, age, language) = (1, 'John', 35, 'Python')
 Query returned: John, 35, Python

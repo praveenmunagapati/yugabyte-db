@@ -22,6 +22,7 @@ import {
   setInitialValues,
   updateAlertConfig,
   updateAlertConfigResponse,
+  sendTestAlert,
   updateAlertDestination,
   updateAlertDestinationResponse,
   updateProfile,
@@ -31,7 +32,7 @@ import {
 import { closeDialog, openDialog } from '../../../actions/modal';
 import { fetchUniverseList, fetchUniverseListResponse } from '../../../actions/universe';
 import { AlertConfiguration } from './AlertConfiguration';
-import { createErrorMessage } from './AlertUtils';
+import { createErrorMessage } from '../../../utils/ObjectUtils';
 
 const mapStateToProps = (state) => {
   return {
@@ -41,7 +42,8 @@ const mapStateToProps = (state) => {
     customerProfile: state.customer ? state.customer.profile : null,
     modal: state.modal,
     initialValues: state.customer.setInitialVal,
-    universes: state.universe.universeList
+    universes: state.universe.universeList,
+    featureFlags: state.featureFlags
   };
 };
 
@@ -133,6 +135,13 @@ const mapDispatchToProps = (dispatch) => {
           toast.success('Successfully updated the alert configuration');
         }
         return dispatch(updateAlertConfigResponse(response.payload));
+      });
+    },
+    sendTestAlert: (uuid) => {
+      sendTestAlert(uuid).then((response) => {
+        toast.success(response.data.message);
+      }).catch((error) => {
+        toast.error(createErrorMessage(error));
       });
     },
     updateAlertDestination: (payload, uuid) => {

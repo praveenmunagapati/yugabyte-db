@@ -15,28 +15,25 @@
 
 #include <glog/logging.h>
 
-#include "yb/common/wire_protocol.h"
 #include "yb/consensus/consensus_round.h"
-#include "yb/rpc/rpc_context.h"
-#include "yb/server/hybrid_clock.h"
+#include "yb/consensus/consensus.messages.h"
+
 #include "yb/tablet/tablet.h"
-#include "yb/tablet/tablet_peer.h"
-#include "yb/tserver/tserver.pb.h"
+
 #include "yb/util/trace.h"
 
 namespace yb {
 namespace tablet {
 
 template <>
-void RequestTraits<tserver::TruncateRequestPB>::SetAllocatedRequest(
-    consensus::ReplicateMsg* replicate, tserver::TruncateRequestPB* request) {
-  replicate->set_allocated_truncate_request(request);
+void RequestTraits<LWTruncatePB>::SetAllocatedRequest(
+    consensus::LWReplicateMsg* replicate, LWTruncatePB* request) {
+  replicate->ref_truncate(request);
 }
 
 template <>
-tserver::TruncateRequestPB* RequestTraits<tserver::TruncateRequestPB>::MutableRequest(
-    consensus::ReplicateMsg* replicate) {
-  return replicate->mutable_truncate_request();
+LWTruncatePB* RequestTraits<LWTruncatePB>::MutableRequest(consensus::LWReplicateMsg* replicate) {
+  return replicate->mutable_truncate();
 }
 
 Status TruncateOperation::DoAborted(const Status& status) {

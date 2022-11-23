@@ -12,8 +12,10 @@
 //
 
 #include "yb/client/ql-dml-test-base.h"
+#include "yb/client/schema.h"
 #include "yb/client/session.h"
 #include "yb/client/table_handle.h"
+#include "yb/client/yb_op.h"
 
 #include "yb/common/ql_value.h"
 
@@ -70,15 +72,11 @@ class SecureConnectionTest : public client::KeyValueTableTest<MiniCluster> {
     DontVerifyClusterBeforeNextTearDown(); // Verify requires insecure connection.
   }
 
-  virtual std::string CertsDir() {
-    const auto sub_dir = JoinPathSegments("ent", "test_certs");
-    auto root_dir = env_util::GetRootDir(sub_dir);
-    return JoinPathSegments(root_dir, sub_dir);
-  }
+  virtual std::string CertsDir() { return GetCertsDir(); }
 
-  CHECKED_STATUS CreateClient() override {
+  Status CreateClient() override {
     auto host = "127.0.0.52";
-    client_ = VERIFY_RESULT(DoCreateClient(host, host, &secure_context_));
+    client_ = VERIFY_RESULT(cluster_->CreateSecureClient(host, host, &secure_context_));
     return Status::OK();
   }
 
@@ -87,18 +85,7 @@ class SecureConnectionTest : public client::KeyValueTableTest<MiniCluster> {
     FLAGS_yb_client_admin_operation_timeout_sec = 5;
     auto name = "127.0.0.54";
     auto host = "127.0.0.52";
-    return DoCreateClient(name, host, &bad_secure_context_);
-  }
-
-  Result<std::unique_ptr<client::YBClient>> DoCreateClient(
-      const std::string& name, const std::string& host,
-      std::unique_ptr<rpc::SecureContext>* secure_context) {
-    rpc::MessengerBuilder messenger_builder("test_client");
-    *secure_context = VERIFY_RESULT(server::SetupSecureContext(
-        FLAGS_certs_dir, name, server::SecureContextType::kInternal, &messenger_builder));
-    auto messenger = VERIFY_RESULT(messenger_builder.Build());
-    messenger->TEST_SetOutboundIpBase(VERIFY_RESULT(HostToAddress(host)));
-    return cluster_->CreateClient(std::move(messenger));
+    return cluster_->CreateSecureClient(name, host, &bad_secure_context_);
   }
 
   void TestSimpleOps();
@@ -127,6 +114,19 @@ void SecureConnectionTest::TestSimpleOps() {
 
 TEST_F(SecureConnectionTest, Simple) {
   TestSimpleOps();
+}
+
+TEST_F(SecureConnectionTest, CertificateDetails) {
+  TestSimpleOps();
+
+  auto certDetails = secure_context_->GetCertificateDetails();
+  ASSERT_STR_CONTAINS(certDetails, "Node certificate details");
+  ASSERT_STR_CONTAINS(certDetails, "Issuer");
+  ASSERT_STR_CONTAINS(certDetails, "Serial Number");
+  ASSERT_STR_CONTAINS(certDetails, "Validity");
+  ASSERT_STR_CONTAINS(certDetails, "Not Before");
+  ASSERT_STR_CONTAINS(certDetails, "Not After");
+  ASSERT_STR_CONTAINS(certDetails, "Subject");
 }
 
 class SecureConnectionTLS12Test : public SecureConnectionTest {
@@ -159,7 +159,7 @@ TEST_F(SecureConnectionTest, BigWrite) {
     auto* const req = op->mutable_request();
     QLAddInt32HashValue(req, kKey);
     table_.AddStringColumnValue(req, kValueColumn, kValue);
-    ASSERT_OK(session->ApplyAndFlush(op));
+    ASSERT_OK(session->TEST_ApplyAndFlush(op));
     ASSERT_OK(CheckOp(op.get()));
   }
 
@@ -168,7 +168,7 @@ TEST_F(SecureConnectionTest, BigWrite) {
     auto* const req = op->mutable_request();
     QLAddInt32HashValue(req, kKey);
     table_.AddColumns({kValueColumn}, req);
-    ASSERT_OK(session->ApplyAndFlush(op));
+    ASSERT_OK(session->TEST_ApplyAndFlush(op));
     ASSERT_OK(CheckOp(op.get()));
     auto rowblock = yb::ql::RowsResult(op.get()).GetRowBlock();
     ASSERT_EQ(rowblock->row_count(), 1);
@@ -199,11 +199,7 @@ class SecureConnectionVerifyNameOnlyTest : public SecureConnectionTest {
     SecureConnectionTest::SetUp();
   }
 
-  std::string CertsDir() override {
-    const auto sub_dir = JoinPathSegments("ent", "test_certs", "named");
-    auto root_dir = env_util::GetRootDir(sub_dir);
-    return JoinPathSegments(root_dir, sub_dir);
-  }
+  std::string CertsDir() override { return JoinPathSegments(GetCertsDir(), "named"); }
 };
 
 TEST_F_EX(SecureConnectionTest, VerifyNameOnly, SecureConnectionVerifyNameOnlyTest) {

@@ -12,27 +12,30 @@
 // under the License.
 //
 //
+
 #include "yb/yql/redis/redisserver/redis_rpc.h"
 
 #include "yb/client/client_fwd.h"
-#include "yb/client/meta_cache.h"
 
 #include "yb/common/redis_protocol.pb.h"
 
-#include "yb/yql/redis/redisserver/redis_encoding.h"
-#include "yb/yql/redis/redisserver/redis_parser.h"
-
 #include "yb/rpc/connection.h"
-#include "yb/rpc/messenger.h"
 #include "yb/rpc/reactor.h"
 #include "yb/rpc/rpc_introspection.pb.h"
 
-#include "yb/util/logging.h"
-#include "yb/util/size_literals.h"
-
 #include "yb/util/debug/trace_event.h"
-
+#include "yb/util/format.h"
 #include "yb/util/memory/memory.h"
+#include "yb/util/metrics.h"
+#include "yb/util/result.h"
+#include "yb/util/size_literals.h"
+#include "yb/util/status_format.h"
+
+#include "yb/yql/redis/redisserver/redis_encoding.h"
+#include "yb/yql/redis/redisserver/redis_parser.h"
+#include "yb/util/flags.h"
+
+using std::string;
 
 using namespace std::literals;
 using namespace std::placeholders;
@@ -40,19 +43,19 @@ using namespace yb::size_literals;
 
 DECLARE_bool(rpc_dump_all_traces);
 DECLARE_int32(rpc_slow_query_threshold_ms);
-DEFINE_uint64(redis_max_concurrent_commands, 1,
+DEFINE_UNKNOWN_uint64(redis_max_concurrent_commands, 1,
               "Max number of redis commands received from single connection, "
               "that could be processed concurrently");
-DEFINE_uint64(redis_max_batch, 500, "Max number of redis commands that forms batch");
-DEFINE_int32(rpcz_max_redis_query_dump_size, 4_KB,
+DEFINE_UNKNOWN_uint64(redis_max_batch, 500, "Max number of redis commands that forms batch");
+DEFINE_UNKNOWN_int32(rpcz_max_redis_query_dump_size, 4_KB,
              "The maximum size of the Redis query string in the RPCZ dump.");
-DEFINE_uint64(redis_max_read_buffer_size, 128_MB,
+DEFINE_UNKNOWN_uint64(redis_max_read_buffer_size, 128_MB,
               "Max read buffer size for Redis connections.");
 
-DEFINE_uint64(redis_max_queued_bytes, 128_MB,
+DEFINE_UNKNOWN_uint64(redis_max_queued_bytes, 128_MB,
               "Max number of bytes in queued redis commands.");
 
-DEFINE_int32(
+DEFINE_UNKNOWN_int32(
     redis_connection_soft_limit_grace_period_sec, 60,
     "The duration for which the outbound data needs to exceeed the softlimit "
     "before the connection gets closed down.");
@@ -126,8 +129,7 @@ Status RedisConnectionContext::HandleInboundCall(const rpc::ConnectionPtr& conne
   auto reactor = connection->reactor();
   DCHECK(reactor->IsCurrentThread());
 
-  auto call = rpc::InboundCall::Create<RedisInboundCall>(
-      connection, data->size(), call_processed_listener());
+  auto call = rpc::InboundCall::Create<RedisInboundCall>(connection, data->size(), this);
 
   Status s = call->ParseFrom(call_mem_tracker_, commands_in_batch, data);
   if (!s.ok()) {
@@ -194,8 +196,8 @@ void RedisConnectionContext::Shutdown(const Status& status) {
 
 RedisInboundCall::RedisInboundCall(rpc::ConnectionPtr conn,
                                    size_t weight_in_bytes,
-                                   CallProcessedListener call_processed_listener)
-    : QueueableInboundCall(std::move(conn), weight_in_bytes, std::move(call_processed_listener)) {}
+                                   CallProcessedListener* call_processed_listener)
+    : QueueableInboundCall(std::move(conn), weight_in_bytes, call_processed_listener) {}
 
 RedisInboundCall::~RedisInboundCall() {
   Status status;
@@ -219,15 +221,13 @@ Status RedisInboundCall::ParseFrom(
 
   consumption_ = ScopedTrackedConsumption(mem_tracker, data->size());
 
+  request_data_memory_usage_.store(data->size(), std::memory_order_release);
   request_data_ = std::move(*data);
   serialized_request_ = Slice(request_data_.data(), request_data_.size());
 
   client_batch_.resize(commands);
   responses_.resize(commands);
-  ready_.reserve(commands);
-  for (size_t i = 0; i != commands; ++i) {
-    ready_.emplace_back(0);
-  }
+  ready_.resize(commands, 0);
   RedisParser parser(IoVecs(1, iovec{request_data_.data(), request_data_.size()}));
   size_t end_of_command = 0;
   for (size_t i = 0; i != commands; ++i) {
@@ -251,14 +251,22 @@ Status RedisInboundCall::ParseFrom(
   return Status::OK();
 }
 
-const std::string& RedisInboundCall::service_name() const {
-  static std::string result = "yb.redisserver.RedisServerService"s;
-  return result;
+namespace {
+
+const rpc::RemoteMethod remote_method("yb.redisserver.RedisServerService", "anyMethod");
+
 }
 
-const std::string& RedisInboundCall::method_name() const {
-  static std::string result = "anyMethod"s;
-  return result;
+Slice RedisInboundCall::static_serialized_remote_method() {
+  return remote_method.serialized_body();
+}
+
+Slice RedisInboundCall::serialized_remote_method() const {
+  return remote_method.serialized_body();
+}
+
+Slice RedisInboundCall::method_name() const {
+  return remote_method.method_name();
 }
 
 CoarseTimePoint RedisInboundCall::GetClientDeadline() const {
@@ -287,7 +295,9 @@ void RedisInboundCall::LogTrace() const {
     rpc::RpcCallInProgressPB call_in_progress_pb;
     GetCallDetails(&call_in_progress_pb);
     LOG(WARNING) << call_in_progress_pb.DebugString() << "Trace: ";
-    trace_->Dump(&LOG(WARNING), /* include_time_deltas */ true);
+    if (trace_) {
+      trace_->Dump(&LOG(WARNING), /* include_time_deltas */ true);
+    }
   }
 }
 
@@ -367,8 +377,8 @@ RefCntBuffer SerializeResponses(const Collection& responses) {
   return result;
 }
 
-void RedisInboundCall::DoSerialize(boost::container::small_vector_base<RefCntBuffer>* output) {
-  output->push_back(SerializeResponses(responses_));
+void RedisInboundCall::DoSerialize(rpc::ByteBlocks* output) {
+  output->emplace_back(SerializeResponses(responses_));
 }
 
 RedisConnectionContext& RedisInboundCall::connection_context() const {
@@ -386,7 +396,7 @@ void RedisInboundCall::RespondFailure(rpc::ErrorStatusPB::RpcErrorCodePB error_c
 void RedisInboundCall::Respond(size_t idx, bool is_success, RedisResponsePB* resp) {
   // Did we set response for command at this index already?
   VLOG(2) << "Responding to '" << client_batch_[idx][0] << "' with " << resp->ShortDebugString();
-  if (ready_[idx].fetch_add(1, std::memory_order_relaxed) == 0) {
+  if (base::subtle::NoBarrier_AtomicIncrement(&ready_[idx], 1) == 1) {
     if (!is_success) {
       had_failures_.store(true, std::memory_order_release);
     }

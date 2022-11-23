@@ -10,12 +10,13 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 
-#ifndef YB_SERVER_PGSQL_WEBSERVER_WRAPPER_H
-#define YB_SERVER_PGSQL_WEBSERVER_WRAPPER_H
+#pragma once
 
 #ifdef __cplusplus
 #include <atomic>
-using std::atomic_ullong;
+using int64 = int64_t;
+using uint8 = uint8_t;
+using uint64 = uint64_t;
 #else
 #include <stdatomic.h>
 #endif
@@ -23,46 +24,52 @@ using std::atomic_ullong;
 #include "yb/common/ybc_util.h"
 
 #ifdef __cplusplus
+namespace yb {
 extern "C" {
+#define YB_ATOMIC_ULLONG std::atomic_ullong
+#else
+#define YB_ATOMIC_ULLONG atomic_ullong
 #endif
 
 struct WebserverWrapper;
 
 typedef struct ybpgmEntry {
-    char name[100];
-    atomic_ullong calls;
-    atomic_ullong total_time;
-    atomic_ullong rows;
+  char name[100];
+  YB_ATOMIC_ULLONG calls;
+  YB_ATOMIC_ULLONG total_time;
+  YB_ATOMIC_ULLONG rows;
 } ybpgmEntry;
 
 typedef struct rpczEntry {
-    char *query;
-    char *application_name;
-    int proc_id;
-    unsigned int db_oid;
-    char *db_name;
-    int64 process_start_timestamp;
-    int64 transaction_start_timestamp;
-    int64 query_start_timestamp;
-    char *backend_type;
-    uint8 backend_active;
-    char *backend_status;
-    char *host;
-    char *port;
+  char *query;
+  char *application_name;
+  int proc_id;
+  unsigned int db_oid;
+  char *db_name;
+  int64 process_start_timestamp;
+  int64 transaction_start_timestamp;
+  int64 query_start_timestamp;
+  char *backend_type;
+  uint8 backend_active;
+  int new_conn;
+  char *backend_status;
+  char *host;
+  char *port;
 } rpczEntry;
 
 typedef struct YsqlStatementStat {
-  char   *query;
+  char *query;
 
-  // Prefix of Counters in pg_stat_statements.c.
+  // Prefix of Counters in pg_stat_monitor.c
 
-  int64  calls;        /* # of times executed */
+  int64 calls;         /* # of times executed */
   double total_time;   /* total execution time, in msec */
   double min_time;     /* minimum execution time in msec */
   double max_time;     /* maximum execution time in msec */
   double mean_time;    /* mean execution time in msec */
   double sum_var_time; /* sum of variances in execution time in msec */
-  int64  rows;         /* total # of retrieved or affected rows */
+  int64 rows;          /* total # of retrieved or affected rows */
+  uint64 query_id;     /* query id of the pgssHashKey for the query */
 } YsqlStatementStat;
 
 typedef struct {
@@ -75,15 +82,15 @@ typedef struct {
 
 struct WebserverWrapper *CreateWebserver(char *listen_addresses, int port);
 void RegisterMetrics(ybpgmEntry *tab, int num_entries, char *metric_node_name);
-void RegisterRpczEntries(postgresCallbacks *callbacks, int *num_backends_ptr,
-                         rpczEntry **rpczEntriesPointer);
+void RegisterRpczEntries(
+    postgresCallbacks *callbacks, int *num_backends_ptr, rpczEntry **rpczEntriesPointer,
+    int* too_many_conn_ptr, int* max_conn_ptr);
 YBCStatus StartWebserver(struct WebserverWrapper *webserver);
 void RegisterGetYsqlStatStatements(void (*getYsqlStatementStats)(void *));
 void RegisterResetYsqlStatStatements(void (*fn)());
-void WriteStatArrayElemToJson(void* p1, void* p2);
+void WriteStatArrayElemToJson(void *p1, void *p2);
 
 #ifdef __cplusplus
 }  // extern "C"
+}  // namespace yb
 #endif
-
-#endif // YB_SERVER_PGSQL_WEBSERVER_WRAPPER_H

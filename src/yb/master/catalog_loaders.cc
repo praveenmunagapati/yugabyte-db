@@ -31,11 +31,26 @@
 //
 
 #include "yb/master/catalog_loaders.h"
-#include "yb/master/master_util.h"
 
-DEFINE_bool(master_ignore_deleted_on_load, true,
+#include "yb/common/constants.h"
+#include "yb/master/master_util.h"
+#include "yb/master/ysql_tablegroup_manager.h"
+#include "yb/master/ysql_transaction_ddl.h"
+
+#include "yb/util/flags.h"
+#include "yb/util/status_format.h"
+#include "yb/util/status_log.h"
+
+using std::string;
+
+DEFINE_UNKNOWN_bool(master_ignore_deleted_on_load, true,
   "Whether the Master should ignore deleted tables & tablets on restart.  "
   "This reduces failover time at the expense of garbage data." );
+
+DEFINE_test_flag(uint64, slow_cluster_config_load_secs, 0,
+                 "When set, it pauses load of cluster config during sys catalog load.");
+
+DECLARE_bool(ysql_ddl_rollback_enabled);
 
 namespace yb {
 namespace master {
@@ -66,16 +81,32 @@ Status TableLoader::Visit(const TableId& table_id, const SysTablesEntryPB& metad
   auto& pb = l.mutable_data()->pb;
   pb.CopyFrom(metadata);
 
-  if (pb.table_type() == TableType::REDIS_TABLE_TYPE && pb.name() == kTransactionsTableName) {
+  if (pb.table_type() == TableType::REDIS_TABLE_TYPE && pb.name() == kGlobalTransactionsTableName) {
     pb.set_table_type(TableType::TRANSACTION_STATUS_TABLE_TYPE);
+  }
+
+  // Backward compatibility: tables colocated via DB/tablegroup created prior to #7378 use
+  // YSQL table OID as a colocation ID, and won't have colocation ID explicitly set.
+  if (pb.table_type() == PGSQL_TABLE_TYPE &&
+      pb.colocated() &&
+      !IsColocationParentTableId(table_id) &&
+      pb.schema().has_colocated_table_id() &&
+      !pb.schema().colocated_table_id().has_colocation_id()) {
+    auto clc_id = CHECK_RESULT(GetPgsqlTableOid(table_id));
+    pb.mutable_schema()->mutable_colocated_table_id()->set_colocation_id(clc_id);
   }
 
   // Add the table to the IDs map and to the name map (if the table is not deleted). Do not
   // add Postgres tables to the name map as the table name is not unique in a namespace.
   auto table_ids_map_checkout = catalog_manager_->table_ids_map_.CheckOut();
   (*table_ids_map_checkout)[table->id()] = table;
-  if (l->table_type() != PGSQL_TABLE_TYPE && !l->started_deleting() && !l->started_hiding()) {
-    catalog_manager_->table_names_map_[{l->namespace_id(), l->name()}] = table;
+  if (!l->started_deleting() && !l->started_hiding()) {
+    if (l->table_type() != PGSQL_TABLE_TYPE) {
+      catalog_manager_->table_names_map_[{l->namespace_id(), l->name()}] = table;
+    }
+    if (l->table_type() == TRANSACTION_STATUS_TABLE_TYPE) {
+      catalog_manager_->transaction_table_ids_set_.insert(table_id);
+    }
   }
 
   l.Commit();
@@ -84,14 +115,24 @@ Status TableLoader::Visit(const TableId& table_id, const SysTablesEntryPB& metad
   // Tables created as part of a Transaction should check transaction status and be deleted
   // if the transaction is aborted.
   if (metadata.has_transaction()) {
-    LOG(INFO) << "Enqueuing table for Transaction Verification: " << table->ToString();
     TransactionMetadata txn = VERIFY_RESULT(TransactionMetadata::FromPB(metadata.transaction()));
-    std::function<Status(bool)> when_done =
-        std::bind(&CatalogManager::VerifyTablePgLayer, catalog_manager_, table, _1);
-    WARN_NOT_OK(catalog_manager_->background_tasks_thread_pool_->SubmitFunc(
-        std::bind(&YsqlTransactionDdl::VerifyTransaction, &catalog_manager_->ysql_transaction_,
-                  txn, when_done)),
-        "Could not submit VerifyTransaction to thread pool");
+    if (metadata.ysql_ddl_txn_verifier_state_size() > 0) {
+      if (FLAGS_ysql_ddl_rollback_enabled) {
+        catalog_manager_->ScheduleYsqlTxnVerification(table, txn);
+      }
+    } else {
+      // This is a table/index for which YSQL transaction verification is not supported yet.
+      // For these, we only support rolling back creating the table. If the transaction has
+      // completed, merely check for the presence of this entity in the PG catalog.
+      LOG(INFO) << "Enqueuing table for Transaction Verification: " << table->ToString();
+      std::function<Status(bool)> when_done =
+          std::bind(&CatalogManager::VerifyTablePgLayer, catalog_manager_, table, _1);
+      WARN_NOT_OK(catalog_manager_->background_tasks_thread_pool_->SubmitFunc(
+          std::bind(&YsqlTransactionDdl::VerifyTransaction,
+                    catalog_manager_->ysql_transaction_.get(),
+                    txn, table, false /* has_ysql_ddl_txn_state */, when_done)),
+          "Could not submit VerifyTransaction to thread pool");
+    }
   }
 
   LOG(INFO) << "Loaded metadata for table " << table->ToString() << ", state: "
@@ -129,6 +170,8 @@ Status TabletLoader::Visit(const TabletId& tablet_id, const SysTabletsEntryPB& m
 
   // Setup the tablet info.
   std::vector<TableId> table_ids;
+  std::vector<TableId> existing_table_ids;
+  std::map<ColocationId, TableInfoPtr> tablet_colocation_map;
   bool tablet_deleted;
   bool listed_as_hidden;
   TabletInfoPtr tablet(new TabletInfo(first_table, tablet_id));
@@ -194,6 +237,8 @@ Status TabletLoader::Visit(const TabletId& tablet_id, const SysTabletsEntryPB& m
         return STATUS(Corruption, "Missing table for tablet: ", tablet_id);
       }
 
+      existing_table_ids.push_back(table_id);
+
       // Add the tablet to the Table.
       if (!tablet_deleted) {
         // Any table listed under the sys catalog tablet, is by definition a system table.
@@ -210,6 +255,29 @@ Status TabletLoader::Visit(const TabletId& tablet_id, const SysTabletsEntryPB& m
         // Found an active table.
         should_delete_tablet = false;
       }
+
+      auto schema = tl->schema();
+      ColocationId colocation_id = kColocationIdNotSet;
+      bool is_colocated = true;
+      if (schema.has_colocated_table_id() &&
+          schema.colocated_table_id().has_colocation_id()) {
+        colocation_id = schema.colocated_table_id().colocation_id();
+      } else if (table->IsColocationParentTable()) {
+        colocation_id = kColocationIdNotSet;
+      } else {
+        // We do not care about cotables here.
+        is_colocated = false;
+      }
+
+      if (is_colocated) {
+        auto emplace_result = tablet_colocation_map.emplace(colocation_id, table);
+        if (!emplace_result.second) {
+          return STATUS_FORMAT(Corruption,
+              "Cannot add a table $0 (ColocationId: $1) to a colocation group for tablet $2: "
+              "place is taken by a table $3",
+              table_id, colocation_id, tablet_id, emplace_result.first->second);
+        }
+      }
     }
 
 
@@ -225,25 +293,41 @@ Status TabletLoader::Visit(const TabletId& tablet_id, const SysTabletsEntryPB& m
     l.Commit();
   }
 
-  // Add the tablet to colocated_tablet_ids_map_ if the tablet is colocated.
-  if (catalog_manager_->IsColocatedParentTable(*first_table)) {
-    catalog_manager_->colocated_tablet_ids_map_[first_table->namespace_id()] =
+  if (first_table->IsColocationParentTable()) {
+    SCHECK(tablet_colocation_map.size() == existing_table_ids.size(), IllegalState,
+           Format("Tablet $0 has $1 tables, but only $2 of them were colocated",
+                  tablet_id, existing_table_ids.size(), tablet_colocation_map.size()));
+  }
+
+  // Add the tablet to colocated_db_tablets_map_ if the tablet is colocated via database.
+  if (first_table->IsColocatedDbParentTable()) {
+    catalog_manager_->colocated_db_tablets_map_[first_table->namespace_id()] =
         catalog_manager_->tablet_map_->find(tablet_id)->second;
   }
 
-  // Add the tablet to tablegroup_tablet_ids_map_ if the tablet is a tablegroup parent.
-  if (catalog_manager_->IsTablegroupParentTable(*first_table)) {
-    catalog_manager_->tablegroup_tablet_ids_map_[first_table->namespace_id()]
-        [first_table->id().substr(0, 32)] = catalog_manager_->tablet_map_->find(tablet_id)->second;
+  // Add the tablet to tablegroup_manager_ if the tablet is for a tablegroup.
+  if (first_table->IsTablegroupParentTable()) {
+    auto lock = first_table->LockForRead();
+    if (!lock->started_hiding() && !lock->started_deleting()) {
+      const auto tablegroup_id = GetTablegroupIdFromParentTableId(first_table->id());
 
-    TablegroupInfo *tg = new TablegroupInfo(first_table->id().substr(0, 32),
-                                            first_table->namespace_id());
+      auto* tablegroup =
+          VERIFY_RESULT(catalog_manager_->tablegroup_manager_->Add(
+              first_table->namespace_id(),
+              tablegroup_id,
+              catalog_manager_->tablet_map_->find(tablet_id)->second));
 
-    // Loop through table_ids again to add them to our tablegroup info.
-    for (auto table_id : table_ids) {
-      tg->AddChildTable(table_id);
+      // Loop through tablet_colocation_map to add child tables to our tablegroup info.
+      for (const auto& colocation_info : tablet_colocation_map) {
+        if (!IsTablegroupParentTableId(colocation_info.second->id())) {
+          auto child_table_lock = colocation_info.second->LockForRead();
+          if (!child_table_lock->started_hiding() && !child_table_lock->started_deleting()) {
+            RETURN_NOT_OK(tablegroup->AddChildTable(colocation_info.second->id(),
+                colocation_info.first));
+          }
+        }
+      }
     }
-    catalog_manager_->tablegroup_ids_map_[first_table->id().substr(0, 32)] = tg;
   }
 
   LOG(INFO) << "Loaded metadata for " << (tablet_deleted ? "deleted " : "")
@@ -317,8 +401,12 @@ Status NamespaceLoader::Visit(const NamespaceId& ns_id, const SysNamespaceEntryP
         std::function<Status(bool)> when_done =
             std::bind(&CatalogManager::VerifyNamespacePgLayer, catalog_manager_, ns, _1);
         WARN_NOT_OK(catalog_manager_->background_tasks_thread_pool_->SubmitFunc(
-            std::bind(&YsqlTransactionDdl::VerifyTransaction, &catalog_manager_->ysql_transaction_,
-                      txn, when_done)),
+            std::bind(&YsqlTransactionDdl::VerifyTransaction,
+                      catalog_manager_->ysql_transaction_.get(),
+                      txn,
+                      nullptr /* table */,
+                      false /* has_ysql_ddl_state */,
+                      when_done)),
           "Could not submit VerifyTransaction to thread pool");
       }
       break;
@@ -403,17 +491,18 @@ Status UDTypeLoader::Visit(const UDTypeId& udtype_id, const SysUDTypeEntryPB& me
 
 Status ClusterConfigLoader::Visit(
     const std::string& unused_id, const SysClusterConfigEntryPB& metadata) {
+  if (FLAGS_TEST_slow_cluster_config_load_secs > 0) {
+    SleepFor(MonoDelta::FromSeconds(FLAGS_TEST_slow_cluster_config_load_secs));
+  }
   // Debug confirm that there is no cluster_config_ set. This also ensures that this does not
   // visit multiple rows. Should update this, if we decide to have multiple IDs set as well.
   DCHECK(!catalog_manager_->cluster_config_) << "Already have config data!";
 
   // Prepare the config object.
-  ClusterConfigInfo* config = new ClusterConfigInfo();
+  std::shared_ptr<ClusterConfigInfo> config = std::make_shared<ClusterConfigInfo>();
   {
     auto l = config->LockForWrite();
     l.mutable_data()->pb.CopyFrom(metadata);
-
-
 
     // Update in memory state.
     catalog_manager_->cluster_config_ = config;
@@ -472,19 +561,40 @@ Status SysConfigLoader::Visit(const string& config_type, const SysConfigEntryPB&
     auto l = config->LockForWrite();
     l.mutable_data()->pb.CopyFrom(metadata);
 
-    // For now we are only using this to store (ycql) security config or ysql catalog config.
     if (config_type == kSecurityConfigType) {
       catalog_manager_->permissions_manager()->SetSecurityConfigOnLoadUnlocked(config);
     } else if (config_type == kYsqlCatalogConfigType) {
       LOG_IF(WARNING, catalog_manager_->ysql_catalog_config_ != nullptr)
           << "Multiple sys config type " << config_type << " found";
       catalog_manager_->ysql_catalog_config_ = config;
+    } else if (config_type == kTransactionTablesConfigType) {
+      LOG_IF(WARNING, catalog_manager_->transaction_tables_config_ != nullptr)
+          << "Multiple sys config type " << config_type << " found";
+      catalog_manager_->transaction_tables_config_ = config;
     }
 
     l.Commit();
   }
 
   LOG(INFO) << "Loaded sys config type " << config_type;
+  return Status::OK();
+}
+
+////////////////////////////////////////////////////////////
+// XClusterSafeTime Loader
+////////////////////////////////////////////////////////////
+
+Status XClusterSafeTimeLoader::Visit(
+    const std::string& unused_id, const XClusterSafeTimePB& metadata) {
+  // Debug confirm that there is no xcluster_safe_time_info_ set. This also ensures that this does
+  // not visit multiple rows.
+  auto l = catalog_manager_->xcluster_safe_time_info_.LockForWrite();
+  DCHECK(l->pb.safe_time_map().empty()) << "Already have XCluster Safe Time data!";
+
+  VLOG_WITH_FUNC(2) << "Loading XCluster Safe Time data: " << metadata.DebugString();
+  l.mutable_data()->pb.CopyFrom(metadata);
+  l.Commit();
+
   return Status::OK();
 }
 

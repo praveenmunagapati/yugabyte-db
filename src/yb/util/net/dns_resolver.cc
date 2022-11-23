@@ -37,20 +37,21 @@
 #include <unordered_map>
 #include <vector>
 
-#include <boost/optional.hpp>
-
-#include <gflags/gflags.h>
 #include <glog/logging.h>
 
-#include "yb/util/concurrent_value.h"
-#include "yb/util/flag_tags.h"
 #include "yb/util/metrics.h"
+#include "yb/util/net/net_fwd.h"
+#include "yb/util/net/inetaddress.h"
 #include "yb/util/net/net_util.h"
 #include "yb/util/net/sockaddr.h"
+#include "yb/util/result.h"
+#include "yb/util/status_format.h"
+#include "yb/util/flags.h"
 
 using namespace std::literals;
 
-DEFINE_int64(dns_cache_expiration_ms, 60000, "Time to store DNS resolution results in cache.");
+DEFINE_UNKNOWN_int64(dns_cache_expiration_ms, 60000,
+    "Time to store DNS resolution results in cache.");
 
 namespace yb {
 
@@ -90,14 +91,14 @@ Result<IpAddress> PickResolvedAddress(
 
 class DnsResolver::Impl {
  public:
-  explicit Impl(IoService* io_service) : resolver_(*io_service) {}
+  explicit Impl(IoService* io_service) : io_service_(*io_service), resolver_(*io_service) {}
 
   std::shared_future<Result<IpAddress>> ResolveFuture(const std::string& host) {
-    return ObtainEntry(host)->DoResolve(host, /* callback= */ nullptr, &resolver_);
+    return ObtainEntry(host)->DoResolve(host, /* callback= */ nullptr, &io_service_, &resolver_);
   }
 
   void AsyncResolve(const std::string& host, const AsyncResolveCallback& callback) {
-    ObtainEntry(host)->DoResolve(host, &callback, &resolver_);
+    ObtainEntry(host)->DoResolve(host, &callback, &io_service_, &resolver_);
   }
 
  private:
@@ -130,7 +131,8 @@ class DnsResolver::Impl {
     }
 
     std::shared_future<Result<IpAddress>> DoResolve(
-        const std::string& host, const AsyncResolveCallback* callback, Resolver* resolver) {
+        const std::string& host, const AsyncResolveCallback* callback, IoService* io_service,
+        Resolver* resolver) {
       std::shared_ptr<std::promise<Result<IpAddress>>> promise;
       std::shared_future<Result<IpAddress>> result;
       {
@@ -160,7 +162,7 @@ class DnsResolver::Impl {
           SetResult(PickResolvedAddress(host, error, entries), promise.get());
         });
 
-        if (resolver->get_io_context().stopped()) {
+        if (io_service->stopped()) {
           SetResult(STATUS(Aborted, "Messenger already stopped"), promise.get());
         }
       }
@@ -203,6 +205,7 @@ class DnsResolver::Impl {
     return &cache_[host];
   }
 
+  IoService& io_service_;
   Resolver resolver_;
   std::shared_timed_mutex mutex_;
   std::unordered_map<std::string, CacheEntry> cache_;

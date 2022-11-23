@@ -2,27 +2,38 @@
 
 package com.yugabyte.yw.common.alerts;
 
+import static io.swagger.annotations.ApiModelProperty.AccessMode.READ_WRITE;
+
 import com.fasterxml.jackson.annotation.JsonTypeName;
 import com.yugabyte.yw.common.BeanValidator;
 import com.yugabyte.yw.common.EmailHelper;
+import io.swagger.annotations.ApiModel;
+import io.swagger.annotations.ApiModelProperty;
 import java.util.List;
+import javax.validation.Valid;
+import lombok.Data;
 import lombok.EqualsAndHashCode;
-import lombok.ToString;
 import org.apache.commons.validator.routines.EmailValidator;
 
+@Data
 @EqualsAndHashCode(callSuper = false)
-@ToString
 // TODO: To mask/unmask sensitive fields while serializing to/deserializing from Json.
 @JsonTypeName("Email")
+@ApiModel(parent = AlertChannelParams.class)
 public class AlertChannelEmailParams extends AlertChannelParams {
 
-  public boolean defaultRecipients = false;
+  @ApiModelProperty(value = "Use health check notification recipients", accessMode = READ_WRITE)
+  private boolean defaultRecipients = false;
 
-  public List<String> recipients;
+  @ApiModelProperty(value = "List of recipients", accessMode = READ_WRITE)
+  private List<String> recipients;
 
-  public boolean defaultSmtpSettings = false;
+  @ApiModelProperty(value = "Use health check notification SMTP settings", accessMode = READ_WRITE)
+  private boolean defaultSmtpSettings = false;
 
-  public SmtpData smtpData;
+  @ApiModelProperty(value = "SMTP settings", accessMode = READ_WRITE)
+  @Valid
+  private SmtpData smtpData;
 
   @Override
   public void validate(BeanValidator validator) {

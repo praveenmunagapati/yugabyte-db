@@ -67,6 +67,9 @@ DataType InternalToDataType(InternalType internal_type) {
       return DataType::VARINT;
     case InternalType::kFrozenValue:
       return DataType::FROZEN;
+    case InternalType::kTupleValue:
+      return DataType::TUPLE;
+    case InternalType::kGinNullValue: // No such type in YCQL.
     case InternalType::VALUE_NOT_SET:
     case InternalType::kVirtualValue:
       break;
@@ -103,6 +106,8 @@ std::string InternalTypeToCQLString(InternalType internal_type) {
     case InternalType::kTimeValue: return "time";
     case InternalType::kFrozenValue: return "frozen";
     case InternalType::kVirtualValue: return "virtual";
+    case InternalType::kGinNullValue: return "unknown"; // No such type in YCQL.
+    case InternalType::kTupleValue: return "tuple";
   }
   LOG (FATAL) << "Invalid datatype: " << internal_type;
   return "Undefined Type";

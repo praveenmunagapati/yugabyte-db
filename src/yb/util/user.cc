@@ -38,6 +38,7 @@
 
 #include "yb/util/errno.h"
 #include "yb/util/malloc.h"
+#include "yb/util/result.h"
 #include "yb/util/subprocess.h"
 
 using std::string;
@@ -61,7 +62,7 @@ Result<std::string> GetLoggedInUserFallback() {
 } // namespace
 
 Result<std::string> GetLoggedInUser() {
-  size_t bufsize = sysconf(_SC_GETPW_R_SIZE_MAX);
+  auto bufsize = sysconf(_SC_GETPW_R_SIZE_MAX);
   if (bufsize == -1) {  // Value was indeterminate.
     bufsize = 16384;    // Should be more than enough, per the man page.
   }

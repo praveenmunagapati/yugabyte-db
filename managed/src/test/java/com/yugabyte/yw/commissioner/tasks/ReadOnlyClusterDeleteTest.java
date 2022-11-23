@@ -4,10 +4,13 @@ package com.yugabyte.yw.commissioner.tasks;
 
 import static com.yugabyte.yw.common.AssertHelper.assertJsonEqual;
 import static com.yugabyte.yw.common.ModelFactory.createUniverse;
+import static com.yugabyte.yw.models.TaskInfo.State.Failure;
+import static com.yugabyte.yw.models.TaskInfo.State.Success;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
-import static org.mockito.Matchers.any;
-import static org.mockito.Mockito.anyLong;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -16,8 +19,8 @@ import static org.mockito.Mockito.when;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.yugabyte.yw.commissioner.tasks.subtasks.UpdatePlacementInfo.ModifyUniverseConfig;
 import com.yugabyte.yw.common.ApiUtils;
+import com.yugabyte.yw.common.ModelFactory;
 import com.yugabyte.yw.common.PlacementInfoUtil;
 import com.yugabyte.yw.common.ShellResponse;
 import com.yugabyte.yw.forms.UniverseConfigureTaskParams;
@@ -39,8 +42,7 @@ import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.mockito.runners.MockitoJUnitRunner;
-import org.yb.client.AbstractModifyMasterClusterConfig;
+import org.mockito.junit.MockitoJUnitRunner;
 import org.yb.client.ChangeMasterClusterConfigResponse;
 import org.yb.client.GetMasterClusterConfigResponse;
 import org.yb.client.YBClient;
@@ -49,13 +51,8 @@ import play.libs.Json;
 @RunWith(MockitoJUnitRunner.class)
 public class ReadOnlyClusterDeleteTest extends CommissionerBaseTest {
 
-  Universe defaultUniverse;
-  ShellResponse dummyShellResponse;
-  YBClient mockClient;
-  ModifyUniverseConfig modifyUC;
-  AbstractModifyMasterClusterConfig amuc;
-
-  Cluster readOnlyCluster;
+  private Universe defaultUniverse;
+  private Cluster readOnlyCluster;
 
   private TaskInfo submitTask(
       UniverseDefinitionTaskParams taskParams, TaskType type, int expectedVersion) {
@@ -69,6 +66,7 @@ public class ReadOnlyClusterDeleteTest extends CommissionerBaseTest {
     return null;
   }
 
+  @Override
   @Before
   public void setUp() {
     super.setUp();
@@ -86,24 +84,24 @@ public class ReadOnlyClusterDeleteTest extends CommissionerBaseTest {
     Universe.saveDetails(
         defaultUniverse.universeUUID,
         ApiUtils.mockUniverseUpdater(userIntent, true /* setMasters */));
-    mockClient = mock(YBClient.class);
-    when(mockYBClient.getClient(any(), any())).thenReturn(mockClient);
-    when(mockClient.waitForServer(any(), anyLong())).thenReturn(true);
-    dummyShellResponse = new ShellResponse();
+    YBClient mockClient = mock(YBClient.class);
+    // Added lenient() because dependent test is currently ignored.
+    lenient().when(mockYBClient.getClient(any(), any())).thenReturn(mockClient);
+    lenient().when(mockClient.waitForServer(any(), anyLong())).thenReturn(true);
+    ShellResponse dummyShellResponse = new ShellResponse();
     dummyShellResponse.message = "true";
     when(mockNodeManager.nodeCommand(any(), any())).thenReturn(dummyShellResponse);
-    modifyUC = mock(ModifyUniverseConfig.class);
-    amuc = mock(AbstractModifyMasterClusterConfig.class);
     try {
       GetMasterClusterConfigResponse gcr = new GetMasterClusterConfigResponse(0, "", null, null);
-      when(mockClient.getMasterClusterConfig()).thenReturn(gcr);
-      ChangeMasterClusterConfigResponse ccr = new ChangeMasterClusterConfigResponse(1111, "", null);
+      lenient().when(mockClient.getMasterClusterConfig()).thenReturn(gcr);
+      new ChangeMasterClusterConfigResponse(1111, "", null);
     } catch (Exception e) {
     }
 
     UniverseDefinitionTaskParams taskParams = new UniverseDefinitionTaskParams();
     taskParams.universeUUID = defaultUniverse.universeUUID;
     taskParams.currentClusterType = ClusterType.ASYNC;
+    taskParams.creatingUser = ModelFactory.testUser(defaultCustomer);
     userIntent = new UserIntent();
     region = Region.create(defaultProvider, "region-2", "Region 2", "yb-image-1");
     AvailabilityZone.createOrThrow(region, "az-2", "AZ 2", "subnet-2");
@@ -114,12 +112,14 @@ public class ReadOnlyClusterDeleteTest extends CommissionerBaseTest {
     userIntent.regionList = ImmutableList.of(region.uuid);
     userIntent.universeName = defaultUniverse.name;
     userIntent.instanceType = ApiUtils.UTIL_INST_TYPE;
+    userIntent.provider = defaultProvider.uuid.toString();
+    taskParams.clusters.add(defaultUniverse.getUniverseDetails().getPrimaryCluster());
     readOnlyCluster = new Cluster(ClusterType.ASYNC, userIntent);
     taskParams.clusters.add(readOnlyCluster);
     PlacementInfoUtil.updateUniverseDefinition(
         taskParams,
         defaultCustomer.getCustomerId(),
-        taskParams.clusters.get(0).uuid,
+        readOnlyCluster.uuid,
         UniverseConfigureTaskParams.ClusterOperationType.CREATE);
     int iter = 1;
     for (NodeDetails node : taskParams.nodeDetailsSet) {
@@ -131,7 +131,7 @@ public class ReadOnlyClusterDeleteTest extends CommissionerBaseTest {
     submitTask(taskParams, TaskType.ReadOnlyClusterCreate, 2);
   }
 
-  List<TaskType> CLUSTER_DELETE_TASK_SEQUENCE =
+  private static final List<TaskType> CLUSTER_DELETE_TASK_SEQUENCE =
       ImmutableList.of(
           TaskType.AnsibleDestroyServer,
           TaskType.ReadOnlyClusterDelete,
@@ -139,7 +139,7 @@ public class ReadOnlyClusterDeleteTest extends CommissionerBaseTest {
           TaskType.SwamperTargetsFileUpdate,
           TaskType.UniverseUpdateSucceeded);
 
-  List<JsonNode> CLUSTER_DELETE_TASK_EXPECTED_RESULTS =
+  private static final List<JsonNode> CLUSTER_DELETE_TASK_EXPECTED_RESULTS =
       ImmutableList.of(
           Json.toJson(ImmutableMap.of()),
           Json.toJson(ImmutableMap.of()),
@@ -171,6 +171,8 @@ public class ReadOnlyClusterDeleteTest extends CommissionerBaseTest {
     taskParams.universeUUID = defaultUniverse.universeUUID;
     taskParams.clusterUUID = readOnlyCluster.uuid;
     TaskInfo taskInfo = submitTask(taskParams, TaskType.ReadOnlyClusterDelete, -1);
+    assertEquals(Success, taskInfo.getTaskState());
+
     verify(mockNodeManager, times(5)).nodeCommand(any(), any());
     List<TaskInfo> subTasks = taskInfo.getSubTasks();
     Map<Integer, List<TaskInfo>> subTasksByPosition =
@@ -191,7 +193,7 @@ public class ReadOnlyClusterDeleteTest extends CommissionerBaseTest {
     taskParams.universeUUID = defaultUniverse.universeUUID;
     taskParams.clusterUUID = UUID.randomUUID();
     TaskInfo taskInfo = submitTask(taskParams, TaskType.ReadOnlyClusterDelete, -1);
-    assertEquals(TaskInfo.State.Failure, taskInfo.getTaskState());
+    assertEquals(Failure, taskInfo.getTaskState());
     assertEquals(4, univUTP.nodeDetailsSet.size());
   }
 }

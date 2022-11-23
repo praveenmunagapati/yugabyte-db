@@ -5,11 +5,12 @@ package com.yugabyte.yw.controllers;
 import static com.yugabyte.yw.common.AssertHelper.assertAuditEntry;
 import static com.yugabyte.yw.common.AssertHelper.assertBadRequest;
 import static com.yugabyte.yw.common.AssertHelper.assertOk;
-import static com.yugabyte.yw.common.AssertHelper.assertValue;
 import static com.yugabyte.yw.common.AssertHelper.assertPlatformException;
+import static com.yugabyte.yw.common.AssertHelper.assertValue;
 import static com.yugabyte.yw.common.FakeApiHelper.doRequestWithAuthTokenAndBody;
 import static com.yugabyte.yw.common.ModelFactory.createUniverse;
 import static com.yugabyte.yw.common.TestHelper.createTempFile;
+import static com.yugabyte.yw.common.TestHelper.testDatabase;
 import static org.hamcrest.CoreMatchers.allOf;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.notNullValue;
@@ -37,11 +38,15 @@ import com.yugabyte.yw.commissioner.Common;
 import com.yugabyte.yw.commissioner.Common.CloudType;
 import com.yugabyte.yw.commissioner.HealthChecker;
 import com.yugabyte.yw.common.ApiUtils;
-import com.yugabyte.yw.common.CertificateHelper;
+import com.yugabyte.yw.common.CustomWsClientFactory;
+import com.yugabyte.yw.common.CustomWsClientFactoryProvider;
 import com.yugabyte.yw.common.ModelFactory;
 import com.yugabyte.yw.common.PlacementInfoUtil;
+import com.yugabyte.yw.common.PlatformGuiceApplicationBaseTest;
 import com.yugabyte.yw.common.ReleaseManager;
 import com.yugabyte.yw.common.TestHelper;
+import com.yugabyte.yw.common.certmgmt.CertConfigType;
+import com.yugabyte.yw.common.certmgmt.CertificateHelper;
 import com.yugabyte.yw.common.config.DummyRuntimeConfigFactoryImpl;
 import com.yugabyte.yw.common.config.RuntimeConfigFactory;
 import com.yugabyte.yw.forms.CertificateParams;
@@ -90,11 +95,10 @@ import play.Application;
 import play.inject.guice.GuiceApplicationBuilder;
 import play.libs.Json;
 import play.mvc.Result;
-import play.test.Helpers;
 import play.test.WithApplication;
 
 @RunWith(JUnitParamsRunner.class)
-public class UpgradeUniverseControllerTest extends WithApplication {
+public class UpgradeUniverseControllerTest extends PlatformGuiceApplicationBaseTest {
 
   @Rule public MockitoRule rule = MockitoJUnit.rule();
 
@@ -104,7 +108,9 @@ public class UpgradeUniverseControllerTest extends WithApplication {
   private static Commissioner mockCommissioner;
   private Config mockConfig;
 
-  private final String TMP_CHART_PATH = "/tmp/yugaware_tests/UpgradeUniverseControllerTest/charts";
+  private final String TMP_CHART_PATH =
+      "/tmp/yugaware_tests/" + getClass().getSimpleName() + "/charts";
+  private final String TMP_CERTS_PATH = "/tmp/" + getClass().getSimpleName() + "/certs";
 
   String cert1Contents =
       "-----BEGIN CERTIFICATE-----\n"
@@ -155,20 +161,27 @@ public class UpgradeUniverseControllerTest extends WithApplication {
     ReleaseManager mockReleaseManager = mock(ReleaseManager.class);
 
     when(mockConfig.getBoolean("yb.cloud.enabled")).thenReturn(false);
-    when(mockConfig.getString("yb.storage.path")).thenReturn("/tmp");
+    when(mockConfig.getString("yb.storage.path")).thenReturn("/tmp/" + getClass().getSimpleName());
     when(mockReleaseManager.getReleaseByVersion(any()))
         .thenReturn(
             ReleaseManager.ReleaseMetadata.create("1.0.0")
-                .withChartPath(TMP_CHART_PATH + "/yugabyte-1.0.0-helm.tar.gz"));
+                .withChartPath(TMP_CHART_PATH + "/uuct_yugabyte-1.0.0-helm.tar.gz"));
+    when(mockConfig.getString("yb.security.type")).thenReturn("");
+    when(mockConfig.getString("yb.security.clientID")).thenReturn("");
+    when(mockConfig.getString("yb.security.secret")).thenReturn("");
+    when(mockConfig.getString("yb.security.oidcScope")).thenReturn("");
+    when(mockConfig.getString("yb.security.discoveryURI")).thenReturn("");
 
     return new GuiceApplicationBuilder()
-        .configure((Map) Helpers.inMemoryDatabase())
+        .configure(testDatabase())
         .overrides(bind(Commissioner.class).toInstance(mockCommissioner))
         .overrides(
             bind(RuntimeConfigFactory.class)
                 .toInstance(new DummyRuntimeConfigFactoryImpl(mockConfig)))
         .overrides(bind(ReleaseManager.class).toInstance(mockReleaseManager))
         .overrides(bind(HealthChecker.class).toInstance(mock(HealthChecker.class)))
+        .overrides(
+            bind(CustomWsClientFactory.class).toProvider(CustomWsClientFactoryProvider.class))
         .build();
   }
 
@@ -178,12 +191,12 @@ public class UpgradeUniverseControllerTest extends WithApplication {
     Users user = ModelFactory.testUser(customer);
     authToken = user.createAuthToken();
     new File(TMP_CHART_PATH).mkdirs();
-    createTempFile(TMP_CHART_PATH, "yugabyte-1.0.0-helm.tar.gz", "Sample helm chart data");
+    createTempFile(TMP_CHART_PATH, "uuct_yugabyte-1.0.0-helm.tar.gz", "Sample helm chart data");
   }
 
   @After
   public void tearDown() throws IOException {
-    FileUtils.deleteDirectory(new File("/tmp/certs"));
+    FileUtils.deleteDirectory(new File(TMP_CERTS_PATH));
     FileUtils.deleteDirectory(new File(TMP_CHART_PATH));
   }
 
@@ -344,6 +357,7 @@ public class UpgradeUniverseControllerTest extends WithApplication {
     Map<String, String> universeConfig = new HashMap<>();
     universeConfig.put(Universe.HELM2_LEGACY, "helm");
     universe.setConfig(universeConfig);
+    universe.save();
 
     String url =
         "/api/customers/"
@@ -438,6 +452,46 @@ public class UpgradeUniverseControllerTest extends WithApplication {
   }
 
   @Test
+  public void testDeleteGFlagsThroughNonRestartOption() {
+    UUID fakeTaskUUID = UUID.randomUUID();
+    when(mockCommissioner.submit(any(), any())).thenReturn(fakeTaskUUID);
+
+    Universe universe = createUniverse(customer.getCustomerId());
+    Universe.UniverseUpdater updater =
+        universeObject -> {
+          UniverseDefinitionTaskParams universeDetails = universeObject.getUniverseDetails();
+          UserIntent userIntent = universeDetails.getPrimaryCluster().userIntent;
+          userIntent.masterGFlags = ImmutableMap.of("master-flag", "123");
+          userIntent.tserverGFlags = ImmutableMap.of("tserver-flag", "456");
+          universeObject.setUniverseDetails(universeDetails);
+        };
+    Universe.saveDetails(universe.universeUUID, updater);
+
+    String url =
+        "/api/customers/"
+            + customer.uuid
+            + "/universes/"
+            + universe.universeUUID
+            + "/upgrade/gflags";
+    JsonNode masterGFlags = Json.parse("{ \"master-flag\": \"123\"}");
+    JsonNode tserverGFlags = Json.parse("{ \"tserver-flag2\": \"456\"}]");
+    ObjectNode bodyJson = Json.newObject().put("upgradeOption", "Non-Restart");
+    bodyJson.set("masterGFlags", masterGFlags);
+    bodyJson.set("tserverGFlags", tserverGFlags);
+    Result result =
+        assertPlatformException(
+            () -> doRequestWithAuthTokenAndBody("POST", url, authToken, bodyJson));
+    assertBadRequest(result, "Cannot delete gFlags through non-restart upgrade option.");
+
+    ArgumentCaptor<GFlagsUpgradeParams> argCaptor =
+        ArgumentCaptor.forClass(GFlagsUpgradeParams.class);
+    verify(mockCommissioner, times(0)).submit(eq(TaskType.GFlagsUpgrade), argCaptor.capture());
+
+    assertNull(CustomerTask.find.query().where().eq("task_uuid", fakeTaskUUID).findOne());
+    assertAuditEntry(0, customer.uuid);
+  }
+
+  @Test
   public void testGFlagsUpgradeWithMalformedFlags() {
     UUID fakeTaskUUID = UUID.randomUUID();
     when(mockCommissioner.submit(any(), any())).thenReturn(fakeTaskUUID);
@@ -486,6 +540,12 @@ public class UpgradeUniverseControllerTest extends WithApplication {
     assertEquals("123", taskParams.masterGFlags.get("master-flag"));
     assertEquals("456", taskParams.tserverGFlags.get("tserver-flag"));
     assertEquals(UpgradeOption.ROLLING_UPGRADE, taskParams.upgradeOption);
+
+    // Checking params are merged with universe info.
+    Universe universe = Universe.getOrBadRequest(universeUUID);
+    assertEquals(universe.getUniverseDetails().rootCA, taskParams.rootCA);
+    assertEquals(universe.getUniverseDetails().clientRootCA, taskParams.clientRootCA);
+    assertEquals(universe.getUniverseDetails().clusters.size(), taskParams.clusters.size());
 
     CustomerTask task = CustomerTask.find.query().where().eq("task_uuid", fakeTaskUUID).findOne();
     assertNotNull(task);
@@ -576,6 +636,7 @@ public class UpgradeUniverseControllerTest extends WithApplication {
     Map<String, String> universeConfig = new HashMap<>();
     universeConfig.put(Universe.HELM2_LEGACY, "helm");
     universe.setConfig(universeConfig);
+    universe.save();
 
     String url =
         "/api/customers/"
@@ -654,6 +715,59 @@ public class UpgradeUniverseControllerTest extends WithApplication {
     assertEquals(bodyJson.get("rootCA").asText(), taskParams.rootCA.toString());
     assertEquals(bodyJson.get("clientRootCA").asText(), taskParams.clientRootCA.toString());
     assertEquals(UpgradeOption.ROLLING_UPGRADE, taskParams.upgradeOption);
+
+    // Checking params are merged with universe info.
+    Universe universe = Universe.getOrBadRequest(universeUUID);
+    assertEquals(universe.getUniverseDetails().allowInsecure, taskParams.allowInsecure);
+    assertEquals(
+        universe.getUniverseDetails().setTxnTableWaitCountFlag,
+        taskParams.setTxnTableWaitCountFlag);
+    assertEquals(universe.getUniverseDetails().clusters.size(), taskParams.clusters.size());
+
+    CustomerTask task = CustomerTask.find.query().where().eq("task_uuid", fakeTaskUUID).findOne();
+    assertNotNull(task);
+    assertThat(task.getCustomerUUID(), allOf(notNullValue(), equalTo(customer.uuid)));
+    assertThat(task.getTargetName(), allOf(notNullValue(), equalTo("Test Universe")));
+    assertThat(task.getType(), allOf(notNullValue(), equalTo(CustomerTask.TaskType.CertsRotate)));
+    assertAuditEntry(1, customer.uuid);
+  }
+
+  @Test
+  public void testCertsRotateByTlsConfigUpdate() throws IOException, NoSuchAlgorithmException {
+    UUID fakeTaskUUID = UUID.randomUUID();
+    when(mockCommissioner.submit(any(), any())).thenReturn(fakeTaskUUID);
+    UUID universeUUID = prepareUniverseForCertsRotate(false);
+    String url = "/api/customers/" + customer.uuid + "/universes/" + universeUUID + "/update_tls";
+    ObjectNode bodyJson = prepareRequestBodyForCertsRotate(false);
+    bodyJson.put("enableNodeToNodeEncrypt", "true");
+    bodyJson.put("enableClientToNodeEncrypt", "true");
+    bodyJson.put("rootAndClientRootCASame", "false");
+    bodyJson.put("sleepAfterMasterRestartMillis", 1200);
+    bodyJson.put("sleepAfterTServerRestartMillis", 1300);
+    bodyJson.put("upgradeOption", "Non-Rolling");
+    Result result = doRequestWithAuthTokenAndBody("POST", url, authToken, bodyJson);
+
+    assertOk(result);
+    JsonNode json = Json.parse(contentAsString(result));
+    assertValue(json, "taskUUID", fakeTaskUUID.toString());
+
+    ArgumentCaptor<CertsRotateParams> argCaptor = ArgumentCaptor.forClass(CertsRotateParams.class);
+    verify(mockCommissioner, times(1)).submit(eq(TaskType.CertsRotate), argCaptor.capture());
+
+    CertsRotateParams taskParams = argCaptor.getValue();
+    assertEquals(bodyJson.get("rootCA").asText(), taskParams.rootCA.toString());
+    assertEquals(bodyJson.get("clientRootCA").asText(), taskParams.clientRootCA.toString());
+    assertEquals(1200, (int) taskParams.sleepAfterMasterRestartMillis);
+    assertEquals(1300, (int) taskParams.sleepAfterTServerRestartMillis);
+    assertEquals(UpgradeOption.NON_ROLLING_UPGRADE, taskParams.upgradeOption);
+
+    // Checking params are merged with universe info.
+    Universe universe = Universe.getOrBadRequest(universeUUID);
+    assertEquals(universe.getUniverseDetails().allowInsecure, taskParams.allowInsecure);
+    assertEquals(
+        universe.getUniverseDetails().setTxnTableWaitCountFlag,
+        taskParams.setTxnTableWaitCountFlag);
+    assertEquals(universe.getUniverseDetails().clusters.size(), taskParams.clusters.size());
 
     CustomerTask task = CustomerTask.find.query().where().eq("task_uuid", fakeTaskUUID).findOne();
     assertNotNull(task);
@@ -777,8 +891,9 @@ public class UpgradeUniverseControllerTest extends WithApplication {
   public void testTlsToggleWithRootCaUpdate() {
     UUID fakeTaskUUID = UUID.randomUUID();
     when(mockCommissioner.submit(any(), any())).thenReturn(fakeTaskUUID);
-    UUID certUUID1 = CertificateHelper.createRootCA("test cert 1", customer.uuid, "/tmp/certs");
-    UUID certUUID2 = CertificateHelper.createRootCA("test cert 2", customer.uuid, "/tmp/certs");
+    when(mockConfig.getString("yb.storage.path")).thenReturn(TMP_CERTS_PATH);
+    UUID certUUID1 = CertificateHelper.createRootCA(mockConfig, "test cert 1", customer.uuid);
+    UUID certUUID2 = CertificateHelper.createRootCA(mockConfig, "test cert 2", customer.uuid);
     UUID universeUUID = prepareUniverseForTlsToggle(true, true, certUUID1);
 
     String url = "/api/customers/" + customer.uuid + "/universes/" + universeUUID + "/upgrade/tls";
@@ -954,27 +1069,58 @@ public class UpgradeUniverseControllerTest extends WithApplication {
     assertAuditEntry(1, customer.uuid);
   }
 
+  @Test
+  public void testRebootUniverse() {
+    UUID fakeTaskUUID = UUID.randomUUID();
+    when(mockCommissioner.submit(any(), any())).thenReturn(fakeTaskUUID);
+    UUID universeUUID = createUniverse(customer.getCustomerId()).universeUUID;
+
+    String url =
+        "/api/customers/" + customer.uuid + "/universes/" + universeUUID + "/upgrade/reboot";
+    ObjectNode bodyJson = Json.newObject().put("upgradeOption", "Rolling");
+    Result result = doRequestWithAuthTokenAndBody("POST", url, authToken, bodyJson);
+
+    assertOk(result);
+    JsonNode json = Json.parse(contentAsString(result));
+    assertValue(json, "taskUUID", fakeTaskUUID.toString());
+
+    ArgumentCaptor<UpgradeTaskParams> argCaptor = ArgumentCaptor.forClass(UpgradeTaskParams.class);
+    verify(mockCommissioner, times(1)).submit(eq(TaskType.RebootUniverse), argCaptor.capture());
+
+    UpgradeTaskParams taskParams = argCaptor.getValue();
+    assertEquals(UpgradeOption.ROLLING_UPGRADE, taskParams.upgradeOption);
+
+    CustomerTask task = CustomerTask.find.query().where().eq("task_uuid", fakeTaskUUID).findOne();
+    assertNotNull(task);
+    assertThat(task.getCustomerUUID(), allOf(notNullValue(), equalTo(customer.uuid)));
+    assertThat(task.getTargetName(), allOf(notNullValue(), equalTo("Test Universe")));
+    assertThat(
+        task.getType(), allOf(notNullValue(), equalTo(CustomerTask.TaskType.RebootUniverse)));
+    assertAuditEntry(1, customer.uuid);
+  }
+
   private UUID prepareUniverseForCertsRotate(boolean onprem)
       throws IOException, NoSuchAlgorithmException {
     UUID rootCA = UUID.randomUUID();
     UUID clientRootCA = UUID.randomUUID();
+    createTempFile("upgrade_universe_controller_test_ca.crt", cert1Contents);
     if (onprem) {
       Date date = new Date();
+
       CertificateParams.CustomCertInfo customCertInfo = new CertificateParams.CustomCertInfo();
       customCertInfo.rootCertPath = "rootCertPath";
       customCertInfo.nodeCertPath = "nodeCertPath";
       customCertInfo.nodeKeyPath = "nodeKeyPath";
-      new File(TestHelper.TMP_PATH).mkdirs();
-      createTempFile("ca.crt", cert1Contents);
       CertificateInfo.create(
           rootCA,
           customer.uuid,
           "test1",
           date,
           date,
-          TestHelper.TMP_PATH + "/ca.crt",
+          TestHelper.TMP_PATH + "/upgrade_universe_controller_test_ca.crt",
           customCertInfo);
     } else {
+      createTempFile("upgrade_universe_controller_test_ca2.crt", cert2Contents);
       CertificateInfo.create(
           rootCA,
           customer.uuid,
@@ -982,8 +1128,8 @@ public class UpgradeUniverseControllerTest extends WithApplication {
           new Date(),
           new Date(),
           "privateKey",
-          TestHelper.TMP_PATH + "/ca.crt",
-          CertificateInfo.Type.SelfSigned);
+          TestHelper.TMP_PATH + "/upgrade_universe_controller_test_ca.crt",
+          CertConfigType.SelfSigned);
       CertificateInfo.create(
           clientRootCA,
           customer.uuid,
@@ -991,8 +1137,8 @@ public class UpgradeUniverseControllerTest extends WithApplication {
           new Date(),
           new Date(),
           "privateKey",
-          TestHelper.TMP_PATH + "/ca2.crt",
-          CertificateInfo.Type.SelfSigned);
+          TestHelper.TMP_PATH + "/upgrade_universe_controller_test_ca2.crt",
+          CertConfigType.SelfSigned);
     }
 
     UUID universeUUID = createUniverse(customer.getCustomerId()).universeUUID;
@@ -1016,6 +1162,9 @@ public class UpgradeUniverseControllerTest extends WithApplication {
                 userIntent.providerType = CloudType.aws;
               }
               universeDetails.upsertPrimaryCluster(userIntent, placementInfo);
+              // Modifying default values to make sure these params are merged into taskParams.
+              universeDetails.setTxnTableWaitCountFlag = !universeDetails.setTxnTableWaitCountFlag;
+              universeDetails.allowInsecure = !universeDetails.allowInsecure;
               universe.setUniverseDetails(universeDetails);
             })
         .universeUUID;
@@ -1025,24 +1174,25 @@ public class UpgradeUniverseControllerTest extends WithApplication {
       throws IOException, NoSuchAlgorithmException {
     UUID rootCA = UUID.randomUUID();
     UUID clientRootCA = UUID.randomUUID();
+    createTempFile("upgrade_universe_controller_test_ca2.crt", cert2Contents);
     if (onprem) {
       Date date = new Date();
+
       CertificateParams.CustomCertInfo customCertInfo = new CertificateParams.CustomCertInfo();
       customCertInfo.rootCertPath = "rootCertPath1";
       customCertInfo.nodeCertPath = "nodeCertPath1";
       customCertInfo.nodeKeyPath = "nodeKeyPath1";
-      new File(TestHelper.TMP_PATH).mkdirs();
-      createTempFile("ca2.crt", cert2Contents);
       CertificateInfo.create(
           rootCA,
           customer.uuid,
           "test2",
           date,
           date,
-          TestHelper.TMP_PATH + "/ca2.crt",
+          TestHelper.TMP_PATH + "/upgrade_universe_controller_test_ca2.crt",
           customCertInfo);
       return Json.newObject().put("rootCA", rootCA.toString());
     } else {
+      createTempFile("upgrade_universe_controller_test_ca.crt", cert1Contents);
       CertificateInfo.create(
           rootCA,
           customer.uuid,
@@ -1050,8 +1200,8 @@ public class UpgradeUniverseControllerTest extends WithApplication {
           new Date(),
           new Date(),
           "privateKey",
-          TestHelper.TMP_PATH + "/ca2.crt",
-          CertificateInfo.Type.SelfSigned);
+          TestHelper.TMP_PATH + "/upgrade_universe_controller_test_ca2.crt",
+          CertConfigType.SelfSigned);
       CertificateInfo.create(
           clientRootCA,
           customer.uuid,
@@ -1059,8 +1209,8 @@ public class UpgradeUniverseControllerTest extends WithApplication {
           new Date(),
           new Date(),
           "privateKey",
-          TestHelper.TMP_PATH + "/ca.crt",
-          CertificateInfo.Type.SelfSigned);
+          TestHelper.TMP_PATH + "/upgrade_universe_controller_test_ca.crt",
+          CertConfigType.SelfSigned);
       return Json.newObject()
           .put("rootCA", rootCA.toString())
           .put("clientRootCA", clientRootCA.toString());

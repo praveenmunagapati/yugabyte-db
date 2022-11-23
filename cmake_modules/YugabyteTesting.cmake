@@ -125,7 +125,6 @@ function(ADD_YB_TEST REL_TEST_NAME)
     PROPERTIES
     TEST_BINARY_PATH "${TEST_PATH}"
   )
-  set_target_properties(${TEST_BINARY_NAME} PROPERTIES COMPILE_FLAGS "-DDISABLE_STATUS_NODISCARD")
 
   if(ARGN)
     set_tests_properties(${TEST_NAME} PROPERTIES ${ARGN})
@@ -182,3 +181,53 @@ function(ADD_COMMON_YB_TEST_DEPENDENCIES REL_TEST_NAME)
   # Our ctest-based wrapper, run-test.sh, uses this tool to put a time limit on tests.
   ADD_YB_TEST_DEPENDENCIES(${REL_TEST_NAME} run-with-timeout)
 endfunction()
+
+function(ADD_YB_TEST_LIBRARY LIB_NAME)
+  # Parse the arguments.
+  set(options "")
+  set(one_value_args COMPILE_FLAGS)
+  set(multi_value_args SRCS DEPS NONLINK_DEPS)
+  cmake_parse_arguments(ARG "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
+  if(ARG_UNPARSED_ARGUMENTS)
+    message(SEND_ERROR "Error: unrecognized arguments: ${ARG_UNPARSED_ARGUMENTS}")
+  endif()
+
+  # This is used to let add_library know whether we're adding a test.
+  set(YB_ADDING_TEST_EXECUTABLE "TRUE" CACHE INTERNAL "" FORCE)
+  add_library(${LIB_NAME} ${ARG_SRCS})
+  set(YB_ADDING_TEST_EXECUTABLE "FALSE" CACHE INTERNAL "" FORCE)
+
+  if(ARG_COMPILE_FLAGS)
+    set_target_properties(${LIB_NAME}
+      PROPERTIES COMPILE_FLAGS ${ARG_COMPILE_FLAGS})
+  endif()
+  if(ARG_DEPS)
+    target_link_libraries(${LIB_NAME} ${ARG_DEPS})
+  endif()
+  if(ARG_NONLINK_DEPS)
+    add_dependencies(${LIB_NAME} ${ARG_NONLINK_DEPS})
+  endif()
+endfunction()
+
+macro(yb_disable_tests_if_necessary)
+  if(NOT "$ENV{YB_DO_NOT_BUILD_TESTS}" STREQUAL "")
+    if("$ENV{YB_DO_NOT_BUILD_TESTS}" STREQUAL "1")
+      message("YB_DO_NOT_BUILD_TESTS is set to 1, will not build tests")
+      set(BUILD_TESTS OFF)
+    elseif("$ENV{YB_DO_NOT_BUILD_TESTS}" STREQUAL "0")
+      message("YB_DO_NOT_BUILD_TESTS is set to 0, will build tests")
+      set(BUILD_TESTS ON)
+    else()
+      message(FATAL_ERROR
+              "Invalid value of the YB_DO_NOT_BUILD_TESTS environment variable, expected 0 or 1 but"
+              " got '$ENV{YB_DO_NOT_BUILD_TESTS}'.")
+    endif()
+    set(BUILD_TESTS ${BUILD_TESTS} CACHE BOOL "Whether to build tests")
+  elseif("$CACHE{BUILD_TESTS}" STREQUAL "")
+    set(BUILD_TESTS ON)
+    message("Will build tests by default")
+  else()
+    message(
+      "BUILD_TESTS from cache: ${BUILD_TESTS} (set YB_DO_NOT_BUILD_TESTS to 0 or 1 to change)")
+  endif()
+endmacro()

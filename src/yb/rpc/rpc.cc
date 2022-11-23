@@ -36,32 +36,35 @@
 #include <string>
 #include <thread>
 
-#include "yb/gutil/basictypes.h"
 #include "yb/gutil/strings/substitute.h"
 
 #include "yb/rpc/messenger.h"
 #include "yb/rpc/rpc_header.pb.h"
 
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
+#include "yb/util/logging.h"
 #include "yb/util/random_util.h"
+#include "yb/util/source_location.h"
+#include "yb/util/status_format.h"
+#include "yb/util/trace.h"
 #include "yb/util/tsan_util.h"
 
 using namespace std::literals;
 using namespace std::placeholders;
 
-DEFINE_int64(rpcs_shutdown_timeout_ms, 15000 * yb::kTimeMultiplier,
+DEFINE_UNKNOWN_int64(rpcs_shutdown_timeout_ms, 15000 * yb::kTimeMultiplier,
              "Timeout for a batch of multiple RPCs invoked in parallel to shutdown.");
-DEFINE_int64(rpcs_shutdown_extra_delay_ms, 5000 * yb::kTimeMultiplier,
+DEFINE_UNKNOWN_int64(rpcs_shutdown_extra_delay_ms, 5000 * yb::kTimeMultiplier,
              "Extra allowed time for a single RPC command to complete after its deadline.");
-DEFINE_int32(min_backoff_ms_exponent, 7,
+DEFINE_UNKNOWN_int32(min_backoff_ms_exponent, 7,
              "Min amount of backoff delay if the server responds with TOO BUSY (default: 128ms). "
              "Set this to some amount, during which the server might have recovered.");
-DEFINE_int32(max_backoff_ms_exponent, 16,
+DEFINE_UNKNOWN_int32(max_backoff_ms_exponent, 16,
              "Max amount of backoff delay if the server responds with TOO BUSY (default: 64 sec). "
              "Set this to some duration, past which you are okay having no backoff for a Ddos "
              "style build-up, during times when the server is overloaded, and unable to recover.");
 
-DEFINE_int32(linear_backoff_ms, 1,
+DEFINE_UNKNOWN_int32(linear_backoff_ms, 1,
              "Number of milliseconds added to delay while using linear backoff strategy.");
 
 TAG_FLAG(min_backoff_ms_exponent, hidden);
@@ -72,10 +75,16 @@ TAG_FLAG(max_backoff_ms_exponent, advanced);
 namespace yb {
 
 using std::shared_ptr;
+using std::string;
 using strings::Substitute;
 using strings::SubstituteAndAppend;
 
 namespace rpc {
+
+RpcCommand::RpcCommand() : trace_(Trace::NewTraceForParent(Trace::CurrentTrace())) {
+}
+
+RpcCommand::~RpcCommand() {}
 
 RpcRetrier::RpcRetrier(CoarseTimePoint deadline, Messenger* messenger, ProxyCache *proxy_cache)
     : start_(CoarseMonoClock::now()),
@@ -87,8 +96,8 @@ RpcRetrier::RpcRetrier(CoarseTimePoint deadline, Messenger* messenger, ProxyCach
 
 bool RpcRetrier::HandleResponse(
     RpcCommand* rpc, Status* out_status, RetryWhenBusy retry_when_busy) {
-  ignore_result(DCHECK_NOTNULL(rpc));
-  ignore_result(DCHECK_NOTNULL(out_status));
+  DCHECK_ONLY_NOTNULL(rpc);
+  DCHECK_ONLY_NOTNULL(out_status);
 
   // Always retry a TOO_BUSY error.
   Status controller_status = controller_.status();
@@ -193,8 +202,10 @@ void RpcRetrier::DoRetry(RpcCommand* rpc, const Status& status) {
   }
   task_id_ = kInvalidTaskId;
   if (!run) {
-    rpc->Finished(STATUS_FORMAT(
-        Aborted, "$0 aborted: $1", rpc->ToString(), yb::rpc::ToString(expected_state)));
+    auto status = STATUS_FORMAT(
+        Aborted, "$0 aborted: $1", rpc->ToString(), yb::rpc::ToString(expected_state));
+    VTRACE_TO(1, rpc->trace(), "Rpc Finished with status $0", status.ToString());
+    rpc->Finished(status);
     return;
   }
   Status new_status = status;
@@ -214,6 +225,7 @@ void RpcRetrier::DoRetry(RpcCommand* rpc, const Status& status) {
   }
   if (new_status.ok()) {
     controller_.Reset();
+    VTRACE_TO(1, rpc->trace(), "Sending Rpc");
     rpc->SendRpc();
   } else {
     // Service unavailable here means that we failed to to schedule delayed task, i.e. reactor
@@ -221,6 +233,7 @@ void RpcRetrier::DoRetry(RpcCommand* rpc, const Status& status) {
     if (new_status.IsServiceUnavailable()) {
       new_status = STATUS_FORMAT(Aborted, "Aborted because of $0", new_status);
     }
+    VTRACE_TO(1, rpc->trace(), "Rpc Finished with status $0", new_status.ToString());
     rpc->Finished(new_status);
   }
   expected_state = RpcRetrierState::kRunning;
@@ -275,6 +288,7 @@ void Rpc::ScheduleRetry(const Status& status) {
   auto retry_status = mutable_retrier()->DelayedRetry(this, status);
   if (!retry_status.ok()) {
     LOG(WARNING) << "Failed to schedule retry: " << retry_status;
+    VTRACE_TO(1, trace(), "Rpc Finished with status $0", retry_status.ToString());
     Finished(retry_status);
   }
 }
@@ -321,7 +335,7 @@ void Rpcs::Shutdown() {
         break;
       }
     }
-    CHECK(calls_.empty()) << "Calls: " << yb::ToString(calls_);
+    CHECK(calls_.empty()) << "Calls: " << AsString(calls_);
   }
 }
 
@@ -348,8 +362,16 @@ bool Rpcs::RegisterAndStart(RpcCommandPtr call, Handle* handle) {
     return false;
   }
 
+  VTRACE_TO(1, (***handle).trace(), "Sending Rpc");
   (***handle).SendRpc();
   return true;
+}
+
+Status Rpcs::RegisterAndStartStatus(RpcCommandPtr call, Handle* handle) {
+  if (RegisterAndStart(call, handle)) {
+    return Status::OK();
+  }
+  return STATUS(InternalError, "Failed to send RPC");
 }
 
 RpcCommandPtr Rpcs::Unregister(Handle* handle) {
@@ -377,32 +399,6 @@ Rpcs::Handle Rpcs::Prepare() {
 
 void Rpcs::RequestAbortAll() {
   DoRequestAbortAll(RequestShutdown::kFalse);
-}
-
-void Rpcs::Abort(std::initializer_list<Handle*> list) {
-  std::vector<RpcCommandPtr> to_abort;
-  {
-    std::lock_guard<std::mutex> lock(*mutex_);
-    for (auto& handle : list) {
-      if (*handle != calls_.end()) {
-        to_abort.push_back(**handle);
-      }
-    }
-  }
-  if (to_abort.empty()) {
-    return;
-  }
-  for (auto& rpc : to_abort) {
-    rpc->Abort();
-  }
-  {
-    std::unique_lock<std::mutex> lock(*mutex_);
-    for (auto& handle : list) {
-      while (*handle != calls_.end()) {
-        cond_.wait(lock);
-      }
-    }
-  }
 }
 
 } // namespace rpc

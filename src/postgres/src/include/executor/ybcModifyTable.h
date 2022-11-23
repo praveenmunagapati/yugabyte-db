@@ -20,18 +20,44 @@
  *--------------------------------------------------------------------------------------------------
  */
 
-#ifndef YBCMODIFYTABLE_H
-#define YBCMODIFYTABLE_H
+#pragma once
 
 #include "nodes/execnodes.h"
 #include "executor/tuptable.h"
 
+/**
+ * YSQL guc variables that can be used to enable non transactional writes.
+ * e.g. 'SET yb_disable_transactional_writes=true'
+ * See also the corresponding entries in guc.c.
+ */
+extern bool yb_disable_transactional_writes;
+
+/**
+ * YSQL guc variables that can be used to enable upsert mode for writes.
+ * e.g. 'SET yb_enable_upsert_mode=true'
+ * See also the corresponding entries in guc.c.
+ */
+extern bool yb_enable_upsert_mode;
+
 //------------------------------------------------------------------------------
 // YugaByte modify table API.
+
+typedef void (*yb_bind_for_write_function) (YBCPgStatement stmt,
+											void *indexstate,
+											Relation index,
+											Datum *values,
+											bool *isnull,
+											int natts,
+											Datum ybbasectid,
+											bool ybctid_as_value);
 
 /*
  * Insert data into YugaByte table.
  * This function is equivalent to "heap_insert", but it sends data to DocDB (YugaByte storage).
+ *
+ * ybctid argument can be supplied to keep it consistent across shared inserts.
+ * If non-zero, it will be used instead of generation, otherwise it will be set
+ * to the generated value.
  */
 extern Oid YBCHeapInsert(TupleTableSlot *slot,
                          HeapTuple tuple,
@@ -39,31 +65,46 @@ extern Oid YBCHeapInsert(TupleTableSlot *slot,
 extern Oid YBCHeapInsertForDb(Oid dboid,
                               TupleTableSlot *slot,
                               HeapTuple tuple,
-                              EState *estate);
+                              EState *estate,
+                              Datum *ybctid);
 
 /*
  * Insert a tuple into a YugaByte table. Will execute within a distributed
  * transaction if the table is transactional (YSQL default).
+ *
+ * ybctid argument can be supplied to keep it consistent across shared inserts.
+ * If non-zero, it will be used instead of generation, otherwise it will be set
+ * to the generated value.
  */
 extern Oid YBCExecuteInsert(Relation rel,
                             TupleDesc tupleDesc,
-                            HeapTuple tuple);
+                            HeapTuple tuple,
+                            OnConflictAction onConflictAction);
 extern Oid YBCExecuteInsertForDb(Oid dboid,
                                  Relation rel,
                                  TupleDesc tupleDesc,
-                                 HeapTuple tuple);
+                                 HeapTuple tuple,
+                                 OnConflictAction onConflictAction,
+                                 Datum *ybctid);
 
 /*
  * Execute the insert outside of a transaction.
  * Assumes the caller checked that it is safe to do so.
+ *
+ * ybctid argument can be supplied to keep it consistent across shared inserts.
+ * If non-zero, it will be used instead of generation, otherwise it will be set
+ * to the generated value.
  */
 extern Oid YBCExecuteNonTxnInsert(Relation rel,
                                   TupleDesc tupleDesc,
-                                  HeapTuple tuple);
+                                  HeapTuple tuple,
+                                  OnConflictAction onConflictAction);
 extern Oid YBCExecuteNonTxnInsertForDb(Oid dboid,
                                        Relation rel,
                                        TupleDesc tupleDesc,
-                                       HeapTuple tuple);
+                                       HeapTuple tuple,
+                                       OnConflictAction onConflictAction,
+                                       Datum *ybctid);
 
 /*
  * Insert a tuple into the an index's backing YugaByte index table.
@@ -72,32 +113,42 @@ extern void YBCExecuteInsertIndex(Relation rel,
 								  Datum *values,
 								  bool *isnull,
 								  Datum ybctid,
-								  const uint64_t* backfill_write_time);
+								  const uint64_t* backfill_write_time,
+								  yb_bind_for_write_function callback,
+								  void *indexstate);
 extern void YBCExecuteInsertIndexForDb(Oid dboid,
 									   Relation rel,
 									   Datum* values,
 									   bool* isnull,
 									   Datum ybctid,
-									   const uint64_t* backfill_write_time);
+									   const uint64_t* backfill_write_time,
+									   yb_bind_for_write_function callback,
+									   void *indexstate);
 
 /*
  * Delete a tuple (identified by ybctid) from a YugaByte table.
  * If this is a single row op we will return false in the case that there was
  * no row to delete. This can occur because we do not first perform a scan if
- * it is a single row op.
+ * it is a single row op. 'changingPart' indicates if this delete is part of an
+ * UPDATE operation on a partitioned table that moves a row from one partition
+ * to anoter.
  */
 extern bool YBCExecuteDelete(Relation rel,
 							 TupleTableSlot *slot,
-							 EState *estate,
-							 ModifyTableState *mtstate);
+							 List *returning_columns,
+							 bool target_tuple_fetched,
+							 bool is_single_row_txn,
+							 bool changingPart);
 /*
  * Delete a tuple (identified by index columns and base table ybctid) from an
  * index's backing YugaByte index table.
  */
 extern void YBCExecuteDeleteIndex(Relation index,
-                                  Datum *values,
-                                  bool *isnull,
-                                  Datum ybctid);
+								  Datum *values,
+								  bool *isnull,
+								  Datum ybctid,
+								  yb_bind_for_write_function callback,
+								  void *indexstate);
 
 /*
  * Update a row (identified by ybctid) in a YugaByte table.
@@ -107,10 +158,14 @@ extern void YBCExecuteDeleteIndex(Relation index,
  */
 extern bool YBCExecuteUpdate(Relation rel,
 							 TupleTableSlot *slot,
+							 HeapTuple oldtuple,
 							 HeapTuple tuple,
 							 EState *estate,
-							 ModifyTableState *mtstate,
-							 Bitmapset *updatedCols);
+							 ModifyTable *mt_plan,
+							 bool target_tuple_fetched,
+							 bool is_single_row_txn,
+							 Bitmapset *updatedCols,
+							 bool canSetTag);
 
 /*
  * Replace a row in a YugaByte table by first deleting an existing row
@@ -121,9 +176,7 @@ extern bool YBCExecuteUpdate(Relation rel,
  */
 extern Oid YBCExecuteUpdateReplace(Relation rel,
 								   TupleTableSlot *slot,
-								   HeapTuple tuple,
-								   EState *estate,
-								   ModifyTableState *mtstate);
+								   HeapTuple tuple);
 
 //------------------------------------------------------------------------------
 // System tables modify-table API.
@@ -156,5 +209,3 @@ extern Datum YBCGetYBTupleIdFromTuple(Relation rel,
  * Returns if a table has secondary indices.
  */
 extern bool YBCRelInfoHasSecondaryIndices(ResultRelInfo *resultRelInfo);
-
-#endif							/* YBCMODIFYTABLE_H */

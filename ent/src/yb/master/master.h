@@ -10,8 +10,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 
-#ifndef ENT_SRC_YB_MASTER_MASTER_H
-#define ENT_SRC_YB_MASTER_MASTER_H
+#pragma once
 
 namespace yb {
 namespace master {
@@ -44,9 +43,12 @@ class Master : public yb::master::Master {
   Master(const Master&) = delete;
   void operator=(const Master&) = delete;
 
+  Status ReloadKeysAndCertificates() override;
+  std::string GetCertificateDetails() override;
+
  protected:
-  CHECKED_STATUS RegisterServices() override;
-  CHECKED_STATUS SetupMessengerBuilder(rpc::MessengerBuilder* builder) override;
+  Status RegisterServices() override;
+  Status SetupMessengerBuilder(rpc::MessengerBuilder* builder) override;
 
  private:
   std::unique_ptr<rpc::SecureContext> secure_context_;
@@ -55,4 +57,3 @@ class Master : public yb::master::Master {
 } // namespace enterprise
 } // namespace master
 } // namespace yb
-#endif // ENT_SRC_YB_MASTER_MASTER_H

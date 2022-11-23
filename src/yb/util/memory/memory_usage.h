@@ -13,8 +13,7 @@
 //
 //
 
-#ifndef YB_UTIL_MEMORY_MEMORY_USAGE_H
-#define YB_UTIL_MEMORY_MEMORY_USAGE_H
+#pragma once
 
 #include <string>
 #include <type_traits>
@@ -74,7 +73,7 @@ inline std::size_t DynamicMemoryUsageOf(const std::string& value) {
   }
 }
 
-#elif (__GNUC__ >= 9)
+#elif (__GNUC__ >= 9 && __GNUC__ < 11)
 
 inline std::size_t DynamicMemoryUsageOf(const std::string& value) {
   const auto capacity = value.capacity();
@@ -163,5 +162,3 @@ std::size_t DynamicMemoryUsageOf(const T& entity, const Types&... rest_entities)
 }
 
 }  // namespace yb
-
-#endif  // YB_UTIL_MEMORY_MEMORY_USAGE_H

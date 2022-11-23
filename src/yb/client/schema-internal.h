@@ -29,13 +29,11 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_CLIENT_SCHEMA_INTERNAL_H
-#define YB_CLIENT_SCHEMA_INTERNAL_H
+#pragma once
 
 #include <string>
 
 #include "yb/client/schema.h"
-#include "yb/common/common.pb.h"
 
 namespace yb {
 namespace client {
@@ -47,12 +45,13 @@ class YBColumnSpec::Data {
       : name(std::move(name)),
         has_type(false),
         has_order(false),
-        sorting_type(ColumnSchema::SortingType::kNotSpecified),
+        sorting_type(SortingType::kNotSpecified),
         has_nullable(false),
         primary_key(false),
         hash_primary_key(false),
         static_column(false),
         is_counter(false),
+        pg_type_oid(kPgInvalidOid),
         has_rename_to(false) {
   }
 
@@ -67,7 +66,7 @@ class YBColumnSpec::Data {
   bool has_order;
   int32_t order;
 
-  ColumnSchema::SortingType sorting_type;
+  SortingType sorting_type;
 
   bool has_nullable;
   bool nullable;
@@ -79,6 +78,9 @@ class YBColumnSpec::Data {
 
   bool is_counter;
 
+  int32_t pg_type_oid;
+  bool has_pg_type_oid;
+
   // For ALTER
   bool has_rename_to;
   std::string rename_to;
@@ -86,4 +88,3 @@ class YBColumnSpec::Data {
 
 } // namespace client
 } // namespace yb
-#endif // YB_CLIENT_SCHEMA_INTERNAL_H

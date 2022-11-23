@@ -32,52 +32,52 @@
 
 #include "yb/tserver/mini_tablet_server.h"
 
-#include <utility>
 #include <functional>
+#include <memory>
+#include <string>
+#include <utility>
 
 #include <glog/logging.h>
 
-#include "yb/gutil/macros.h"
-#include "yb/gutil/strings/substitute.h"
+#include "yb/common/index.h"
+#include "yb/common/partition.h"
 #include "yb/common/schema.h"
-#include "yb/consensus/log.h"
-#include "yb/consensus/log.pb.h"
-#include "yb/consensus/consensus.h"
+
 #include "yb/consensus/consensus.pb.h"
+#include "yb/consensus/consensus_util.h"
 
-#include "yb/rpc/messenger.h"
-
-#include "yb/server/metadata.h"
-#include "yb/server/rpc_server.h"
-#include "yb/server/server_base.h"
-#include "yb/server/webserver.h"
-
-#include "yb/tablet/maintenance_manager.h"
-#include "yb/tablet/tablet.h"
-#include "yb/tablet/tablet_peer.h"
-#include "yb/tablet/tablet-test-util.h"
-#include "yb/tserver/tablet_server.h"
-#include "yb/tserver/ts_tablet_manager.h"
+#include "yb/encryption/encrypted_file_factory.h"
+#include "yb/encryption/header_manager_impl.h"
+#include "yb/encryption/universe_key_manager.h"
 
 #include "yb/rocksutil/rocksdb_encrypted_file_factory.h"
 
-#include "yb/util/encrypted_file_factory.h"
-#include "yb/util/flag_tags.h"
-#include "yb/util/header_manager_impl.h"
+#include "yb/rpc/messenger.h"
+
+#include "yb/server/rpc_server.h"
+
+#include "yb/tablet/tablet-harness.h"
+#include "yb/tablet/tablet.h"
+#include "yb/tablet/tablet_metadata.h"
+#include "yb/tablet/tablet_peer.h"
+
+#include "yb/tserver/tablet_server.h"
+#include "yb/tserver/ts_tablet_manager.h"
+
+#include "yb/util/flags.h"
 #include "yb/util/net/sockaddr.h"
 #include "yb/util/net/tunnel.h"
 #include "yb/util/scope_exit.h"
 #include "yb/util/status.h"
-#include "yb/util/universe_key_manager.h"
 
 using std::pair;
+using std::string;
 
 using yb::consensus::Consensus;
 using yb::consensus::ConsensusOptions;
 using yb::consensus::RaftPeerPB;
 using yb::consensus::RaftConfigPB;
 using yb::log::Log;
-using yb::log::LogOptions;
 using strings::Substitute;
 using yb::tablet::TabletPeer;
 
@@ -98,21 +98,22 @@ MiniTabletServer::MiniTabletServer(const std::vector<std::string>& wal_paths,
   : started_(false),
     opts_(extra_opts),
     index_(index + 1),
-    universe_key_manager_(new UniverseKeyManager()),
-    encrypted_env_(NewEncryptedEnv(DefaultHeaderManager(universe_key_manager_.get()))),
+    universe_key_manager_(new encryption::UniverseKeyManager()),
+    encrypted_env_(NewEncryptedEnv(encryption::DefaultHeaderManager(universe_key_manager_.get()))),
     rocksdb_encrypted_env_(
-      NewRocksDBEncryptedEnv(DefaultHeaderManager(universe_key_manager_.get()))) {
+      NewRocksDBEncryptedEnv(encryption::DefaultHeaderManager(universe_key_manager_.get()))) {
 
   // Start RPC server on loopback.
   FLAGS_rpc_server_allow_ephemeral_ports = true;
-  opts_.rpc_opts.rpc_bind_addresses = server::TEST_RpcBindEndpoint(index_, rpc_port);
+  const std::string rpc_host = server::TEST_RpcAddress(index_, server::Private::kTrue);
+  opts_.rpc_opts.rpc_bind_addresses = HostPortToString(rpc_host, rpc_port);
   // A.B.C.D.xip.io resolves to A.B.C.D so it is very useful for testing.
   opts_.broadcast_addresses = {
     HostPort(server::TEST_RpcAddress(index_,
                                      server::Private(FLAGS_TEST_private_broadcast_address)),
     rpc_port) };
   opts_.webserver_opts.port = 0;
-  opts_.webserver_opts.bind_interface = opts_.broadcast_addresses.front().host();
+  opts_.webserver_opts.bind_interface = rpc_host;
   if (!opts_.has_placement_cloud()) {
     opts_.SetPlacement(Format("cloud$0", (index_ + 1) / FLAGS_TEST_nodes_per_cloud),
                        Format("rack$0", index_), "zone");
@@ -210,7 +211,7 @@ void MiniTabletServer::Shutdown() {
 
 namespace {
 
-CHECKED_STATUS ForAllTablets(
+Status ForAllTablets(
     MiniTabletServer* mts,
     std::function<Status(TabletPeer* tablet_peer)> action) {
   if (!mts->server()) {
@@ -230,28 +231,34 @@ Status MiniTabletServer::FlushTablets(tablet::FlushMode mode, tablet::FlushFlags
     return Status::OK();
   }
   return ForAllTablets(this, [mode, flags](TabletPeer* tablet_peer) -> Status {
-    if (!tablet_peer->tablet()) {
+    auto tablet = tablet_peer->shared_tablet();
+    if (!tablet) {
       return Status::OK();
     }
-    return tablet_peer->tablet()->Flush(mode, flags);
+    return tablet->Flush(mode, flags);
   });
 }
 
-Status MiniTabletServer::CompactTablets() {
+Status MiniTabletServer::CompactTablets(docdb::SkipFlush skip_flush) {
   if (!server_) {
     return Status::OK();
   }
-  return ForAllTablets(this, [](TabletPeer* tablet_peer) {
-    if (tablet_peer->tablet()) {
-      tablet_peer->tablet()->ForceRocksDBCompactInTest();
+  return ForAllTablets(this, [skip_flush](TabletPeer* tablet_peer) {
+    auto tablet = tablet_peer->shared_tablet();
+    if (tablet) {
+      tablet->TEST_ForceRocksDBCompact(skip_flush);
     }
     return Status::OK();
   });
 }
 
 Status MiniTabletServer::SwitchMemtables() {
-  return ForAllTablets(this, [](TabletPeer* tablet_peer) {
-    return tablet_peer->tablet()->TEST_SwitchMemtable();
+  return ForAllTablets(this, [](TabletPeer* tablet_peer) -> Status {
+    auto tablet = tablet_peer->shared_tablet();
+    if (!tablet) {
+      return Status::OK();
+    }
+    return tablet->TEST_SwitchMemtable();
   });
 }
 
@@ -281,7 +288,7 @@ RaftConfigPB MiniTabletServer::CreateLocalConfig() const {
   RaftConfigPB config;
   RaftPeerPB* peer = config.add_peers();
   peer->set_permanent_uuid(server_->instance_pb().permanent_uuid());
-  peer->set_member_type(RaftPeerPB::VOTER);
+  peer->set_member_type(consensus::PeerMemberType::VOTER);
   auto host_port = peer->mutable_last_known_private_addr()->Add();
   host_port->set_host(bound_rpc_addr().address().to_string());
   host_port->set_port(bound_rpc_addr().port());
@@ -307,6 +314,7 @@ Status MiniTabletServer::AddTestTablet(const std::string& ns_id,
   pair<PartitionSchema, Partition> partition = tablet::CreateDefaultPartition(schema_with_ids);
 
   auto table_info = std::make_shared<tablet::TableInfo>(
+      consensus::MakeTabletLogPrefix(tablet_id, server_->permanent_uuid()), tablet::Primary::kTrue,
       table_id, ns_id, table_id, table_type, schema_with_ids, IndexMap(),
       boost::none /* index_info */, 0 /* schema_version */, partition.first);
 
@@ -325,7 +333,30 @@ Endpoint MiniTabletServer::bound_rpc_addr() const {
 
 Endpoint MiniTabletServer::bound_http_addr() const {
   CHECK(started_);
-  return server_->first_http_address();
+  // Try to get address from the running WebServer.
+  Result<Endpoint> res_ep = server_->first_http_address();
+  if (res_ep) {
+    return *res_ep;
+  }
+
+  WARN_NOT_OK(res_ep.status(), "RpcAndWebServerBase error");
+  // The WebServer may be not started. Return input bound address.
+  HostPort web_input_hp;
+  CHECK_OK(server_->web_server()->GetInputHostPort(&web_input_hp));
+  return CHECK_RESULT(ParseEndpoint(web_input_hp.ToString(), web_input_hp.port()));
+}
+
+std::string MiniTabletServer::bound_http_addr_str() const {
+  return HostPort::FromBoundEndpoint(bound_http_addr()).ToString();
+}
+
+std::string MiniTabletServer::bound_rpc_addr_str() const {
+  return HostPort::FromBoundEndpoint(bound_rpc_addr()).ToString();
+}
+
+FsManager& MiniTabletServer::fs_manager() const {
+  CHECK(started_);
+  return *server_->fs_manager();
 }
 
 } // namespace tserver

@@ -37,8 +37,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yb.BaseYBTest;
 import org.yb.client.YBClient.Condition;
+import org.yb.util.ConfForTesting;
 import org.yb.util.EnvAndSysPropertyUtil;
-import org.yb.util.RandomNumberUtil;
+import org.yb.util.RandomUtil;
 import org.yb.util.BuildTypeUtil;
 
 import java.io.*;
@@ -57,8 +58,8 @@ public class TestUtils {
 
   private static String ybRootDir = null;
 
-  public static final boolean IS_LINUX =
-      System.getProperty("os.name").toLowerCase().equals("linux");
+  public static final boolean IS_AARCH64 =
+      System.getProperty("os.arch").toLowerCase().equals("aarch64");
 
   private static final long startTimeMillis = System.currentTimeMillis();
 
@@ -253,9 +254,11 @@ public class TestUtils {
   public static String getBaseTmpDir() {
     String testTmpDir = System.getenv("TEST_TMPDIR");
     if (testTmpDir == null) {
-      // If we are generating the temporary directory name here, we are responsible for deleting it.
+      // If we are generating the temporary directory name here, we are responsible for deleting it
+      // unless told not to.
       testTmpDir = new File(defaultTestTmpDir).getAbsolutePath();
-      if (defaultTestTmpDirCleanupHookRegistered.compareAndSet(false, true)) {
+      if (!ConfForTesting.keepData() &&
+          defaultTestTmpDirCleanupHookRegistered.compareAndSet(false, true)) {
         final File tmpDirToCleanUp = new File(testTmpDir);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
           if (tmpDirToCleanUp.isDirectory()) {
@@ -270,7 +273,9 @@ public class TestUtils {
     }
 
     File f = new File(testTmpDir);
-    f.mkdirs();
+    if (!f.exists() && !f.mkdirs()) {
+      throw new RuntimeException("Could not create " + testTmpDir + ", not enough permissions?");
+    }
     return f.getAbsolutePath();
   }
 
@@ -336,7 +341,7 @@ public class TestUtils {
   public static int findFreePort(String bindInterface) throws IOException {
     final InetAddress bindIp = InetAddress.getByName(bindInterface);
     final int MAX_ATTEMPTS = 1000;
-    Random rng = RandomNumberUtil.getRandomGenerator();
+    Random rng = RandomUtil.getRandomGenerator();
     for (int attempt = 0; attempt < MAX_ATTEMPTS; ++attempt) {
       final int port = MIN_PORT_TO_USE + rng.nextInt(MAX_PORT_TO_USE - MIN_PORT_TO_USE);
       if (!isReservedPort(bindIp, port) && isPortFree(bindIp, port, attempt == MAX_ATTEMPTS - 1)) {

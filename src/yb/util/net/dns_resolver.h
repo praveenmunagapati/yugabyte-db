@@ -29,19 +29,15 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_NET_DNS_RESOLVER_H
-#define YB_UTIL_NET_DNS_RESOLVER_H
+#pragma once
 
-#include <vector>
+#include <future>
 
 #include "yb/gutil/macros.h"
+#include "yb/gutil/ref_counted.h"
 
-#include "yb/util/async_util.h"
-#include "yb/util/result.h"
-#include "yb/util/status.h"
-
+#include "yb/util/status_fwd.h"
 #include "yb/util/net/net_fwd.h"
-#include "yb/util/net/inetaddress.h"
 
 namespace yb {
 
@@ -84,5 +80,3 @@ class ScopedDnsTracker {
 };
 
 } // namespace yb
-
-#endif /* YB_UTIL_NET_DNS_RESOLVER_H */

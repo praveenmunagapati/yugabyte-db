@@ -21,18 +21,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#ifndef YB_ROCKSDB_TABLE_BLOCK_BASED_TABLE_BUILDER_H
-#define YB_ROCKSDB_TABLE_BLOCK_BASED_TABLE_BUILDER_H
+#pragma once
 
 #include <stdint.h>
+
 #include <limits>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "yb/rocksdb/flush_block_policy.h"
 #include "yb/rocksdb/options.h"
 #include "yb/rocksdb/status.h"
+#include "yb/rocksdb/table.h"
 #include "yb/rocksdb/table/table_builder.h"
 
 namespace rocksdb {
@@ -102,6 +102,8 @@ class BlockBasedTableBuilder : public TableBuilder {
   // Get table properties
   TableProperties GetTableProperties() const override;
 
+  const std::string& LastKey() const override;
+
   void TEST_skip_writing_key_value_encoding_format();
 
  private:
@@ -147,5 +149,3 @@ class BlockBasedTableBuilder : public TableBuilder {
 };
 
 }  // namespace rocksdb
-
-#endif  // YB_ROCKSDB_TABLE_BLOCK_BASED_TABLE_BUILDER_H

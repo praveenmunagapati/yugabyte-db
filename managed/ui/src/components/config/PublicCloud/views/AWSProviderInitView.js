@@ -28,8 +28,11 @@ import { connect } from 'react-redux';
 import AddRegionPopupForm from './AddRegionPopupForm';
 import _ from 'lodash';
 import { regionsData } from './providerRegionsData';
+import { NTPConfig, NTP_TYPES } from './NTPConfig';
 
+import clsx from 'clsx';
 import './providerView.scss';
+import { specialChars } from '../../constants';
 
 const validationIsRequired = (value) => (value && value.trim() !== '' ? undefined : 'Required');
 
@@ -465,7 +468,7 @@ class AWSProviderInitView extends Component {
   constructor(props) {
     super(props);
     this.state = {
-      networkSetupType: 'new_vpc',
+      networkSetupType: 'existing_vpc',
       setupHostedZone: false,
       credentialInputType: 'custom_keys',
       sshPrivateKeyContent: {},
@@ -492,7 +495,8 @@ class AWSProviderInitView extends Component {
 
   createProviderConfig = (formValues) => {
     const { hostInfo } = this.props;
-    const awsProviderConfig = {};
+    const awsProviderConfig = {
+    };
     if (this.state.credentialInputType === 'custom_keys') {
       awsProviderConfig['AWS_ACCESS_KEY_ID'] = formValues.accessKey;
       awsProviderConfig['AWS_SECRET_ACCESS_KEY'] = formValues.secretKey;
@@ -500,7 +504,10 @@ class AWSProviderInitView extends Component {
     if (isDefinedNotNull(formValues.hostedZoneId)) {
       awsProviderConfig['HOSTED_ZONE_ID'] = formValues.hostedZoneId;
     }
-    const regionFormVals = {};
+    const regionFormVals = {
+      setUpChrony: formValues['setUpChrony'],
+      ntpServers: formValues['ntpServers']
+    };
     if (this.isHostInAWS()) {
       const awsHostInfo = hostInfo['aws'];
       regionFormVals['hostVpcRegion'] = awsHostInfo['region'];
@@ -546,8 +553,9 @@ class AWSProviderInitView extends Component {
         reader.readAsText(formValues.sshPrivateKeyContent);
         reader.onload = () => {
           regionFormVals['sshPrivateKeyContent'] = reader.result;
-        };    
+        };
       }
+      regionFormVals['overrideKeyValidate'] = formValues.overrideKeyValidate;
       return this.props.createAWSProvider(
         formValues.accountName,
         awsProviderConfig,
@@ -579,14 +587,14 @@ class AWSProviderInitView extends Component {
     this.props.closeModal();
   };
 
-  generateRow = (label, field) => {
+  generateRow = (label, field, centerAlign = false) => {
     return (
       <Row className="config-provider-row">
         <Col lg={3}>
           <div className="form-item-custom-label">{label}</div>
         </Col>
         <Col lg={7}>
-          <div className="form-right-aligned-labels">{field}</div>
+          <div className={clsx(['form-right-aligned-labels', {'center-align-row' : centerAlign}])}>{field}</div>
         </Col>
       </Row>
     );
@@ -772,6 +780,7 @@ class AWSProviderInitView extends Component {
       <Fragment>
         {nameRow}
         {pemContentRow}
+        {this.rowOverrideKeyValidateToggle()}
       </Fragment>
     );
   }
@@ -806,7 +815,8 @@ class AWSProviderInitView extends Component {
         onToggle={this.hostedZoneToggled}
         infoTitle={label}
         infoContent={tooltipContent}
-      />
+      />,
+      true
     );
   }
 
@@ -822,16 +832,47 @@ class AWSProviderInitView extends Component {
         defaultChecked={false}
         infoTitle={label}
         infoContent={tooltipContent}
-      />
+      />,
+      true
     );
   }
 
+  rowNTPServerConfigs(change) {
+    return (
+      <Row className="config-provider-row">
+        <Col lg={3}>
+          <div className="form-item-custom-label">NTP Setup</div>
+        </Col>
+        <Col lg={7}>
+          <div>{<NTPConfig onChange={change}/>}</div>
+        </Col>
+      </Row>
+    )
+
+  }
+
+  rowOverrideKeyValidateToggle() {
+    const label = 'Override Custom KeyPair Validation'
+    const tooltipContent =
+      'Would you like YugaWare to NOT validate KeyPair with AWS?';
+    return this.generateRow(
+      label,
+      <Field
+        name="overrideKeyValidate"
+        component={YBToggle}
+        defaultChecked={false}
+        infoTitle={label}
+        infoContent={tooltipContent}
+      />
+    )
+  }
+
   render() {
-    const { handleSubmit, submitting, error, formRegions, onBack, isBack } = this.props;
+    const { handleSubmit, submitting, error, formRegions, onBack, isBack, change } = this.props;
     // VPC and region setup.
     const network_setup_options = [
       <option key={1} value={'new_vpc'}>
-        {'Create a new VPC'}
+        {'Create a new VPC (Beta)'}
       </option>,
       <option key={2} value={'existing_vpc'}>
         {'Specify an existing VPC'}
@@ -880,6 +921,7 @@ class AWSProviderInitView extends Component {
         </Col>
       </Row>
     );
+
     return (
       <div className="provider-config-container">
         <form name="awsProviderConfigForm" onSubmit={handleSubmit(this.createProviderConfig)}>
@@ -902,6 +944,8 @@ class AWSProviderInitView extends Component {
                 {this.rowAirGapInstallToggle()}
                 {divider}
                 {this.rowVpcSetup(network_setup_options)}
+                {divider}
+                {this.rowNTPServerConfigs(change)}
                 {regionsSection}
               </Col>
             </Row>
@@ -932,6 +976,11 @@ function validate(values) {
   const errors = {};
   if (!isNonEmptyString(values.accountName)) {
     errors.accountName = 'Account Name is required';
+  }
+  else {
+    if(!specialChars.test(values.accountName)){
+      errors.accountName = 'Account Name cannot have special characters except - and _';
+    }
   }
 
   if (!isNonEmptyArray(values.regionList)) {
@@ -966,12 +1015,21 @@ function validate(values) {
   if (values.setupHostedZone && !isNonEmptyString(values.hostedZoneId)) {
     errors.hostedZoneId = 'Route53 Zone ID is required';
   }
+  if(values.ntp_option === NTP_TYPES.MANUAL && values.ntpServers.length === 0){
+    errors.ntpServers = 'NTP servers cannot be empty'
+  }
   return errors;
 }
 
 let awsProviderConfigForm = reduxForm({
   form: 'awsProviderConfigForm',
-  validate
+  validate,
+  initialValues: {
+    ntp_option: NTP_TYPES.PROVIDER,
+    ntpServers: [],
+    network_setup : 'existing_vpc'
+  },
+  touchOnChange: true
 })(AWSProviderInitView);
 
 // Decorate with connect to read form values

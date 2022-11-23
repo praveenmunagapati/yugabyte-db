@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_RPC_BINARY_CALL_PARSER_H
-#define YB_RPC_BINARY_CALL_PARSER_H
+#pragma once
 
 #include "yb/util/mem_tracker.h"
 #include "yb/util/net/socket.h"
@@ -30,7 +29,7 @@ YB_STRONGLY_TYPED_BOOL(SkipEmptyMessages);
 // Listener of BinaryCallParser, invoked when call is parsed.
 class BinaryCallParserListener {
  public:
-  virtual CHECKED_STATUS HandleCall(const ConnectionPtr& connection, CallData* call_data) = 0;
+  virtual Status HandleCall(const ConnectionPtr& connection, CallData* call_data) = 0;
  protected:
   ~BinaryCallParserListener() {}
 };
@@ -64,9 +63,7 @@ class BinaryCallParser {
 // Returns whether we should throttle RPC call based on its size and memory consumption.
 // Uses specified throttle_message when logging a warning about throttling an RPC call.
 bool ShouldThrottleRpc(
-    const MemTrackerPtr& throttle_tracker, size_t call_data_size, const char* throttle_message);
+    const MemTrackerPtr& throttle_tracker, ssize_t call_data_size, const char* throttle_message);
 
 } // namespace rpc
 } // namespace yb
-
-#endif // YB_RPC_BINARY_CALL_PARSER_H

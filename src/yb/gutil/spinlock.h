@@ -50,12 +50,11 @@
 // If used within a signal handler, all lock holders
 // should block the signal even outside the signal handler.
 
-#ifndef YB_GUTIL_SPINLOCK_H
-#define YB_GUTIL_SPINLOCK_H
+#pragma once
 
 #include "yb/gutil/atomicops.h"
-#include "yb/gutil/basictypes.h"
 #include "yb/gutil/dynamic_annotations.h"
+#include "yb/gutil/macros.h"
 #include "yb/gutil/thread_annotations.h"
 
 // This isn't originally in the base:: namespace in tcmalloc,
@@ -169,5 +168,3 @@ class SCOPED_CAPABILITY SpinLockHolder {
 #define SpinLockHolder(x) COMPILE_ASSERT(0, spin_lock_decl_missing_var_name)
 
 } // namespace base
-
-#endif  // YB_GUTIL_SPINLOCK_H

@@ -8,16 +8,17 @@ import static com.yugabyte.yw.common.ModelFactory.createUniverse;
 import static com.yugabyte.yw.models.TaskInfo.State.Failure;
 import static com.yugabyte.yw.models.TaskInfo.State.Success;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
-import static org.mockito.Matchers.any;
-import static org.mockito.Mockito.mock;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.yugabyte.yw.commissioner.tasks.params.NodeTaskParams;
 import com.yugabyte.yw.common.ApiUtils;
+import com.yugabyte.yw.common.NodeManager;
 import com.yugabyte.yw.common.ShellResponse;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.models.AvailabilityZone;
@@ -25,6 +26,7 @@ import com.yugabyte.yw.models.InstanceType;
 import com.yugabyte.yw.models.Region;
 import com.yugabyte.yw.models.TaskInfo;
 import com.yugabyte.yw.models.Universe;
+import com.yugabyte.yw.models.helpers.NodeDetails;
 import com.yugabyte.yw.models.helpers.TaskType;
 import java.util.HashMap;
 import java.util.List;
@@ -34,22 +36,40 @@ import java.util.stream.Collectors;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.mockito.runners.MockitoJUnitRunner;
-import org.yb.client.YBClient;
+import org.mockito.junit.MockitoJUnitRunner;
 import play.libs.Json;
 
 @RunWith(MockitoJUnitRunner.class)
 public class PauseUniverseTest extends CommissionerBaseTest {
   private Universe defaultUniverse;
-  private final Map<String, String> config = new HashMap<>();
 
+  @Override
   @Before
   public void setUp() {
     super.setUp();
-    YBClient mockClient = mock(YBClient.class);
     ShellResponse dummyShellResponse = new ShellResponse();
     dummyShellResponse.message = "true";
-    when(mockNodeManager.nodeCommand(any(), any())).thenReturn(dummyShellResponse);
+    when(mockNodeManager.nodeCommand(any(), any()))
+        .then(
+            invocation -> {
+              if (invocation.getArgument(0).equals(NodeManager.NodeCommandType.List)) {
+                ShellResponse listResponse = new ShellResponse();
+                NodeTaskParams params = invocation.getArgument(1);
+                if (params.nodeUuid == null) {
+                  listResponse.message = "{\"universe_uuid\":\"" + params.universeUUID + "\"}";
+                } else {
+                  listResponse.message =
+                      "{\"universe_uuid\":\""
+                          + params.universeUUID
+                          + "\", "
+                          + "\"node_uuid\": \""
+                          + params.nodeUuid
+                          + "\"}";
+                }
+                return listResponse;
+              }
+              return ShellResponse.create(ShellResponse.ERROR_CODE_SUCCESS, "true");
+            });
   }
 
   private void setupUniverse(boolean updateInProgress) {
@@ -73,18 +93,20 @@ public class PauseUniverseTest extends CommissionerBaseTest {
             userIntent, nodePrefix, true /* setMasters */, updateInProgress));
   }
 
-  List<TaskType> PAUSE_UNIVERSE_TASKS =
+  private static final List<TaskType> PAUSE_UNIVERSE_TASKS =
       ImmutableList.of(
           TaskType.AnsibleClusterServerCtl,
           TaskType.AnsibleClusterServerCtl,
           TaskType.PauseServer,
           TaskType.SwamperTargetsFileUpdate,
+          TaskType.ManageAlertDefinitions,
           TaskType.UniverseUpdateSucceeded);
 
-  List<JsonNode> PAUSE_UNIVERSE_EXPECTED_RESULTS =
+  private static final List<JsonNode> PAUSE_UNIVERSE_EXPECTED_RESULTS =
       ImmutableList.of(
           Json.toJson(ImmutableMap.of("process", "tserver", "command", "stop")),
           Json.toJson(ImmutableMap.of("process", "master", "command", "stop")),
+          Json.toJson(ImmutableMap.of()),
           Json.toJson(ImmutableMap.of()),
           Json.toJson(ImmutableMap.of()),
           Json.toJson(ImmutableMap.of()));
@@ -126,7 +148,7 @@ public class PauseUniverseTest extends CommissionerBaseTest {
         subTasks.stream().collect(Collectors.groupingBy(TaskInfo::getPosition));
     assertTaskSequence(subTasksByPosition);
     assertEquals(Success, taskInfo.getTaskState());
-    assertFalse(defaultCustomer.getUniverseUUIDs().contains(defaultUniverse.universeUUID));
+    assertTrue(defaultCustomer.getUniverseUUIDs().contains(defaultUniverse.universeUUID));
   }
 
   @Test
@@ -137,5 +159,24 @@ public class PauseUniverseTest extends CommissionerBaseTest {
     taskParams.universeUUID = defaultUniverse.universeUUID;
     TaskInfo taskInfo = submitTask(taskParams);
     assertEquals(Failure, taskInfo.getTaskState());
+  }
+
+  @Test
+  public void testPauseUniverseSuccessWithNodesAlreadyStopped() {
+    setupUniverse(false);
+    PauseUniverse.Params taskParams = new PauseUniverse.Params();
+    taskParams.customerUUID = defaultCustomer.uuid;
+    taskParams.universeUUID = defaultUniverse.universeUUID;
+    for (NodeDetails node : defaultUniverse.getNodes()) {
+      node.state = NodeDetails.NodeState.Stopped;
+      defaultUniverse.save();
+    }
+    TaskInfo taskInfo = submitTask(taskParams);
+    List<TaskInfo> subTasks = taskInfo.getSubTasks();
+    Map<Integer, List<TaskInfo>> subTasksByPosition =
+        subTasks.stream().collect(Collectors.groupingBy(TaskInfo::getPosition));
+    assertTaskSequence(subTasksByPosition);
+    assertEquals(Success, taskInfo.getTaskState());
+    assertTrue(defaultCustomer.getUniverseUUIDs().contains(defaultUniverse.universeUUID));
   }
 }

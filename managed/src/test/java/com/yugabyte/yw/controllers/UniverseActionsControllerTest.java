@@ -10,13 +10,37 @@
 
 package com.yugabyte.yw.controllers;
 
+import static com.yugabyte.yw.common.AssertHelper.assertAuditEntry;
+import static com.yugabyte.yw.common.AssertHelper.assertBadRequest;
+import static com.yugabyte.yw.common.AssertHelper.assertOk;
+import static com.yugabyte.yw.common.AssertHelper.assertPlatformException;
+import static com.yugabyte.yw.common.AssertHelper.assertValue;
+import static com.yugabyte.yw.common.FakeApiHelper.doRequestWithAuthToken;
+import static com.yugabyte.yw.common.FakeApiHelper.doRequestWithAuthTokenAndBody;
+import static com.yugabyte.yw.common.ModelFactory.createUniverse;
+import static org.hamcrest.CoreMatchers.allOf;
+import static org.hamcrest.CoreMatchers.equalTo;
+import static org.hamcrest.CoreMatchers.notNullValue;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static play.mvc.Http.Status.BAD_REQUEST;
+import static play.test.Helpers.contentAsString;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.yugabyte.yw.commissioner.Common;
 import com.yugabyte.yw.common.ApiUtils;
-import com.yugabyte.yw.common.CertificateHelper;
 import com.yugabyte.yw.common.ModelFactory;
+import com.yugabyte.yw.common.certmgmt.CertificateHelper;
 import com.yugabyte.yw.forms.EncryptionAtRestKeyParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.forms.UniverseTaskParams;
@@ -37,37 +61,12 @@ import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import play.libs.Json;
 import play.mvc.Result;
-import static com.yugabyte.yw.common.AssertHelper.assertAuditEntry;
-import static com.yugabyte.yw.common.AssertHelper.assertBadRequest;
-import static com.yugabyte.yw.common.AssertHelper.assertOk;
-import static com.yugabyte.yw.common.AssertHelper.assertValue;
-import static com.yugabyte.yw.common.AssertHelper.assertPlatformException;
-import static com.yugabyte.yw.common.FakeApiHelper.doRequestWithAuthToken;
-import static com.yugabyte.yw.common.FakeApiHelper.doRequestWithAuthTokenAndBody;
-import static com.yugabyte.yw.common.ModelFactory.createUniverse;
-import static org.hamcrest.CoreMatchers.allOf;
-import static org.hamcrest.CoreMatchers.equalTo;
-import static org.hamcrest.CoreMatchers.notNullValue;
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-import static play.mvc.Http.Status.BAD_REQUEST;
-import static play.test.Helpers.contentAsString;
 
 @RunWith(JUnitParamsRunner.class)
 public class UniverseActionsControllerTest extends UniverseControllerTestBase {
   @Test
   public void testUniverseBackupFlagSuccess() {
     Universe u = createUniverse(customer.getCustomerId());
-    customer.addUniverseUUID(u.universeUUID);
-    customer.save();
     String url =
         "/api/customers/"
             + customer.uuid
@@ -85,8 +84,6 @@ public class UniverseActionsControllerTest extends UniverseControllerTestBase {
   @Test
   public void testUniverseBackupFlagFailure() {
     Universe u = createUniverse(customer.getCustomerId());
-    customer.addUniverseUUID(u.universeUUID);
-    customer.save();
     String url =
         "/api/customers/" + customer.uuid + "/universes/" + u.universeUUID + "/update_backup_state";
     Result result = doRequestWithAuthToken("PUT", url, authToken);
@@ -135,17 +132,21 @@ public class UniverseActionsControllerTest extends UniverseControllerTestBase {
             .put("provider", p.uuid.toString())
             .put("ycqlPassword", "@123Byte")
             .put("enableYSQL", "false")
-            .put("accessKeyCode", accessKeyCode);
+            .put("accessKeyCode", accessKeyCode)
+            .put("ybSoftwareVersion", "0.0.0.1-b1");
 
     ArrayNode regionList = Json.newArray().add(r.uuid.toString());
     userIntentJson.set("regionList", regionList);
     userIntentJson.set("deviceInfo", createValidDeviceInfo(Common.CloudType.aws));
-    ArrayNode clustersJsonArray =
-        Json.newArray().add(Json.newObject().set("userIntent", userIntentJson));
+    UUID clusterUUID = UUID.randomUUID();
+    JsonNode clusterJson =
+        Json.newObject().put("uuid", clusterUUID.toString()).set("userIntent", userIntentJson);
+    ArrayNode clustersJsonArray = Json.newArray().add(clusterJson);
     ObjectNode cloudInfo = Json.newObject();
     cloudInfo.put("region", "region1");
     ObjectNode nodeDetails = Json.newObject();
     nodeDetails.put("nodeName", "testing-1");
+    nodeDetails.put("placementUuid", clusterUUID.toString());
     nodeDetails.set("cloudInfo", cloudInfo);
     ArrayNode nodeDetailsSet = Json.newArray().add(nodeDetails);
     createBodyJson.set("clusters", clustersJsonArray);
@@ -334,8 +335,11 @@ public class UniverseActionsControllerTest extends UniverseControllerTestBase {
   public void testUniverseToggleTlsWithRootCaUpdate() {
     UUID fakeTaskUUID = UUID.randomUUID();
     when(mockCommissioner.submit(any(), any())).thenReturn(fakeTaskUUID);
-    UUID certUUID1 = CertificateHelper.createRootCA("test cert 1", customer.uuid, "/tmp/certs");
-    UUID certUUID2 = CertificateHelper.createRootCA("test cert 2", customer.uuid, "/tmp/certs");
+    when(mockRuntimeConfig.getString("yb.storage.path")).thenReturn("/tmp/certs");
+    UUID certUUID1 =
+        CertificateHelper.createRootCA(mockRuntimeConfig, "test cert 1", customer.uuid);
+    UUID certUUID2 =
+        CertificateHelper.createRootCA(mockRuntimeConfig, "test cert 2", customer.uuid);
     UUID universeUUID = prepareUniverseForToggleTls(true, true, certUUID1);
 
     String url = "/api/customers/" + customer.uuid + "/universes/" + universeUUID + "/toggle_tls";

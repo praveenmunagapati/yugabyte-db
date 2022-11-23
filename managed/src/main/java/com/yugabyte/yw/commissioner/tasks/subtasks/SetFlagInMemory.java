@@ -13,7 +13,7 @@ package com.yugabyte.yw.commissioner.tasks.subtasks;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.net.HostAndPort;
 import com.yugabyte.yw.commissioner.BaseTaskDependencies;
-import com.yugabyte.yw.commissioner.tasks.UniverseDefinitionTaskBase.ServerType;
+import com.yugabyte.yw.commissioner.tasks.UniverseTaskBase.ServerType;
 import com.yugabyte.yw.commissioner.tasks.params.ServerSubTaskParams;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -55,7 +55,8 @@ public class SetFlagInMemory extends ServerSubTaskBase {
   @Override
   public void run() {
     checkParams();
-    String masterAddresses = getMasterAddresses();
+    // Check if secondary IP is present, and if so, use that for the gflag value.
+    String masterAddresses = getMasterAddresses(true);
     boolean isTserverTask = taskParams().serverType == ServerType.TSERVER;
     HostAndPort hp = getHostPort();
 

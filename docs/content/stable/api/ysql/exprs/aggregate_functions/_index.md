@@ -8,10 +8,8 @@ menu:
   stable:
     identifier: aggregate-functions
     parent: api-ysql-exprs
-isTocNested: true
-showAsideToc: true
+type: indexpage
 ---
-
 If you are already familiar with aggregate functions, then you can skip straight to the [syntax and semantics](./invocation-syntax-semantics/) section or the section that lists all of [the YSQL aggregate functions](./function-syntax-semantics/) and that links, in turn, to the definitive account of each function.
 
 This page has only the [Synopsis](./#synopsis) section and the section [Organization of the aggregate functions documentation](./#organization-of-the-aggregate-functions-documentation) section.
@@ -49,7 +47,7 @@ This section focuses on the _effect_ that each illustrated function has. It leav
 
 ### Aggregate function invocation—SQL syntax and semantics: [here](./invocation-syntax-semantics/)
 
-This section presents the formal treatment of the syntax and semantics of how an aggregate function is invoked as a special kind of `SELECT` list item—with the invocation syntax optionally decorated with an `ORDER BY` clause, or a `FILTER` clause. This account also explains the use of the `HAVING` clause which lets you restrict a result set according the the value(s) returned by a list of aggregate functions.
+This section presents the formal treatment of the syntax and semantics of how an aggregate function is invoked as a special kind of `SELECT` list item—with the invocation syntax optionally decorated with an `ORDER BY` clause, or a `FILTER` clause. This account also explains the use of the `HAVING` clause which lets you restrict a result set according the value(s) returned by a list of aggregate functions.
 
 There are four variants of the `GROUP BY` invocation style: `GROUP BY <column list>`; `GROUP BY GROUPING SETS`; `GROUP BY ROLLUP`; and `GROUP BY CUBE`. Further, all but the bare `GROUP BY <column list>` allow the use of  a `GROUPING` keyword in the `SELECT` list to label the different `GROUPING SETS`. Because all of this requires a fairly lengthy explanation, this is covered in the dedicated section [`Using the GROUPING SETS, ROLLUP, and CUBE syntax for aggregate function invocation`](./grouping-sets-rollup-cube/).
 

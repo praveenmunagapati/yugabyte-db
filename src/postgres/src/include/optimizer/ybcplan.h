@@ -20,8 +20,7 @@
  *--------------------------------------------------------------------------------------------------
  */
 
-#ifndef YBCPLAN_H
-#define YBCPLAN_H
+#pragma once
 
 #include "postgres.h"
 #include "nodes/plannodes.h"
@@ -29,22 +28,8 @@
 #include "utils/rel.h"
 
 
-void YBCExprInstantiateParams(Expr* expr, ParamListInfo paramLI);
-
-bool YBCIsSupportedSingleRowModifyWhereExpr(Expr *expr);
-
-bool YBCIsSupportedSingleRowModifyAssignExpr(Expr *expr,
-                                             AttrNumber target_attno,
-                                             bool *needs_pushdown);
-
 bool YBCIsSingleRowModify(PlannedStmt *pstmt);
 
-bool YBCIsSingleRowUpdateOrDelete(ModifyTable *modifyTable);
+bool YbCanSkipFetchingTargetTupleForModifyTable(ModifyTable *modifyTable);
 
 bool YBCAllPrimaryKeysProvided(Relation rel, Bitmapset *attrs);
-
-bool YBCIsSupportedSingleRowModifyReturningExpr(Expr *expr);
-
-#endif // YBCPLAN_H
-
-

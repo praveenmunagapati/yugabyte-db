@@ -2,23 +2,26 @@
 
 package com.yugabyte.yw.commissioner.tasks.upgrade;
 
-import static com.yugabyte.yw.commissioner.tasks.UniverseDefinitionTaskBase.ServerType.MASTER;
+import static com.yugabyte.yw.commissioner.tasks.UniverseTaskBase.ServerType.MASTER;
 import static com.yugabyte.yw.common.TestHelper.createTempFile;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.lenient;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.collect.ImmutableList;
 import com.google.common.net.HostAndPort;
 import com.yugabyte.yw.commissioner.Commissioner;
+import com.yugabyte.yw.commissioner.Common;
 import com.yugabyte.yw.commissioner.tasks.CommissionerBaseTest;
-import com.yugabyte.yw.commissioner.tasks.UniverseDefinitionTaskBase.ServerType;
+import com.yugabyte.yw.commissioner.tasks.UniverseTaskBase.ServerType;
 import com.yugabyte.yw.common.ApiUtils;
 import com.yugabyte.yw.common.ModelFactory;
 import com.yugabyte.yw.common.PlacementInfoUtil;
@@ -29,14 +32,19 @@ import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.forms.UpgradeTaskParams;
 import com.yugabyte.yw.models.AvailabilityZone;
 import com.yugabyte.yw.models.CertificateInfo;
+import com.yugabyte.yw.models.Hook;
+import com.yugabyte.yw.models.HookScope;
+import com.yugabyte.yw.models.HookScope.TriggerType;
 import com.yugabyte.yw.models.Region;
 import com.yugabyte.yw.models.TaskInfo;
 import com.yugabyte.yw.models.Universe;
+import com.yugabyte.yw.models.Users;
+import com.yugabyte.yw.models.helpers.DeviceInfo;
 import com.yugabyte.yw.models.helpers.PlacementInfo;
 import com.yugabyte.yw.models.helpers.TaskType;
-import java.io.File;
 import java.io.IOException;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
@@ -44,6 +52,10 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import org.junit.Before;
+import org.yb.client.ChangeMasterClusterConfigResponse;
+import org.yb.client.GetLoadMovePercentResponse;
+import org.yb.client.GetMasterClusterConfigResponse;
+import org.yb.master.CatalogEntityInfo;
 import org.yb.client.IsServerReadyResponse;
 import org.yb.client.YBClient;
 
@@ -60,14 +72,18 @@ public abstract class UpgradeTaskTest extends CommissionerBaseTest {
 
   protected YBClient mockClient;
   protected Universe defaultUniverse;
-  protected ShellResponse dummyShellResponse;
 
   protected Region region;
   protected AvailabilityZone az1;
   protected AvailabilityZone az2;
   protected AvailabilityZone az3;
 
-  protected String certContents =
+  protected Users defaultUser;
+
+  protected Hook preUpgradeHook, postUpgradeHook, preNodeHook, postNodeHook;
+  protected HookScope preNodeScope, postNodeScope, preUpgradeScope, postUpgradeScope;
+
+  protected static final String CERT_CONTENTS =
       "-----BEGIN CERTIFICATE-----\n"
           + "MIIDEjCCAfqgAwIBAgIUEdzNoxkMLrZCku6H1jQ4pUgPtpQwDQYJKoZIhvcNAQEL\n"
           + "BQAwLzERMA8GA1UECgwIWXVnYWJ5dGUxGjAYBgNVBAMMEUNBIGZvciBZdWdhYnl0\n"
@@ -88,17 +104,22 @@ public abstract class UpgradeTaskTest extends CommissionerBaseTest {
           + "YvtLjmJF//b3rsty6NFIonSVgq6Nqw==\n"
           + "-----END CERTIFICATE-----\n";
 
-  protected List<String> PROPERTY_KEYS = ImmutableList.of("processType", "taskSubType");
+  protected static final List<String> PROPERTY_KEYS =
+      ImmutableList.of("processType", "taskSubType");
 
-  protected List<TaskType> NON_NODE_TASKS =
+  protected static final List<TaskType> NON_NODE_TASKS =
       ImmutableList.of(
           TaskType.LoadBalancerStateChange,
           TaskType.UpdateAndPersistGFlags,
           TaskType.UpdateSoftwareVersion,
           TaskType.UnivSetCertificate,
           TaskType.UniverseSetTlsParams,
-          TaskType.UniverseUpdateSucceeded);
+          TaskType.UniverseUpdateSucceeded,
+          TaskType.WaitForMasterLeader,
+          TaskType.ModifyBlackList,
+          TaskType.WaitForLeaderBlacklistCompletion);
 
+  @Override
   @Before
   public void setUp() {
     super.setUp();
@@ -116,8 +137,7 @@ public abstract class UpgradeTaskTest extends CommissionerBaseTest {
     customCertInfo.rootCertPath = "rootCertPath";
     customCertInfo.nodeCertPath = "nodeCertPath";
     customCertInfo.nodeKeyPath = "nodeKeyPath";
-    new File(TestHelper.TMP_PATH).mkdirs();
-    createTempFile("ca.crt", certContents);
+    createTempFile("upgrade_task_test_ca.crt", CERT_CONTENTS);
     try {
       CertificateInfo.create(
           certUUID,
@@ -125,7 +145,7 @@ public abstract class UpgradeTaskTest extends CommissionerBaseTest {
           "test",
           date,
           date,
-          TestHelper.TMP_PATH + "/ca.crt",
+          TestHelper.TMP_PATH + "/upgrade_task_test_ca.crt",
           customCertInfo);
     } catch (IOException | NoSuchAlgorithmException ignored) {
     }
@@ -133,35 +153,111 @@ public abstract class UpgradeTaskTest extends CommissionerBaseTest {
     // Create default universe
     UniverseDefinitionTaskParams.UserIntent userIntent =
         new UniverseDefinitionTaskParams.UserIntent();
-    userIntent.numNodes = 3;
     userIntent.ybSoftwareVersion = "old-version";
     userIntent.accessKeyCode = "demo-access";
     userIntent.regionList = ImmutableList.of(region.uuid);
+    userIntent.providerType = Common.CloudType.valueOf(defaultProvider.code);
+    userIntent.provider = defaultProvider.uuid.toString();
+    userIntent.deviceInfo = new DeviceInfo();
+    userIntent.deviceInfo.volumeSize = 100;
+    userIntent.deviceInfo.numVolumes = 2;
+
     defaultUniverse = ModelFactory.createUniverse(defaultCustomer.getCustomerId(), certUUID);
-    PlacementInfo placementInfo = new PlacementInfo();
-    PlacementInfoUtil.addPlacementZone(az1.uuid, placementInfo, 1, 1, false);
-    PlacementInfoUtil.addPlacementZone(az2.uuid, placementInfo, 1, 1, true);
-    PlacementInfoUtil.addPlacementZone(az3.uuid, placementInfo, 1, 1, false);
+
+    PlacementInfo placementInfo = createPlacementInfo();
+    userIntent.numNodes =
+        placementInfo
+            .cloudList
+            .get(0)
+            .regionList
+            .get(0)
+            .azList
+            .stream()
+            .mapToInt(p -> p.numNodesInAZ)
+            .sum();
+
     defaultUniverse =
         Universe.saveDetails(
             defaultUniverse.universeUUID,
             ApiUtils.mockUniverseUpdater(userIntent, placementInfo, true));
 
+    CatalogEntityInfo.SysClusterConfigEntryPB.Builder configBuilder =
+        CatalogEntityInfo.SysClusterConfigEntryPB.newBuilder().setVersion(1);
+    GetMasterClusterConfigResponse mockConfigResponse =
+        new GetMasterClusterConfigResponse(1111, "", configBuilder.build(), null);
+    ChangeMasterClusterConfigResponse mockMasterChangeConfigResponse =
+        new ChangeMasterClusterConfigResponse(1112, "", null);
+    GetLoadMovePercentResponse mockGetLoadMovePercentResponse =
+        new GetLoadMovePercentResponse(0, "", 100.0, 0, 0, null);
+
     // Setup mocks
     mockClient = mock(YBClient.class);
     try {
       when(mockYBClient.getClient(any(), any())).thenReturn(mockClient);
+      when(mockClient.waitForMaster(any(HostAndPort.class), anyLong())).thenReturn(true);
       when(mockClient.waitForServer(any(HostAndPort.class), anyLong())).thenReturn(true);
       when(mockClient.getLeaderMasterHostAndPort())
-          .thenReturn(HostAndPort.fromString("host-n2").withDefaultPort(11));
+          .thenReturn(HostAndPort.fromString("10.0.0.2").withDefaultPort(11));
       IsServerReadyResponse okReadyResp = new IsServerReadyResponse(0, "", null, 0, 0);
       when(mockClient.isServerReady(any(HostAndPort.class), anyBoolean())).thenReturn(okReadyResp);
+      lenient().when(mockClient.getMasterClusterConfig()).thenReturn(mockConfigResponse);
+      lenient()
+          .when(mockClient.changeMasterClusterConfig(any()))
+          .thenReturn(mockMasterChangeConfigResponse);
+      lenient()
+          .when(mockClient.getLeaderBlacklistCompletion())
+          .thenReturn(mockGetLoadMovePercentResponse);
     } catch (Exception ignored) {
+      fail();
     }
 
     // Create dummy shell response
-    dummyShellResponse = new ShellResponse();
+    ShellResponse dummyShellResponse = new ShellResponse();
     when(mockNodeManager.nodeCommand(any(), any())).thenReturn(dummyShellResponse);
+
+    defaultUser = ModelFactory.testUser(defaultCustomer);
+
+    // Create hooks
+    preNodeHook =
+        Hook.create(
+            defaultCustomer.uuid,
+            "preNodeHook",
+            Hook.ExecutionLang.Python,
+            "HOOK\nTEXT\n",
+            true,
+            null);
+    postNodeHook =
+        Hook.create(
+            defaultCustomer.uuid,
+            "postNodeHook",
+            Hook.ExecutionLang.Python,
+            "HOOK\nTEXT\n",
+            true,
+            null);
+    preUpgradeHook =
+        Hook.create(
+            defaultCustomer.uuid,
+            "preUpgradeHook",
+            Hook.ExecutionLang.Python,
+            "HOOK\nTEXT\n",
+            true,
+            null);
+    postUpgradeHook =
+        Hook.create(
+            defaultCustomer.uuid,
+            "postUpgradeHook",
+            Hook.ExecutionLang.Python,
+            "HOOK\nTEXT\n",
+            true,
+            null);
+  }
+
+  protected PlacementInfo createPlacementInfo() {
+    PlacementInfo placementInfo = new PlacementInfo();
+    PlacementInfoUtil.addPlacementZone(az1.uuid, placementInfo, 1, 1, false);
+    PlacementInfoUtil.addPlacementZone(az2.uuid, placementInfo, 1, 1, true);
+    PlacementInfoUtil.addPlacementZone(az3.uuid, placementInfo, 1, 1, false);
+    return placementInfo;
   }
 
   protected TaskInfo submitTask(
@@ -176,9 +272,11 @@ public abstract class UpgradeTaskTest extends CommissionerBaseTest {
       int expectedVersion) {
     taskParams.universeUUID = defaultUniverse.universeUUID;
     taskParams.expectedUniverseVersion = expectedVersion;
-    // Need not sleep for default 4min in tests.
+    // Need not sleep for default 3min in tests.
     taskParams.sleepAfterMasterRestartMillis = 5;
     taskParams.sleepAfterTServerRestartMillis = 5;
+    // Add the creating user
+    taskParams.creatingUser = defaultUser;
 
     try {
       UUID taskUUID = commissioner.submit(taskType, taskParams);
@@ -190,7 +288,7 @@ public abstract class UpgradeTaskTest extends CommissionerBaseTest {
   }
 
   protected List<Integer> getRollingUpgradeNodeOrder(ServerType serverType) {
-    return serverType == MASTER
+    return serverType == ServerType.MASTER
         ?
         // We need to check that the master leader is upgraded last.
         Arrays.asList(1, 3, 2)
@@ -206,6 +304,12 @@ public abstract class UpgradeTaskTest extends CommissionerBaseTest {
   protected TaskType assertTaskType(List<TaskInfo> tasks, TaskType expectedTaskType) {
     TaskType taskType = tasks.get(0).getTaskType();
     assertEquals(expectedTaskType, taskType);
+    return taskType;
+  }
+
+  protected TaskType assertTaskType(List<TaskInfo> tasks, TaskType expectedTaskType, int position) {
+    TaskType taskType = tasks.get(0).getTaskType();
+    assertEquals("at position " + position, expectedTaskType, taskType);
     return taskType;
   }
 
@@ -237,11 +341,48 @@ public abstract class UpgradeTaskTest extends CommissionerBaseTest {
                               PROPERTY_KEYS.contains(expectedKey)
                                   ? t.get("properties").get(expectedKey)
                                   : t.get(expectedKey);
-                          return data.isObject() ? data : data.textValue();
+                          return data.isObject()
+                              ? data
+                              : (data.isBoolean() ? data.booleanValue() : data.textValue());
                         })
                     .collect(Collectors.toList());
-            values.forEach((actualValue) -> assertEquals(actualValue, expectedValue));
+            values.forEach(
+                actualValue ->
+                    assertEquals(
+                        "Unexpected value for key " + expectedKey, expectedValue, actualValue));
           }
         });
+  }
+
+  protected void assertCommonTasks(
+      Map<Integer, List<TaskInfo>> subTasksByPosition, int startPosition) {
+    int position = startPosition;
+    List<TaskType> commonNodeTasks =
+        new ArrayList<>(
+            ImmutableList.of(TaskType.LoadBalancerStateChange, TaskType.UniverseUpdateSucceeded));
+    for (TaskType commonNodeTask : commonNodeTasks) {
+      assertTaskType(subTasksByPosition.get(position), commonNodeTask, position);
+      position++;
+    }
+  }
+
+  protected void attachHooks(String className) {
+    // Create scopes
+    preUpgradeScope =
+        HookScope.create(defaultCustomer.uuid, TriggerType.valueOf("Pre" + className));
+    postUpgradeScope =
+        HookScope.create(defaultCustomer.uuid, TriggerType.valueOf("Post" + className));
+    preNodeScope =
+        HookScope.create(
+            defaultCustomer.uuid, TriggerType.valueOf("Pre" + className + "NodeUpgrade"));
+    postNodeScope =
+        HookScope.create(
+            defaultCustomer.uuid, TriggerType.valueOf("Post" + className + "NodeUpgrade"));
+
+    // attack hooks
+    preNodeScope.addHook(preNodeHook);
+    postNodeScope.addHook(postNodeHook);
+    preUpgradeScope.addHook(preUpgradeHook);
+    postUpgradeScope.addHook(postUpgradeHook);
   }
 }

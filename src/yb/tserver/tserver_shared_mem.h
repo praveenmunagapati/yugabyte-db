@@ -11,21 +11,27 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_TSERVER_SHARED_MEM_H
-#define YB_TSERVER_TSERVER_SHARED_MEM_H
+#pragma once
 
 #include <atomic>
 
-#include "yb/util/shared_mem.h"
+#include <boost/asio/ip/tcp.hpp>
 
 #include "yb/tserver/tserver_util_fwd.h"
-#include "yb/util/lockfree.h"
+
+#include "yb/util/atomic.h"
+#include "yb/util/net/net_fwd.h"
+#include "yb/util/slice.h"
 
 namespace yb {
 namespace tserver {
 
 class TServerSharedData {
  public:
+  // In per-db catalog version mode, this puts a limit on the maximum number of databases
+  // that can exist in a cluster.
+  static constexpr uint32_t kMaxNumDbCatalogVersions = 10000;
+
   TServerSharedData() {
     // All atomics stored in shared memory must be lock-free. Non-robust locks
     // in shared memory can lead to deadlock if a processes crashes, and memory
@@ -53,12 +59,22 @@ class TServerSharedData {
     return host_;
   }
 
-  void SetYSQLCatalogVersion(uint64_t version) {
+  void SetYsqlCatalogVersion(uint64_t version) {
     catalog_version_.store(version, std::memory_order_release);
   }
 
   uint64_t ysql_catalog_version() const {
     return catalog_version_.load(std::memory_order_acquire);
+  }
+
+  void SetYsqlDbCatalogVersion(size_t index, uint64_t version) {
+    DCHECK_LT(index, kMaxNumDbCatalogVersions);
+    db_catalog_versions_[index].store(version, std::memory_order_release);
+  }
+
+  uint64_t ysql_db_catalog_version(size_t index) const {
+    DCHECK_LT(index, kMaxNumDbCatalogVersions);
+    return db_catalog_versions_[index].load(std::memory_order_acquire);
   }
 
   void SetPostgresAuthKey(uint64_t auth_key) {
@@ -76,9 +92,9 @@ class TServerSharedData {
 
   std::atomic<uint64_t> catalog_version_{0};
   uint64_t postgres_auth_key_;
+
+  std::atomic<uint64_t> db_catalog_versions_[kMaxNumDbCatalogVersions] = {0};
 };
 
 }  // namespace tserver
 }  // namespace yb
-
-#endif // YB_TSERVER_TSERVER_SHARED_MEM_H

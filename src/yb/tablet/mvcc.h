@@ -29,24 +29,19 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_TABLET_MVCC_H_
-#define YB_TABLET_MVCC_H_
+#pragma once
 
 #include <condition_variable>
-#include <mutex>
 #include <deque>
-#include <queue>
 #include <vector>
-#include <iostream>
 
 #include "yb/gutil/thread_annotations.h"
 
 #include "yb/server/clock.h"
 
-#include "yb/util/compare_util.h"
-#include "yb/util/debug-util.h"
-#include "yb/util/opid.h"
 #include "yb/util/enums.h"
+#include "yb/util/math_util.h"
+#include "yb/util/opid.h"
 
 namespace yb {
 namespace tablet {
@@ -71,9 +66,7 @@ struct FixedHybridTimeLease {
     return lease.GetPhysicalValueMicros() >= kMaxHybridTimePhysicalMicros;
   }
 
-  std::string ToString() const {
-    return Format("{ time: $0 lease: $1 }", time, lease);
-  }
+  std::string ToString() const;
 };
 
 inline std::ostream& operator<<(std::ostream& out, const FixedHybridTimeLease& ht_lease) {
@@ -182,12 +175,11 @@ class MvccManager {
     HybridTime hybrid_time;
     OpId op_id;
 
-    std::string ToString() const {
-      return YB_STRUCT_TO_STRING(hybrid_time, op_id);
-    }
+    std::string ToString() const;
+    bool Eq(const QueueItem& rhs) const;
 
     friend bool operator==(const QueueItem& lhs, const QueueItem& rhs) {
-      return YB_STRUCT_EQUALS(hybrid_time, op_id);
+      return lhs.Eq(rhs);
     }
 
     friend bool operator<(const QueueItem& lhs, const QueueItem& rhs) {
@@ -224,5 +216,3 @@ class MvccManager {
 
 }  // namespace tablet
 }  // namespace yb
-
-#endif  // YB_TABLET_MVCC_H_

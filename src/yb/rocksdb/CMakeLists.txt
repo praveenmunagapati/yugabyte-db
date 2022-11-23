@@ -13,6 +13,9 @@
 
 # RocksDB build.
 
+set(YB_PCH_PREFIX rocksdb)
+set(YB_PCH_DEP_LIBS opid_proto yb_test_util)
+
 PROTOBUF_GENERATE_CPP(
   ROCKSDB_PROTO_SRCS ROCKSDB_PROTO_HDRS ROCKSDB_PROTO_TGTS
   SOURCE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..
@@ -135,11 +138,7 @@ set(ROCKSDB_SRCS
     utilities/convenience/info_log_finder.cc
     utilities/checkpoint/checkpoint.cc
     utilities/compaction_filters/remove_emptyvalue_compactionfilter.cc
-    utilities/document/document_db.cc
-    utilities/document/json_document_builder.cc
-    utilities/document/json_document.cc
     utilities/env_mirror.cc
-    utilities/geodb/geodb_impl.cc
     utilities/leveldb_options/leveldb_options.cc
     utilities/memory/memory_util.cc
     utilities/merge_operators/put.cc
@@ -149,14 +148,6 @@ set(ROCKSDB_SRCS
     utilities/options/options_util.cc
     utilities/redis/redis_lists.cc
     utilities/table_properties_collectors/compact_on_deletion_collector.cc
-    utilities/transactions/optimistic_transaction_impl.cc
-    utilities/transactions/optimistic_transaction_db_impl.cc
-    utilities/transactions/transaction_base.cc
-    utilities/transactions/transaction_db_impl.cc
-    utilities/transactions/transaction_db_mutex_impl.cc
-    utilities/transactions/transaction_lock_mgr.cc
-    utilities/transactions/transaction_impl.cc
-    utilities/transactions/transaction_util.cc
     utilities/ttl/db_ttl_impl.cc
     utilities/write_batch_with_index/write_batch_with_index.cc
     utilities/write_batch_with_index/write_batch_with_index_internal.cc
@@ -178,20 +169,14 @@ set(ROCKSDB_SRCS
     util/statistics.cc
     util/sync_point.cc
     util/thread_local.cc
-    util/xfunc.cc
     util/xxhash.cc
     ${ROCKSDB_PROTO_SRCS}
 )
 
 set(CMAKE_CXX_FLAGS
   "${CMAKE_CXX_FLAGS} \
-   -Wextra -Wsign-compare -Wshadow -Woverloaded-virtual \
+   -Wextra -Wshadow -Woverloaded-virtual \
    -Wno-missing-field-initializers -Wno-unused-parameter -Wno-unused-variable")
-
-if (IS_CLANG)
-  set(CMAKE_CXX_FLAGS
-    "${CMAKE_CXX_FLAGS} -Wshorten-64-to-32 -Wno-unevaluated-expression -Wno-parentheses-equality")
-endif()
 
 if (NOT APPLE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DROCKSDB_FALLOCATE_PRESENT")
@@ -201,19 +186,19 @@ if ("${YB_BUILD_TYPE}" STREQUAL "asan")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DROCKSDB_MALLOC_USABLE_SIZE")
 endif()
 
-add_library(rocksdb ${ROCKSDB_SRCS})
-target_link_libraries(rocksdb gflags gutil snappy z lz4 yb_common yb_util opid_proto)
+ADD_YB_LIBRARY(rocksdb
+               SRCS ${ROCKSDB_SRCS}
+               DEPS gflags gutil snappy z lz4 yb_common yb_util opid_proto)
 
 add_library(rocksdb_tools
   tools/ldb_cmd.cc
   tools/ldb_tool.cc
   tools/sst_dump_tool.cc)
-target_link_libraries(rocksdb_tools rocksdb yb_rocksutil)
+target_link_libraries(rocksdb_tools docdb_proto rocksdb yb_rocksutil)
 
 macro(ADD_YB_ROCKSDB_TOOL tool)
   add_executable(${tool} tools/${tool}.cc)
   target_link_libraries(${tool} rocksdb_tools)
-  set_target_properties(${tool} PROPERTIES COMPILE_FLAGS "-DDISABLE_STATUS_NODISCARD")
 endmacro()
 
 set(ROCKSDB_TEST_UTIL_SRCS
@@ -228,7 +213,7 @@ if (NOT "${CMAKE_BUILD_TYPE}" STREQUAL "RELEASE")
 endif()
 
 add_library(rocksdb_test_util ${ROCKSDB_TEST_UTIL_SRCS})
-target_link_libraries(rocksdb_test_util gmock rocksdb yb_rocksutil)
+target_link_libraries(rocksdb_test_util gmock gtest rocksdb yb_rocksutil)
 
 add_executable(db_bench tools/db_bench.cc tools/db_bench_tool.cc)
 target_link_libraries(db_bench rocksdb)
@@ -288,15 +273,18 @@ ADD_YB_TEST(util/memenv_test)
 ADD_YB_TEST(util/mock_env_test)
 ADD_YB_TEST(util/options_test)
 ADD_YB_TEST(util/rate_limiter_test)
+
 ADD_YB_TEST(util/slice_transform_test)
-ADD_YB_TEST(utilities/document/document_db_test)
-ADD_YB_TEST(utilities/document/json_document_test)
-ADD_YB_TEST(utilities/geodb/geodb_test)
+if (BUILD_TESTS AND
+    COMPILER_FAMILY STREQUAL "gcc" AND
+    "${COMPILER_VERSION}" MATCHES "^(10|11)[.].*$")
+  target_compile_options(slice_transform_test PRIVATE "-Wno-array-bounds")
+endif()
+
 ADD_YB_TEST(utilities/merge_operators/string_append/stringappend_test)
 ADD_YB_TEST(utilities/options/options_util_test)
 ADD_YB_TEST(utilities/redis/redis_lists_test)
 ADD_YB_TEST(utilities/table_properties_collectors/compact_on_deletion_collector_test)
-ADD_YB_TEST(utilities/transactions/optimistic_transaction_test)
 ADD_YB_TEST(utilities/ttl/ttl_test)
 ADD_YB_TEST(utilities/write_batch_with_index/write_batch_with_index_test)
 
@@ -315,6 +303,7 @@ ADD_YB_TEST(db/db_inplace_update_test)
 ADD_YB_TEST(db/db_iter_test)
 ADD_YB_TEST(db/db_log_iter_test)
 ADD_YB_TEST(db/db_properties_test)
+ADD_YB_TEST(db/db_statistics_test)
 ADD_YB_TEST(db/db_sst_test)
 ADD_YB_TEST(db/db_table_properties_test)
 ADD_YB_TEST(db/db_tailing_iter_test)
@@ -336,6 +325,5 @@ ADD_YB_TEST(util/delete_scheduler_test)
 ADD_YB_TEST(util/thread_local_test)
 ADD_YB_TEST(utilities/checkpoint/checkpoint_test)
 ADD_YB_TEST(utilities/memory/memory_test)
-ADD_YB_TEST(utilities/transactions/transaction_test)
 
 endif()

@@ -147,6 +147,8 @@ bool		enable_parallel_hash = true;
 bool		enable_partition_pruning = true;
 bool		yb_enable_geolocation_costing = true;
 
+extern int yb_bnl_batch_size;
+
 typedef struct
 {
 	PlannerInfo *root;
@@ -495,8 +497,8 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count,
 	Cost		indexStartupCost;
 	Cost		indexTotalCost;
 	Selectivity indexSelectivity;
-	double		indexCorrelation,
-				csquared;
+	double		indexCorrelation = 0;
+	double		csquared;
 	double		spc_seq_page_cost,
 				spc_random_page_cost;
 	Cost		min_IO_cost,
@@ -789,6 +791,13 @@ extract_nonindex_conditions(List *qual_clauses, List *indexquals)
 			continue;			/* simple duplicate */
 		if (is_redundant_derived_clause(rinfo, indexquals))
 			continue;			/* derived from same EquivalenceClass */
+		
+		Assert(list_length(rinfo->yb_batched_rinfo) <= 2);
+		if (rinfo->yb_batched_rinfo &&
+			(list_member_ptr(indexquals, linitial(rinfo->yb_batched_rinfo)) ||
+			 (list_length(rinfo->yb_batched_rinfo) >= 2 &&
+			   list_member_ptr(indexquals, lsecond(rinfo->yb_batched_rinfo)))))
+			continue;
 		/* ... skip the predicate proof attempt createplan.c will try ... */
 		result = lappend(result, rinfo);
 	}
@@ -3876,6 +3885,12 @@ cost_qual_eval_walker(Node *node, cost_qual_eval_context *context)
 		 * be factored into plan-node-specific costing of the Agg or WindowAgg
 		 * plan node.
 		 */
+		return false;			/* don't recurse into children */
+	}
+	else if (IsA(node, GroupingFunc))
+	{
+		/* Treat this as having cost 1 */
+		context->total.per_tuple += cpu_operator_cost;
 		return false;			/* don't recurse into children */
 	}
 	else if (IsA(node, CoerceViaIO))

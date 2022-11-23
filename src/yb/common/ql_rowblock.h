@@ -13,14 +13,20 @@
 //
 // This file contains the classes that represent a QL row and a row block.
 
-#ifndef YB_COMMON_QL_ROWBLOCK_H
-#define YB_COMMON_QL_ROWBLOCK_H
+#pragma once
 
 #include <memory>
+#include <vector>
 
-#include "yb/common/schema.h"
+#include "yb/common/common_fwd.h"
+#include "yb/common/common_types.pb.h"
+
+#include "yb/util/status_fwd.h"
 
 namespace yb {
+
+class Slice;
+class WriteBuffer;
 
 //------------------------------------------ QL row ----------------------------------------
 // A QL row. It uses QLValue to store the column values.
@@ -35,12 +41,10 @@ class QLRow {
   const Schema& schema() const { return *schema_.get(); }
 
   // Column count
-  size_t column_count() const { return schema_->num_columns(); }
+  size_t column_count() const;
 
   // Column's datatype
-  const std::shared_ptr<QLType>& column_type(const size_t col_idx) const {
-    return schema_->column(col_idx).type();
-  }
+  const std::shared_ptr<QLType>& column_type(const size_t col_idx) const;
 
   // Get a mutable/non-mutable column value.
   const QLValue& column(const size_t col_idx) const;
@@ -63,8 +67,8 @@ class QLRow {
   //----------------------------- serializer / deserializer ---------------------------------
   // Note: QLRow's serialize / deserialize methods are private because we expect QL rows
   // to be serialized / deserialized as part of a row block. See QLRowBlock.
-  void Serialize(QLClient client, faststring* buffer) const;
-  CHECKED_STATUS Deserialize(QLClient client, Slice* data);
+  void Serialize(QLClient client, WriteBuffer* buffer) const;
+  Status Deserialize(QLClient client, Slice* data);
 
   std::shared_ptr<const Schema> schema_;
   std::vector<QLValue> values_;
@@ -104,22 +108,23 @@ class QLRowBlock {
   void Reserve(size_t size);
 
   // Add a row to the rowblock.
-  CHECKED_STATUS AddRow(const QLRow& row);
+  Status AddRow(const QLRow& row);
 
   //------------------------------------ debug string ---------------------------------------
   // Return a string for debugging.
   std::string ToString() const;
 
   //----------------------------- serializer / deserializer ---------------------------------
-  void Serialize(QLClient client, faststring* buffer) const;
-  CHECKED_STATUS Deserialize(QLClient client, Slice* data);
+  void Serialize(QLClient client, WriteBuffer* buffer) const;
+  std::string SerializeToString() const;
+  Status Deserialize(QLClient client, Slice* data);
 
   //-------------------------- utility functions for rows data ------------------------------
   // Return row count.
   static Result<size_t> GetRowCount(QLClient client, const std::string& data);
 
   // Append rows data. Caller should ensure the column schemas are the same.
-  static CHECKED_STATUS AppendRowsData(QLClient client, const std::string& src, std::string* dst);
+  static Status AppendRowsData(QLClient client, const std::string& src, std::string* dst);
 
   // Return rows data of 0 (empty) rows.
   static std::string ZeroRowsData(QLClient client);
@@ -132,5 +137,3 @@ class QLRowBlock {
 };
 
 } // namespace yb
-
-#endif // YB_COMMON_QL_ROWBLOCK_H

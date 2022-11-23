@@ -19,16 +19,19 @@
 #include "yb/cdc/cdc_service.proxy.h"
 
 #include "yb/client/client.h"
+#include "yb/client/client_error.h"
 #include "yb/client/client-internal.h"
+#include "yb/client/table.h"
 #include "yb/client/meta_cache.h"
 #include "yb/client/tablet_rpc.h"
 
 #include "yb/rpc/rpc.h"
+#include "yb/rpc/rpc_controller.h"
 
 #include "yb/tserver/tserver_service.pb.h"
 #include "yb/tserver/tserver_service.proxy.h"
-#include "yb/tserver/tserver.pb.h"
 
+#include "yb/util/trace.h"
 
 using namespace std::literals;
 
@@ -44,6 +47,7 @@ class CDCWriteRpc : public rpc::Rpc, public client::internal::TabletRpc {
  public:
   CDCWriteRpc(CoarseTimePoint deadline,
               client::internal::RemoteTablet *tablet,
+              const std::shared_ptr<client::YBTable>& table,
               client::YBClient *client,
               WriteRequestPB *req,
               WriteCDCRecordCallback callback,
@@ -56,12 +60,11 @@ class CDCWriteRpc : public rpc::Rpc, public client::internal::TabletRpc {
                  this,
                  this,
                  tablet,
-                 // TODO(tsplit): decide whether we need to get info about stale table partitions
-                 // here.
-                 /* table =*/ nullptr,
+                 table,
                  mutable_retrier(),
                  trace_.get()),
-        callback_(std::move(callback)) {
+        callback_(std::move(callback)),
+        table_(table) {
     req_.Swap(req);
   }
 
@@ -76,6 +79,15 @@ class CDCWriteRpc : public rpc::Rpc, public client::internal::TabletRpc {
   void Finished(const Status &status) override {
     Status new_status = status;
     if (invoker_.Done(&new_status)) {
+      // Check for any errors due to consumer side tablet splitting. If so, then mark partitions
+      // as stale so that when we retry the ApplyChanges call, we will refresh the partitions and
+      // apply changes to the proper tablets.
+      if (new_status.IsNotFound() ||
+          client::internal::ErrorCode(response_error())
+              == tserver::TabletServerErrorPB::TABLET_SPLIT ||
+          client::ClientError(new_status) == client::ClientErrorCode::kTablePartitionListIsStale) {
+        table_->MarkPartitionsAsStale();
+      }
       InvokeCallback(new_status);
     }
   }
@@ -108,7 +120,7 @@ class CDCWriteRpc : public rpc::Rpc, public client::internal::TabletRpc {
   void InvokeCallback(const Status &status) {
     if (!called_) {
       called_ = true;
-      callback_(status, resp_);
+      callback_(status, std::move(resp_));
     } else {
       LOG(WARNING) << "Multiple invocation of CDCWriteRpc: "
                    << status.ToString() << " : " << resp_.DebugString();
@@ -127,17 +139,19 @@ class CDCWriteRpc : public rpc::Rpc, public client::internal::TabletRpc {
   WriteResponsePB resp_;
   WriteCDCRecordCallback callback_;
   bool called_ = false;
+  const std::shared_ptr<client::YBTable>& table_;
 };
 
 rpc::RpcCommandPtr CreateCDCWriteRpc(
     CoarseTimePoint deadline,
     client::internal::RemoteTablet* tablet,
+    const std::shared_ptr<client::YBTable>& table,
     client::YBClient* client,
     WriteRequestPB* req,
     WriteCDCRecordCallback callback,
     bool use_local_tserver) {
   return std::make_shared<CDCWriteRpc>(
-      deadline, tablet, client, req, std::move(callback), use_local_tserver);
+      deadline, tablet, table, client, req, std::move(callback), use_local_tserver);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -146,49 +160,44 @@ rpc::RpcCommandPtr CreateCDCWriteRpc(
 
 class CDCReadRpc : public rpc::Rpc, public client::internal::TabletRpc {
  public:
-  CDCReadRpc(CoarseTimePoint deadline,
-             client::internal::RemoteTablet *tablet,
-             client::YBClient *client,
-             GetChangesRequestPB* req,
-             GetChangesCDCRpcCallback callback)
+  CDCReadRpc(
+      CoarseTimePoint deadline,
+      client::internal::RemoteTablet *tablet,
+      client::YBClient *client,
+      GetChangesRequestPB *req,
+      GetChangesCDCRpcCallback callback)
       : rpc::Rpc(deadline, client->messenger(), &client->proxy_cache()),
         trace_(new Trace),
-        invoker_(false /* local_tserver_only */,
-                 false /* consistent_prefix */,
-                 client,
-                 this,
-                 this,
-                 tablet,
-                 // TODO(tsplit): decide whether we need to get info about stale table partitions
-                 // here.
-                 /* table =*/ nullptr,
-                 mutable_retrier(),
-                 trace_.get()),
+        invoker_(
+            false /* local_tserver_only */,
+            false /* consistent_prefix */,
+            client,
+            this,
+            this,
+            tablet,
+            /* table =*/nullptr,
+            mutable_retrier(),
+            trace_.get(),
+            master::IncludeInactive::kTrue),
         callback_(std::move(callback)) {
     req_.Swap(req);
   }
 
-  virtual ~CDCReadRpc() {
-    CHECK(called_);
-  }
+  virtual ~CDCReadRpc() { CHECK(called_); }
 
-  void SendRpc() override {
-    invoker_.Execute(tablet_id());
-  }
+  void SendRpc() override { invoker_.Execute(tablet_id()); }
 
   void Finished(const Status &status) override {
-    auto retained = shared_from_this(); // Ensure we don't destruct until after the callback.
+    auto retained = shared_from_this();  // Ensure we don't destruct until after the callback.
     Status new_status = status;
     if (invoker_.Done(&new_status)) {
       InvokeCallback(new_status);
     }
   }
 
-  void Failed(const Status &status) override { }
+  void Failed(const Status &status) override {}
 
-  void Abort() override {
-    rpc::Rpc::Abort();
-  }
+  void Abort() override { rpc::Rpc::Abort(); }
 
   const tserver::TabletServerErrorPB *response_error() const override {
     // Clear the contents of last_error_, since this function is invoked again on retry.
@@ -222,18 +231,17 @@ class CDCReadRpc : public rpc::Rpc, public client::internal::TabletRpc {
   void SendRpcToTserver(int attempt_num) override {
     // should be fast because the proxy cache has EndPoint from the tablet lookup.
     cdc_proxy_ = std::make_shared<CDCServiceProxy>(
-       &invoker_.client().proxy_cache(), invoker_.ProxyEndpoint());
+        &invoker_.client().proxy_cache(), invoker_.ProxyEndpoint());
 
     auto self = std::static_pointer_cast<CDCReadRpc>(shared_from_this());
-    InvokeAsync(cdc_proxy_.get(),
+    InvokeAsync(
+        cdc_proxy_.get(),
         PrepareController(),
         std::bind(&CDCReadRpc::Finished, self, Status::OK()));
   }
 
  private:
-  const std::string &tablet_id() const {
-    return req_.tablet_id();
-  }
+  const std::string &tablet_id() const { return req_.tablet_id(); }
 
   std::string ToString() const override {
     return Format("CDCReadRpc: $0, retrier: $1", req_, retrier());
@@ -242,16 +250,17 @@ class CDCReadRpc : public rpc::Rpc, public client::internal::TabletRpc {
   void InvokeCallback(const Status &status) {
     if (!called_) {
       called_ = true;
+      // Can std::move since this is only called once the rpc is in a Done state, at which point
+      // resp_ will no longer be modified or accessed.
       callback_(status, std::move(resp_));
     } else {
-      LOG(WARNING) << "Multiple invocation of CDCReadRpc: "
-                   << status.ToString() << " : " << resp_.DebugString();
+      LOG(WARNING) << "Multiple invocation of CDCReadRpc: " << status.ToString() << " : "
+                   << req_.DebugString();
     }
   }
 
-  void InvokeAsync(CDCServiceProxy *cdc_proxy,
-                   rpc::RpcController *controller,
-                   rpc::ResponseCallback callback) {
+  void InvokeAsync(
+      CDCServiceProxy *cdc_proxy, rpc::RpcController *controller, rpc::ResponseCallback callback) {
     cdc_proxy->GetChangesAsync(req_, &resp_, controller, std::move(callback));
   }
 

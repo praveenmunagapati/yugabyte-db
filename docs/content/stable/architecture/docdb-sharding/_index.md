@@ -10,8 +10,8 @@ menu:
     identifier: architecture-docdb-sharding
     parent: architecture
     weight: 1130
+type: indexpage
 ---
-
 {{< note title="Note" >}}
 
 YugabyteDB's sharding architecture is inspired by <a href="https://research.google.com/archive/spanner-osdi2012.pdf">Google Spanner</a>.
@@ -23,7 +23,6 @@ This section describes how sharding works in DocDB. A distributed SQL database n
 Data sharding helps in scalability and geo-distribution by horizontally partitioning data. A SQL table is decomposed into multiple sets of rows according to a specific sharding strategy. Each of these sets of rows is called a shard. These shards are distributed across multiple server nodes (containers, VMs, bare-metal) in a shared-nothing architecture. This ensures that the shards do not get bottlenecked by the compute, storage and networking resources available at a single node. High availability is achieved by replicating each shard across multiple nodes. However, the application interacts with a SQL table as one logical unit and remains agnostic to the physical placement of the shards.
 
 DocDB supports range and hash sharding natively.
-
 
 <div class="row">
   <div class="col-12 col-md-6 col-lg-12 col-xl-6">

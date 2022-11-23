@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_TSERVER_REMOTE_BOOTSTRAP_FILE_DOWNLOADER_H
-#define YB_TSERVER_REMOTE_BOOTSTRAP_FILE_DOWNLOADER_H
+#pragma once
 
 #include <memory>
 #include <string>
@@ -25,7 +24,7 @@
 #include "yb/tserver/remote_bootstrap.pb.h"
 
 #include "yb/util/monotime.h"
-#include "yb/util/status.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 
@@ -45,7 +44,7 @@ class RemoteBootstrapFileDownloader {
       std::shared_ptr<RemoteBootstrapServiceProxy> proxy, std::string session_id,
       MonoDelta session_idle_timeout);
 
-  CHECKED_STATUS DownloadFile(
+  Status DownloadFile(
       const tablet::FilePB& file_pb, const std::string& dir, DataIdPB* data_id);
 
   // Download a single remote file. The block and WAL implementations delegate
@@ -56,7 +55,7 @@ class RemoteBootstrapFileDownloader {
   // Only used in one compilation unit, otherwise the implementation would
   // need to be in the header.
   template<class Appendable>
-  CHECKED_STATUS DownloadFile(const DataIdPB& data_id, Appendable* appendable);
+  Status DownloadFile(const DataIdPB& data_id, Appendable* appendable);
 
   FsManager& fs_manager() const {
     return fs_manager_;
@@ -67,7 +66,7 @@ class RemoteBootstrapFileDownloader {
   }
 
  private:
-  CHECKED_STATUS VerifyData(uint64_t offset, const DataChunkPB& resp);
+  Status VerifyData(uint64_t offset, const DataChunkPB& resp);
 
   const std::string& LogPrefix() const {
     return log_prefix_;
@@ -84,9 +83,7 @@ class RemoteBootstrapFileDownloader {
   std::unordered_map<uint64_t, std::string> inode2file_;
 };
 
-CHECKED_STATUS UnwindRemoteError(const Status& status, const rpc::RpcController& controller);
+Status UnwindRemoteError(const Status& status, const rpc::RpcController& controller);
 
 } // namespace tserver
 } // namespace yb
-
-#endif // YB_TSERVER_REMOTE_BOOTSTRAP_FILE_DOWNLOADER_H

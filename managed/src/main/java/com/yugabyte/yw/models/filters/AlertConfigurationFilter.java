@@ -11,10 +11,14 @@ package com.yugabyte.yw.models.filters;
 
 import com.yugabyte.yw.common.AlertTemplate;
 import com.yugabyte.yw.models.AlertConfiguration;
+import com.yugabyte.yw.models.AlertConfiguration.Severity;
+import com.yugabyte.yw.models.AlertConfigurationTarget;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import lombok.Builder;
 import lombok.NonNull;
 import lombok.Value;
@@ -27,10 +31,19 @@ public class AlertConfigurationFilter {
   String name;
   Boolean active;
   AlertConfiguration.TargetType targetType;
-  AlertTemplate template;
-  UUID targetUuid;
+  AlertConfigurationTarget target;
+  Set<AlertTemplate> templates;
+  Severity severity;
   DestinationType destinationType;
   UUID destinationUuid;
+  Boolean suspended;
+
+  public List<String> getTemplatesStr() {
+    if (templates == null) {
+      return null;
+    }
+    return templates.stream().map(AlertTemplate::name).collect(Collectors.toList());
+  }
 
   // Can't use @Builder(toBuilder = true) as it sets null fields as well, which breaks non null
   // checks.
@@ -51,11 +64,14 @@ public class AlertConfigurationFilter {
     if (targetType != null) {
       result.targetType(targetType);
     }
-    if (template != null) {
-      result.template(template);
+    if (target != null) {
+      result.target(target);
     }
-    if (targetUuid != null) {
-      result.targetUuid(targetUuid);
+    if (templates != null) {
+      result.templates(templates);
+    }
+    if (severity != null) {
+      result.severity(severity);
     }
     if (destinationType != null) {
       result.destinationType(destinationType);
@@ -63,11 +79,15 @@ public class AlertConfigurationFilter {
     if (destinationUuid != null) {
       result.destinationUuid(destinationUuid);
     }
+    if (suspended != null) {
+      result.suspended(suspended);
+    }
     return result;
   }
 
   public static class AlertConfigurationFilterBuilder {
     Set<UUID> uuids = new HashSet<>();
+    Set<AlertTemplate> templates = new HashSet<>();
 
     public AlertConfigurationFilterBuilder uuid(@NonNull UUID uuid) {
       this.uuids.add(uuid);
@@ -100,13 +120,23 @@ public class AlertConfigurationFilter {
       return this;
     }
 
-    public AlertConfigurationFilterBuilder template(@NonNull AlertTemplate template) {
-      this.template = template;
+    public AlertConfigurationFilterBuilder target(@NonNull AlertConfigurationTarget target) {
+      this.target = target;
       return this;
     }
 
-    public AlertConfigurationFilterBuilder targetUuid(@NonNull UUID targetUuid) {
-      this.targetUuid = targetUuid;
+    public AlertConfigurationFilterBuilder template(@NonNull AlertTemplate template) {
+      this.templates.add(template);
+      return this;
+    }
+
+    public AlertConfigurationFilterBuilder templates(@NonNull Collection<AlertTemplate> templates) {
+      this.templates.addAll(templates);
+      return this;
+    }
+
+    public AlertConfigurationFilterBuilder severity(@NonNull Severity severity) {
+      this.severity = severity;
       return this;
     }
 

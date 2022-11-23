@@ -11,13 +11,17 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_SCOPE_EXIT_H
-#define YB_UTIL_SCOPE_EXIT_H
+#pragma once
+
+#include <type_traits>
+#include <utility>
+
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 
 template <class F>
-class ScopeExitLambda {
+class NODISCARD_CLASS ScopeExitLambda {
  public:
   ScopeExitLambda(const ScopeExitLambda&) = delete;
   void operator=(const ScopeExitLambda&) = delete;
@@ -50,5 +54,3 @@ ScopeExitLambda<typename std::remove_reference<F>::type> ScopeExit(F&& f) {
 }
 
 } // namespace yb
-
-#endif // YB_UTIL_SCOPE_EXIT_H

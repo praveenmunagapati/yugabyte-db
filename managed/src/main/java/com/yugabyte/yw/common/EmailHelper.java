@@ -7,9 +7,9 @@ import com.google.inject.Singleton;
 import com.typesafe.config.Config;
 import com.yugabyte.yw.common.alerts.SmtpData;
 import com.yugabyte.yw.common.config.RuntimeConfigFactory;
-import com.yugabyte.yw.forms.CustomerRegisterFormData;
+import com.yugabyte.yw.forms.AlertingData;
 import com.yugabyte.yw.models.Customer;
-import com.yugabyte.yw.models.CustomerConfig;
+import com.yugabyte.yw.models.configs.CustomerConfig;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -70,7 +70,7 @@ public class EmailHelper {
       SmtpData smtpData,
       Map<String, String> content)
       throws MessagingException {
-    LOG.info("Sending email: '{}' to '{}'", subject, destinations);
+    LOG.info("Sending email: '{}'", subject);
 
     Session session =
         Session.getInstance(
@@ -195,8 +195,7 @@ public class EmailHelper {
     String ybEmail = getYbEmail(customer);
     CustomerConfig config = CustomerConfig.getAlertConfig(customer.uuid);
     if (config != null) {
-      CustomerRegisterFormData.AlertingData alertingData =
-          Json.fromJson(config.data, CustomerRegisterFormData.AlertingData.class);
+      AlertingData alertingData = Json.fromJson(config.data, AlertingData.class);
       if (alertingData.sendAlertsToYb && !StringUtils.isEmpty(ybEmail)) {
         destinations.add(ybEmail);
       }

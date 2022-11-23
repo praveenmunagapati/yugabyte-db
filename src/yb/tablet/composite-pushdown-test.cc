@@ -30,15 +30,34 @@
 // under the License.
 //
 
+#include <algorithm>
+#include <limits>
+#include <string>
+#include <unordered_set>
+#include <vector>
+
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
-#include "yb/common/ql_expr.h"
+#include "yb/common/partial_row.h"
+#include "yb/common/ql_protocol_util.h"
+#include "yb/common/ql_rowblock.h"
 #include "yb/common/schema.h"
+
+#include "yb/gutil/strings/numbers.h"
+#include "yb/gutil/strings/substitute.h"
+
+#include "yb/tablet/local_tablet_writer.h"
+#include "yb/tablet/read_result.h"
+#include "yb/tablet/tablet-test-util.h"
 #include "yb/tablet/tablet.h"
-#include "yb/tablet/tablet-test-base.h"
+
+#include "yb/util/env.h"
 #include "yb/util/test_macros.h"
 #include "yb/util/test_util.h"
+
+using std::string;
+using std::vector;
 
 namespace yb {
 namespace tablet {
@@ -63,10 +82,10 @@ class CompositePushdownTest : public YBTabletTest {
   }
 
   void FillTestTablet() {
-    uint32_t nrows = 10 * 12 * 28;
+    int nrows = 10 * 12 * 28;
     int i = 0;
 
-    LocalTabletWriter writer(tablet().get());
+    LocalTabletWriter writer(tablet());
     for (int16_t year = 2000; year <= 2010; year++) {
       for (int8_t month = 1; month <= 12; month++) {
         for (int8_t day = 1; day <= 28; day++) {
@@ -110,13 +129,14 @@ class CompositePushdownTest : public YBTabletTest {
     QLReadRequestResult result;
     TransactionMetadataPB transaction;
     QLAddColumns(schema_, {}, req);
+    WriteBuffer rows_data(1024);
     EXPECT_OK(tablet()->HandleQLReadRequest(
-        CoarseTimePoint::max() /* deadline */, read_time, *req, transaction, &result));
+        CoarseTimePoint::max() /* deadline */, read_time, *req, transaction, &result, &rows_data));
 
     ASSERT_EQ(QLResponsePB::YQL_STATUS_OK, result.response.status())
         << "Error: " << result.response.error_message();
 
-    auto row_block = CreateRowBlock(QLClient::YQL_CLIENT_CQL, schema_, result.rows_data);
+    auto row_block = CreateRowBlock(QLClient::YQL_CLIENT_CQL, schema_, rows_data.ToBuffer());
     for (const auto& row : row_block->rows()) {
       results->push_back(row.ToString());
     }

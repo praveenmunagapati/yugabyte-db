@@ -7,6 +7,7 @@ import { YBModal } from '../../common/forms/fields';
 import { getPromiseState } from '../../../utils/PromiseUtils';
 import { connect } from 'react-redux';
 import { isEmptyObject } from '../../../utils/ObjectUtils';
+import { getPrimaryCluster, getReadOnlyCluster } from '../../../utils/UniverseUtils';
 import { YBCopyButton } from '../../../components/common/descriptors';
 import { MenuItem } from 'react-bootstrap';
 
@@ -35,11 +36,22 @@ class NodeConnectModal extends Component {
   };
 
   render() {
-    const { currentRow, label, accessKeys, providerUUID } = this.props;
+    const {
+      currentRow,
+      label,
+      accessKeys,
+      providerUUID,
+      runtimeConfigs,
+      currentUniverse,
+      clusterType
+    } = this.props;
     const nodeIPs = { privateIP: currentRow.privateIP, publicIP: currentRow.publicIP };
     let accessCommand = null;
     let accessTitle = null;
-
+    const cluster =
+      clusterType === 'primary'
+        ? getPrimaryCluster(currentUniverse.data?.universeDetails?.clusters)
+        : getReadOnlyCluster(currentUniverse.data?.universeDetails?.clusters);
     if (
       (isEmptyObject(nodeIPs) || currentRow.cloudInfo.cloud !== 'kubernetes') &&
       !getPromiseState(accessKeys).isSuccess()
@@ -52,16 +64,42 @@ class NodeConnectModal extends Component {
       return <span />;
     }
 
+    const tectiaSSH = runtimeConfigs.data.configEntries.find(
+      (c) => c.key === 'yb.security.ssh2_enabled'
+    );
+    let isTectiaSSHEnabled = false;
+
+    if (tectiaSSH?.value === 'true') {
+      isTectiaSSHEnabled = true;
+    }
+
     if (currentRow.cloudInfo.cloud === 'kubernetes') {
       accessTitle = 'Access your pod';
-      const podNamespace = currentRow.privateIP.split(".")[2];
-      accessCommand = `kubectl exec -it -n ${podNamespace} ${currentRow.name.split('_')[0]} -- sh`;
+      const podNamespace = currentRow.privateIP?.split('.')[2];
+      const podName = currentRow.privateIP?.split('.')[0];
+      let container_name_selector = '';
+
+      if (currentRow.isMaster === 'Details') {
+        container_name_selector = '-c yb-master';
+      } else if (currentRow.isTServer === 'Details') {
+        container_name_selector = '-c yb-tserver';
+      }
+
+      accessCommand = `kubectl exec -it -n ${podNamespace} ${podName} ${container_name_selector} -- sh`;
     } else {
       accessTitle = 'Access your node';
-      const accessKey = accessKeys.data.filter((key) => key.idKey.providerUUID === providerUUID)[0];
+      const accessKeyCode = cluster.userIntent.accessKeyCode;
+      const accessKey = accessKeys.data.find(
+        (key) => key.idKey.providerUUID === providerUUID && key.idKey.keyCode === accessKeyCode
+      );
+
       const accessKeyInfo = accessKey.keyInfo;
-      const sshPort = accessKeyInfo.sshPort || 54422;
-      accessCommand = `sudo ssh -i ${accessKeyInfo.privateKey} -ostricthostkeychecking=no -p ${sshPort} yugabyte@${nodeIPs.privateIP}`;
+      const sshPort = accessKeyInfo.sshPort || 22;
+      if (!isTectiaSSHEnabled) {
+        accessCommand = `sudo ssh -i ${accessKeyInfo.privateKey} -ostricthostkeychecking=no -p ${sshPort} yugabyte@${nodeIPs.privateIP}`;
+      } else {
+        accessCommand = `sshg3 -K ${accessKeyInfo.privateKey} -ostricthostkeychecking=no -p ${sshPort} yugabyte@${nodeIPs.privateIP}`;
+      }
     }
 
     const btnId = _.uniqueId('node_action_btn_');
@@ -89,7 +127,9 @@ class NodeConnectModal extends Component {
 
 function mapStateToProps(state, ownProps) {
   return {
-    accessKeys: state.cloud.accessKeys
+    accessKeys: state.cloud.accessKeys,
+    runtimeConfigs: state.customer.runtimeConfigs,
+    currentUniverse: state.universe.currentUniverse
   };
 }
 

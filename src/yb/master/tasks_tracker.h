@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_MASTER_TASKS_TRACKER_H
-#define YB_MASTER_TASKS_TRACKER_H
+#pragma once
 
 #include <vector>
 
@@ -43,22 +42,21 @@ class TasksTracker : public RefCountedThreadSafe<TasksTracker> {
   void Reset();
 
   // Add task to the tracking list.
-  void AddTask(std::shared_ptr<MonitoredTask> task);
+  void AddTask(std::shared_ptr<server::MonitoredTask> task);
 
   // Cleanup old tasks that are older than a specific time.
   void CleanupOldTasks();
 
   // Retrieve most recent tasks for displaying in master UI.
-  std::vector<std::shared_ptr<MonitoredTask>> GetTasks();
+  std::vector<std::shared_ptr<server::MonitoredTask>> GetTasks();
 
  private:
   const IsUserInitiated user_initiated_;
   // Lock protecting the buffer.
   mutable rw_spinlock lock_;
   // List of most recent tasks.
-  boost::circular_buffer<std::shared_ptr<MonitoredTask>> tasks_;
+  boost::circular_buffer<std::shared_ptr<server::MonitoredTask>> tasks_;
 };
 
 } // namespace master
 } // namespace yb
-#endif // YB_MASTER_TASKS_TRACKER_H

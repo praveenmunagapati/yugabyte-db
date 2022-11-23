@@ -21,10 +21,15 @@ import com.yugabyte.yw.common.ShellResponse;
 import com.yugabyte.yw.forms.CertsRotateParams.CertRotationType;
 import com.yugabyte.yw.forms.UpgradeTaskParams;
 import com.yugabyte.yw.forms.UpgradeTaskParams.UpgradeTaskType;
+import com.yugabyte.yw.forms.VMImageUpgradeParams.VmUpgradeTaskType;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.Universe.UniverseUpdater;
 import com.yugabyte.yw.models.helpers.NodeDetails;
+import com.yugabyte.yw.models.helpers.NodeStatus;
 import com.yugabyte.yw.models.helpers.PlatformMetrics;
+import com.yugabyte.yw.models.helpers.NodeDetails.MasterState;
+import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
+
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -44,6 +49,9 @@ public class AnsibleConfigureServers extends NodeTaskBase {
   public static class Params extends NodeTaskParams {
     public UpgradeTaskType type = UpgradeTaskParams.UpgradeTaskType.Everything;
     public String ybSoftwareVersion = null;
+
+    public boolean enableybc;
+    public String ybcSoftwareVersion = null;
 
     // Optional params.
     public boolean isMasterInShellMode = false;
@@ -67,8 +75,6 @@ public class AnsibleConfigureServers extends NodeTaskBase {
     // > 0 => node-to-node encryption is enabled
     // < 0 => node-to-node encryption is disabled
     public int nodeToNodeChange = 0;
-    // Systemd vs Cron Option (Default: Cron)
-    public boolean useSystemd = false;
     // Cert rotation related params
     public CertRotationType rootCARotationType = CertRotationType.None;
     public CertRotationType clientRootCARotationType = CertRotationType.None;
@@ -76,6 +82,15 @@ public class AnsibleConfigureServers extends NodeTaskBase {
 
     // For cron to systemd upgrades
     public boolean isSystemdUpgrade = false;
+    // To use custom image flow if it is a VM upgrade with custom images.
+    public VmUpgradeTaskType vmUpgradeTaskType = VmUpgradeTaskType.None;
+
+    // In case a node doesn't have custom AMI, ignore the value of USE_CUSTOM_IMAGE config.
+    public boolean ignoreUseCustomImageConfig = false;
+
+    public boolean updatePackages = false;
+
+    public boolean installThirdPartyPackages = false;
   }
 
   @Override
@@ -85,13 +100,15 @@ public class AnsibleConfigureServers extends NodeTaskBase {
 
   @Override
   public void run() {
+    log.debug("AnsibleConfigureServers run called for {}", taskParams().universeUUID);
     Universe universe_temp = Universe.getOrBadRequest(taskParams().universeUUID);
     taskParams().useSystemd =
         universe_temp.getUniverseDetails().getPrimaryCluster().userIntent.useSystemd;
     // Execute the ansible command.
     ShellResponse response =
-        getNodeManager().nodeCommand(NodeManager.NodeCommandType.Configure, taskParams());
-    processShellResponse(response);
+        getNodeManager()
+            .nodeCommand(NodeManager.NodeCommandType.Configure, taskParams())
+            .processErrors();
 
     if (taskParams().type == UpgradeTaskParams.UpgradeTaskType.Everything
         && !taskParams().updateMasterAddrsOnly) {
@@ -101,7 +118,6 @@ public class AnsibleConfigureServers extends NodeTaskBase {
             getNodeManager().nodeCommand(NodeManager.NodeCommandType.CronCheck, taskParams());
       }
 
-      // Create an alert if the cronjobs failed to be created on this node.
       Universe universe = Universe.getOrBadRequest(taskParams().universeUUID);
       if (response.code != 0 || taskParams().useSystemd) {
         String nodeName = taskParams().nodeName;
@@ -123,17 +139,29 @@ public class AnsibleConfigureServers extends NodeTaskBase {
         saveUniverseDetails(updater);
       }
 
-      if (!taskParams().useSystemd) {
-        long inactiveCronNodes =
-            universe.getNodes().stream().filter(node -> !node.cronsActive).count();
-        metricService.setMetric(
-            buildMetricTemplate(PlatformMetrics.UNIVERSE_INACTIVE_CRON_NODES, universe),
-            inactiveCronNodes);
+      long inactiveCronNodes = 0;
+      if (!taskParams().useSystemd && !taskParams().isSystemdUpgrade) {
+        inactiveCronNodes = universe.getNodes().stream().filter(node -> !node.cronsActive).count();
       }
+      // Create an alert if the cronjobs failed to be created.
+      metricService.setMetric(
+          buildMetricTemplate(PlatformMetrics.UNIVERSE_INACTIVE_CRON_NODES, universe),
+          inactiveCronNodes);
 
-      // We set the node state to SoftwareInstalled when configuration type is Everything.
-      // TODO: Why is upgrade task type used to map to node state update?
-      setNodeState(NodeDetails.NodeState.SoftwareInstalled);
+      // AnsibleConfigureServers performs multiple operations based on the parameters.
+      String processType = taskParams().getProperty("processType");
+      if (ServerType.MASTER.toString().equalsIgnoreCase(processType)) {
+        setNodeStatus(NodeStatus.builder().masterState(MasterState.Configured).build());
+      } else {
+        // We set the node state to SoftwareInstalled when configuration type is Everything.
+        // TODO: Why is upgrade task type used to map to node state update?
+        setNodeStatus(NodeStatus.builder().nodeState(NodeState.SoftwareInstalled).build());
+      }
     }
+  }
+
+  @Override
+  public int getRetryLimit() {
+    return 2;
   }
 }

@@ -11,13 +11,11 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSDB_DB_FILE_NUMBERS_H
-#define YB_ROCKSDB_DB_FILE_NUMBERS_H
+#pragma once
 
 #include <unordered_set>
 
 #include <boost/container/small_vector.hpp>
-#include <boost/function.hpp>
 
 #include "yb/rocksdb/util/mutexlock.h"
 
@@ -149,5 +147,3 @@ class FileNumbersProvider : public FileNumberAdderRemover {
 };
 
 }  // namespace rocksdb
-
-#endif  // YB_ROCKSDB_DB_FILE_NUMBERS_H

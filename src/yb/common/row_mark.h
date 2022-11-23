@@ -11,12 +11,11 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_COMMON_ROW_MARK_H
-#define YB_COMMON_ROW_MARK_H
+#pragma once
 
 #include <glog/logging.h>
 
-#include "yb/common/common.pb.h"
+#include "yb/common/transaction.pb.h"
 
 namespace yb {
 
@@ -40,12 +39,10 @@ RowMarkType GetStrongestRowMarkType(std::initializer_list<RowMarkType> row_mark_
 bool IsValidRowMarkType(RowMarkType row_mark_type);
 
 /*
- * Returns whether an operation with this row mark should try to use pessimistic locking.
+ * Returns whether an operation with this row mark should try to use a higher priority txn.
  * Currently txn layer will use a best-effort approach, by setting the txn priority to highest if
  * this is a new txn (first operation within a transaction).
  */
-bool RowMarkNeedsPessimisticLock(RowMarkType row_mark_type);
+bool RowMarkNeedsHigherPriority(RowMarkType row_mark_type);
 
 } // namespace yb
-
-#endif // YB_COMMON_ROW_MARK_H

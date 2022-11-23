@@ -9,23 +9,22 @@ menu:
     name: Sharding Data
     identifier: explore-transactions-sharding-data-1-ysql
     parent: explore-scalability
-    weight: 200
-isTocNested: true
-showAsideToc: true
+    weight: 210
+type: docs
 ---
 
 <!--
 <ul class="nav nav-tabs-alt nav-tabs-yb">
 
   <li >
-    <a href="/latest/explore/transactions/scaling-transactions/" class="nav-link active">
+    <a href="../scaling-transactions/" class="nav-link active">
       <i class="icon-postgres" aria-hidden="true"></i>
       YSQL
     </a>
   </li>
 
   <li >
-    <a href="/latest/explore/transactions/distributed-transactions-ycql/" class="nav-link">
+    <a href="../distributed-transactions-ycql/" class="nav-link">
       <i class="icon-cassandra" aria-hidden="true"></i>
       YCQL
     </a>
@@ -51,7 +50,7 @@ YugabyteDB currently supports two ways of sharding data: [hash](#hash-sharding) 
 
 ### Hash sharding
 
-With (consistent) hash sharding, a sharding algorithm distributes data evenly and randomly across shards. The algorithm places each row of the table into a shard determined by computing a consistent hash on the shard column values of that row.
+With (consistent) hash sharding, a sharding algorithm distributes data evenly and randomly across shards. The algorithm places each row of the table into a shard determined by computing a consistent hash on the hash column values of that row.
 
 The hash space for hash-sharded YugabyteDB tables is the 2-byte range from `0x0000` to `0xFFFF`. A table may therefore have at most 65,536 tablets. This is expected to be sufficient in practice even for very large data sets or cluster sizes.
 
@@ -137,7 +136,7 @@ CREATE TABLE order_details (
 
 In this tutorial, you'll explore automatic sharding inside YugabyteDB. First, you'll create some tables to understand how automatic sharding works. Then, you'll insert entries one by one, and examine how the data gets distributed across the various nodes.
 
-This tutorial uses the [yugabyted](../../../reference/configuration/yugabyted) cluster management utility.
+This tutorial uses the [yugabyted](../../../reference/configuration/yugabyted/) cluster management utility.
 
 ### Create a universe
 
@@ -192,7 +191,7 @@ ycqlsh> CREATE KEYSPACE ybdemo_keyspace;
 ycqlsh> CREATE TABLE ybdemo_keyspace.cassandrakeyvalue (k text PRIMARY KEY, v blob);
 ```
 
-By default, [yugabyted](../../../reference/configuration/yugabyted) creates one tablet per node per table. So for a 3 node cluster, 3 tablets are created for the above table; one on every node. Every such tablet is replicated 3 times for fault tolerance, so that makes the total number of nodes to be 3*3=9. Every node thus contains 3 tablets, one of which it is the leader and the remaining 2 of which it is the follower. 
+By default, [yugabyted](../../../reference/configuration/yugabyted/) creates one tablet per node per table. So for a 3 node cluster, 3 tablets are created for the above table; one on every node. Every such tablet is replicated 3 times for fault tolerance, so that makes the total number of tablets to be 3*3=9. Every node thus contains 3 tablets, one of which it is the leader and the remaining 2 of which it is the follower.
 
 ### Explore tablets
 
@@ -250,9 +249,9 @@ Let's get started:
 
 1. Download the YugabyteDB workload generator JAR file (`yb-sample-apps.jar`):
 
-```sh
-$ wget https://github.com/yugabyte/yb-sample-apps/releases/download/1.3.9/yb-sample-apps.jar?raw=true -O yb-sample-apps.jar
-```
+    ```sh
+    $ wget https://github.com/yugabyte/yb-sample-apps/releases/download/1.3.9/yb-sample-apps.jar
+    ```
 
 1. Run the `CassandraKeyValue` workload application.
 

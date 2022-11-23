@@ -13,14 +13,11 @@
 
 #include "yb/util/file_system_posix.h"
 
-#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>
 
 #ifdef __linux__
 #include <linux/fs.h>
@@ -32,9 +29,10 @@
 #include "yb/util/debug/trace_event.h"
 #include "yb/util/errno.h"
 #include "yb/util/malloc.h"
+#include "yb/util/result.h"
+#include "yb/util/stats/iostats_context_imp.h"
+#include "yb/util/test_kill.h"
 #include "yb/util/thread_restrictions.h"
-
-DECLARE_bool(suicide_on_eio);
 
 // For platforms without fdatasync (like OS X)
 #ifndef fdatasync
@@ -56,9 +54,13 @@ DECLARE_bool(suicide_on_eio);
 #define POSIX_FADV_DONTNEED 4   /* [MC1] dont need these pages */
 #endif
 
-namespace yb {
+#ifdef __linux__
+#ifndef FALLOC_FL_KEEP_SIZE
+#include <linux/falloc.h>
+#endif
+#endif // __linux__
 
-Status IOError(const std::string& context, int err_number, const char* file, int line);
+DECLARE_bool(never_fsync);
 
 namespace {
 
@@ -72,9 +74,12 @@ int Fadvise(int fd, off_t offset, size_t len, int advice) {
 #endif
 }
 
-#define STATUS_IO_ERROR(context, err_number) IOError(context, err_number, __FILE__, __LINE__)
+#define STATUS_IO_ERROR(context, err_number) \
+    STATUS_FROM_ERRNO_SPECIAL_EIO_HANDLING(context, err_number)
 
 } // namespace
+
+namespace yb {
 
 #if defined(__linux__)
 size_t GetUniqueIdFromFile(int fd, uint8_t* id) {
@@ -266,3 +271,156 @@ Status PosixRandomAccessFile::InvalidateCache(size_t offset, size_t length) {
 }
 
 } // namespace yb
+
+namespace rocksdb {
+
+PosixWritableFile::PosixWritableFile(const std::string& fname, int fd,
+                                     const FileSystemOptions& options)
+    : filename_(fname), fd_(fd), filesize_(0) {
+#ifdef ROCKSDB_FALLOCATE_PRESENT
+  allow_fallocate_ = options.allow_fallocate;
+  fallocate_with_keep_size_ = options.fallocate_with_keep_size;
+#endif
+  assert(!options.use_mmap_writes);
+}
+
+PosixWritableFile::~PosixWritableFile() {
+  if (fd_ >= 0) {
+    WARN_NOT_OK(PosixWritableFile::Close(), "Failed to close posix writable file");
+  }
+}
+
+Status PosixWritableFile::Append(const Slice& data) {
+  const char* src = data.cdata();
+  size_t left = data.size();
+  while (left != 0) {
+    ssize_t done = write(fd_, src, left);
+    if (done < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return STATUS_IO_ERROR(filename_, errno);
+    }
+    left -= done;
+    src += done;
+  }
+  filesize_ += data.size();
+  return Status::OK();
+}
+
+Status PosixWritableFile::Truncate(uint64_t size) {
+  return Status::OK();
+}
+
+Status PosixWritableFile::Close() {
+  Status s;
+
+  size_t block_size;
+  size_t last_allocated_block;
+  GetPreallocationStatus(&block_size, &last_allocated_block);
+  if (last_allocated_block > 0) {
+    // trim the extra space preallocated at the end of the file
+    // NOTE(ljin): we probably don't want to surface failure as an IOError,
+    // but it will be nice to log these errors.
+    int dummy __attribute__((unused));
+    dummy = ftruncate(fd_, filesize_);
+#ifdef ROCKSDB_FALLOCATE_PRESENT
+    // in some file systems, ftruncate only trims trailing space if the
+    // new file size is smaller than the current size. Calling fallocate
+    // with FALLOC_FL_PUNCH_HOLE flag to explicitly release these unused
+    // blocks. FALLOC_FL_PUNCH_HOLE is supported on at least the following
+    // filesystems:
+    //   XFS (since Linux 2.6.38)
+    //   ext4 (since Linux 3.0)
+    //   Btrfs (since Linux 3.7)
+    //   tmpfs (since Linux 3.5)
+    // We ignore error since failure of this operation does not affect
+    // correctness.
+    IOSTATS_TIMER_GUARD(allocate_nanos);
+    if (allow_fallocate_) {
+      fallocate(fd_, FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE, filesize_,
+                block_size * last_allocated_block - filesize_);
+    }
+#endif
+  }
+
+  if (close(fd_) < 0) {
+    s = STATUS_IO_ERROR(filename_, errno);
+  }
+  fd_ = -1;
+  return s;
+}
+
+// write out the cached data to the OS cache
+Status PosixWritableFile::Flush() { return Status::OK(); }
+
+Status PosixWritableFile::Sync() {
+  if (fdatasync(fd_) < 0) {
+    return STATUS_IO_ERROR(filename_, errno);
+  }
+  return Status::OK();
+}
+
+Status PosixWritableFile::Fsync() {
+  if (FLAGS_never_fsync) {
+    return Status::OK();
+  }
+  if (fsync(fd_) < 0) {
+    return STATUS_IO_ERROR(filename_, errno);
+  }
+  return Status::OK();
+}
+
+bool PosixWritableFile::IsSyncThreadSafe() const { return true; }
+
+uint64_t PosixWritableFile::GetFileSize() { return filesize_; }
+
+Status PosixWritableFile::InvalidateCache(size_t offset, size_t length) {
+#ifndef __linux__
+  return Status::OK();
+#else
+  // free OS pages
+  int ret = Fadvise(fd_, offset, length, POSIX_FADV_DONTNEED);
+  if (ret == 0) {
+    return Status::OK();
+  }
+  return STATUS_IO_ERROR(filename_, errno);
+#endif
+}
+
+#ifdef ROCKSDB_FALLOCATE_PRESENT
+Status PosixWritableFile::Allocate(uint64_t offset, uint64_t len) {
+  assert(yb::std_util::cmp_less_equal(offset, std::numeric_limits<off_t>::max()));
+  assert(yb::std_util::cmp_less_equal(len, std::numeric_limits<off_t>::max()));
+  TEST_KILL_RANDOM("PosixWritableFile::Allocate:0", test_kill_odds);
+  IOSTATS_TIMER_GUARD(allocate_nanos);
+  int alloc_status = 0;
+  if (allow_fallocate_) {
+    alloc_status = fallocate(
+        fd_, fallocate_with_keep_size_ ? FALLOC_FL_KEEP_SIZE : 0,
+        static_cast<off_t>(offset), static_cast<off_t>(len));
+  }
+  if (alloc_status == 0) {
+    return Status::OK();
+  } else {
+    return STATUS_IO_ERROR(filename_, errno);
+  }
+}
+
+Status PosixWritableFile::RangeSync(uint64_t offset, uint64_t nbytes) {
+  assert(yb::std_util::cmp_less_equal(offset, std::numeric_limits<off_t>::max()));
+  assert(yb::std_util::cmp_less_equal(nbytes, std::numeric_limits<off_t>::max()));
+  if (sync_file_range(fd_, static_cast<off_t>(offset),
+      static_cast<off_t>(nbytes), SYNC_FILE_RANGE_WRITE) == 0) {
+    return Status::OK();
+  } else {
+    return STATUS_IO_ERROR(filename_, errno);
+  }
+}
+
+size_t PosixWritableFile::GetUniqueId(char* id) const {
+  return yb::GetUniqueIdFromFile(fd_, pointer_cast<uint8_t*>(id));
+}
+#endif
+
+} // namespace rocksdb

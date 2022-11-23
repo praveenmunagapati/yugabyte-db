@@ -19,8 +19,6 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_ROCKSDB_DB_COMPACTION_ITERATOR_H
-#define YB_ROCKSDB_DB_COMPACTION_ITERATOR_H
 
 #pragma once
 
@@ -64,6 +62,10 @@ class CompactionIterator {
                      LogBuffer* log_buffer = nullptr);
 
   void ResetRecordCounts();
+
+  // Add live ranges to this iterator.
+  // See live_key_ranges_stack_ comment for details.
+  void AddLiveRanges(const std::vector<std::pair<Slice, Slice>>& ranges);
 
   // Seek to the beginning of the compaction iterator output.
   //
@@ -161,7 +163,10 @@ class CompactionIterator {
   // is in or beyond the last file checked during the previous call
   std::vector<size_t> level_ptrs_;
   CompactionIteratorStats iter_stats_;
+
+  // Stores the disjoint live ranges of this tablet in user keyspace. Ranges at the back are
+  // lexicographically first. Ranges are popped off the back of the stack as our iteration passes
+  // them.
+  std::vector<std::pair<Slice, Slice>> live_key_ranges_stack_;
 };
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_DB_COMPACTION_ITERATOR_H

@@ -10,8 +10,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_MASTER_ASYNC_RPC_TASKS_H
-#define YB_MASTER_ASYNC_RPC_TASKS_H
+#pragma once
 
 #include <atomic>
 #include <string>
@@ -20,6 +19,8 @@
 
 #include "yb/common/constants.h"
 #include "yb/common/entity_ids.h"
+#include "yb/common/snapshot.h"
+#include "yb/common/transaction.h"
 
 #include "yb/consensus/consensus.pb.h"
 #include "yb/consensus/metadata.pb.h"
@@ -27,21 +28,26 @@
 #include "yb/gutil/ref_counted.h"
 #include "yb/gutil/strings/substitute.h"
 
-#include "yb/master/catalog_entity_info.h"
+#include "yb/master/master_fwd.h"
+#include "yb/master/catalog_manager_if.h"
+
 #include "yb/rpc/rpc_controller.h"
 
 #include "yb/server/monitored_task.h"
 
+#include "yb/tserver/tserver_fwd.h"
 #include "yb/tserver/tserver_admin.pb.h"
 #include "yb/tserver/tserver_service.pb.h"
 
-#include "yb/util/status.h"
+#include "yb/util/async_task_util.h"
+#include "yb/util/status_callback.h"
+#include "yb/util/status_fwd.h"
 #include "yb/util/memory/memory.h"
-
+#include "yb/util/metrics_fwd.h"
 
 namespace yb {
-struct TransactionMetadata;
 
+struct TransactionMetadata;
 class ThreadPool;
 
 namespace consensus {
@@ -98,8 +104,7 @@ class PickSpecificUUID : public TSPicker {
 // and sends the RPC to that server.
 class PickLeaderReplica : public TSPicker {
  public:
-  explicit PickLeaderReplica(const scoped_refptr<TabletInfo>& tablet)
-    : tablet_(tablet) {}
+  explicit PickLeaderReplica(const scoped_refptr<TabletInfo>& tablet);
 
   Status PickReplica(TSDescriptor** ts_desc) override;
 
@@ -111,23 +116,24 @@ class PickLeaderReplica : public TSPicker {
 //
 // The target tablet server is refreshed before each RPC by consulting the provided
 // TSPicker implementation.
-class RetryingTSRpcTask : public MonitoredTask {
+class RetryingTSRpcTask : public server::MonitoredTask {
  public:
   RetryingTSRpcTask(Master *master,
                     ThreadPool* callback_pool,
                     std::unique_ptr<TSPicker> replica_picker,
-                    const scoped_refptr<TableInfo>& table);
+                    const scoped_refptr<TableInfo>& table,
+                    AsyncTaskThrottlerBase* async_task_throttler);
 
   ~RetryingTSRpcTask();
 
   // Send the subclass RPC request.
-  CHECKED_STATUS Run();
+  Status Run();
 
   // Abort this task and return its value before it was successfully aborted. If the task entered
   // a different terminal state before we were able to abort it, return that state.
-  MonitoredTaskState AbortAndReturnPrevState(const Status& status) override;
+  server::MonitoredTaskState AbortAndReturnPrevState(const Status& status) override;
 
-  MonitoredTaskState state() const override {
+  server::MonitoredTaskState state() const override {
     return state_.load(std::memory_order_acquire);
   }
 
@@ -153,24 +159,24 @@ class RetryingTSRpcTask : public MonitoredTask {
   virtual Status ResetTSProxy();
 
   // Overridable log prefix with reasonable default.
-  std::string LogPrefix() const {
-    return strings::Substitute("$0 (task=$1, state=$2): ", description(), this, AsString(state()));
-  }
+  std::string LogPrefix() const;
 
-  bool PerformStateTransition(MonitoredTaskState expected, MonitoredTaskState new_state)
+  bool PerformStateTransition(
+      server::MonitoredTaskState expected, server::MonitoredTaskState new_state)
       WARN_UNUSED_RESULT {
     return state_.compare_exchange_strong(expected, new_state);
   }
 
   void TransitionToTerminalState(
-      MonitoredTaskState expected, MonitoredTaskState terminal_state, const Status& status);
-  bool TransitionToWaitingState(MonitoredTaskState expected);
+      server::MonitoredTaskState expected, server::MonitoredTaskState terminal_state,
+      const Status& status);
+  bool TransitionToWaitingState(server::MonitoredTaskState expected);
 
   // Transition this task state from running to complete.
   void TransitionToCompleteState();
 
   // Transition this task state from expected to failed with specified status.
-  void TransitionToFailedState(MonitoredTaskState expected, const Status& status);
+  void TransitionToFailedState(server::MonitoredTaskState expected, const Status& status);
 
   virtual void Finished(const Status& status) {}
 
@@ -193,16 +199,20 @@ class RetryingTSRpcTask : public MonitoredTask {
   // Note: This is the last thing function called, to guarantee it's the last work done by the task.
   virtual void UnregisterAsyncTaskCallback();
 
-  string table_name() const {
-    return !table_ ? "" : table_->ToString();
-  }
+  std::string table_name() const;
 
   Master* const master_;
   ThreadPool* const callback_pool_;
   const std::unique_ptr<TSPicker> replica_picker_;
   const scoped_refptr<TableInfo> table_;
+  AsyncTaskThrottlerBase* async_task_throttler_;
+
+  void UpdateMetrics(scoped_refptr<Histogram> metric, MonoTime start_time,
+                     const std::string& metric_name,
+                     const std::string& metric_type);
 
   MonoTime start_ts_;
+  MonoTime attempt_start_ts_;
   MonoTime end_ts_;
   MonoTime deadline_;
 
@@ -211,6 +221,7 @@ class RetryingTSRpcTask : public MonitoredTask {
   TSDescriptor* target_ts_desc_ = nullptr;
   std::shared_ptr<tserver::TabletServerServiceProxy> ts_proxy_;
   std::shared_ptr<tserver::TabletServerAdminServiceProxy> ts_admin_proxy_;
+  std::shared_ptr<tserver::TabletServerBackupServiceProxy> ts_backup_proxy_;
   std::shared_ptr<consensus::ConsensusServiceProxy> consensus_proxy_;
 
   std::atomic<rpc::ScheduledTaskId> reactor_task_id_{rpc::kInvalidTaskId};
@@ -222,12 +233,13 @@ class RetryingTSRpcTask : public MonitoredTask {
  private:
   // Returns true if we should impose a limit in the number of retries for this task type.
   bool RetryLimitTaskType() {
-    return type() != ASYNC_CREATE_REPLICA && type() != ASYNC_DELETE_REPLICA;
+    return type() != server::MonitoredTaskType::kCreateReplica &&
+           type() != server::MonitoredTaskType::kDeleteReplica;
   }
 
   // Returns true if we should not retry for this task type.
   bool NoRetryTaskType() {
-    return type() == ASYNC_FLUSH_TABLETS;
+    return type() == server::MonitoredTaskType::kFlushTablets;
   }
 
   // Reschedules the current task after a backoff delay.
@@ -244,7 +256,7 @@ class RetryingTSRpcTask : public MonitoredTask {
   // Clean up request and release resources. May call 'delete this'.
   void UnregisterAsyncTask();
 
-  CHECKED_STATUS Failed(const Status& status);
+  Status Failed(const Status& status);
 
   // Only abort this task on reactor if it has been scheduled.
   void AbortIfScheduled();
@@ -253,10 +265,8 @@ class RetryingTSRpcTask : public MonitoredTask {
   virtual int max_delay_ms();
 
   // Use state() and MarkX() accessors.
-  std::atomic<MonitoredTaskState> state_{MonitoredTaskState::kWaiting};
+  std::atomic<server::MonitoredTaskState> state_{server::MonitoredTaskState::kWaiting};
 };
-
-using RetryingTSRpcTaskPtr = std::shared_ptr<RetryingTSRpcTask>;
 
 // RetryingTSRpcTask subclass which always retries the same tablet server,
 // identified by its UUID.
@@ -265,11 +275,13 @@ class RetrySpecificTSRpcTask : public RetryingTSRpcTask {
   RetrySpecificTSRpcTask(Master* master,
                          ThreadPool* callback_pool,
                          const std::string& permanent_uuid,
-                         const scoped_refptr<TableInfo>& table)
+                         const scoped_refptr<TableInfo>& table,
+                         AsyncTaskThrottlerBase* async_task_throttler)
     : RetryingTSRpcTask(master,
                         callback_pool,
                         std::unique_ptr<TSPicker>(new PickSpecificUUID(master, permanent_uuid)),
-                        table),
+                        table,
+                        async_task_throttler),
       permanent_uuid_(permanent_uuid) {
   }
 
@@ -287,11 +299,14 @@ class AsyncTabletLeaderTask : public RetryingTSRpcTask {
       Master* master, ThreadPool* callback_pool, const scoped_refptr<TabletInfo>& tablet,
       const scoped_refptr<TableInfo>& table);
 
+  ~AsyncTabletLeaderTask();
+
   std::string description() const override;
+
+  TabletId tablet_id() const override;
 
  protected:
   TabletServerId permanent_uuid() const;
-  TabletId tablet_id() const override;
 
   scoped_refptr<TabletInfo> tablet_;
 };
@@ -307,14 +322,13 @@ class AsyncCreateReplica : public RetrySpecificTSRpcTask {
                      const scoped_refptr<TabletInfo>& tablet,
                      const std::vector<SnapshotScheduleId>& snapshot_schedules);
 
-  Type type() const override { return ASYNC_CREATE_REPLICA; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kCreateReplica;
+  }
 
   std::string type_name() const override { return "Create Tablet"; }
 
-  std::string description() const override {
-    return Format("CreateTablet RPC for tablet $0 ($1) on TS=$2",
-                  tablet_id_, table_name(), permanent_uuid_);
-  }
+  std::string description() const override;
 
  protected:
   TabletId tablet_id() const override { return tablet_id_; }
@@ -334,16 +348,16 @@ class AsyncStartElection : public RetrySpecificTSRpcTask {
   AsyncStartElection(Master *master,
                      ThreadPool *callback_pool,
                      const std::string& permanent_uuid,
-                     const scoped_refptr<TabletInfo>& tablet);
+                     const scoped_refptr<TabletInfo>& tablet,
+                     bool initial_election);
 
-  Type type() const override { return START_ELECTION; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kStartElection;
+  }
 
   std::string type_name() const override { return "Hinted Leader Start Election"; }
 
-  std::string description() const override {
-    return Format("RunLeaderElection RPC for tablet $0 ($1) on TS=$2",
-                  tablet_id_, table_name(), permanent_uuid_);
-  }
+  std::string description() const override;
 
  protected:
   TabletId tablet_id() const override { return tablet_id_; }
@@ -357,6 +371,35 @@ class AsyncStartElection : public RetrySpecificTSRpcTask {
   consensus::RunLeaderElectionResponsePB resp_;
 };
 
+// Send a PrepareDeleteTransactionTablet() RPC request.
+class AsyncPrepareDeleteTransactionTablet : public RetrySpecificTSRpcTask {
+ public:
+  AsyncPrepareDeleteTransactionTablet(
+      Master* master, ThreadPool* callback_pool, const std::string& permanent_uuid,
+      const scoped_refptr<TableInfo>& table, const scoped_refptr<TabletInfo>& tablet,
+      const std::string& msg, HideOnly hide_only);
+
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kPrepareDeleteTransactionTablet;
+  }
+
+  std::string type_name() const override { return "Prepare Delete Transaction Tablet"; }
+
+  std::string description() const override;
+
+ protected:
+  TabletId tablet_id() const override;
+
+  void HandleResponse(int attempt) override;
+  bool SendRequest(int attempt) override;
+  void UnregisterAsyncTaskCallback() override;
+
+  const scoped_refptr<TabletInfo> tablet_;
+  const std::string msg_;
+  HideOnly hide_only_;
+  tserver::PrepareDeleteTransactionTabletResponsePB resp_;
+};
+
 // Send a DeleteTablet() RPC request.
 class AsyncDeleteReplica : public RetrySpecificTSRpcTask {
  public:
@@ -365,25 +408,29 @@ class AsyncDeleteReplica : public RetrySpecificTSRpcTask {
       const scoped_refptr<TableInfo>& table, TabletId tablet_id,
       tablet::TabletDataState delete_type,
       boost::optional<int64_t> cas_config_opid_index_less_or_equal,
+      AsyncTaskThrottlerBase* async_task_throttler,
       std::string reason)
-      : RetrySpecificTSRpcTask(master, callback_pool, permanent_uuid, table),
+      : RetrySpecificTSRpcTask(master, callback_pool, permanent_uuid, table, async_task_throttler),
         tablet_id_(std::move(tablet_id)),
         delete_type_(delete_type),
         cas_config_opid_index_less_or_equal_(
             std::move(cas_config_opid_index_less_or_equal)),
         reason_(std::move(reason)) {}
 
-  Type type() const override { return ASYNC_DELETE_REPLICA; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kDeleteReplica;
+  }
 
   std::string type_name() const override { return "Delete Tablet"; }
 
-  std::string description() const override {
-    return Format("$0Tablet RPC for tablet $1 ($2) on TS=$3",
-                  hide_only_ ? "Hide" : "Delete", tablet_id_, table_name(), permanent_uuid_);
-  }
+  std::string description() const override;
 
   void set_hide_only(bool value) {
     hide_only_ = value;
+  }
+
+  void set_keep_data(bool value) {
+    keep_data_ = value;
   }
 
  protected:
@@ -399,6 +446,7 @@ class AsyncDeleteReplica : public RetrySpecificTSRpcTask {
   const std::string reason_;
   tserver::DeleteTabletResponsePB resp_;
   bool hide_only_ = false;
+  bool keep_data_ = false;
 };
 
 // Send the "Alter Table" with the latest table schema to the leader replica
@@ -421,13 +469,13 @@ class AsyncAlterTable : public AsyncTabletLeaderTask {
       : AsyncTabletLeaderTask(master, callback_pool, tablet, table), transaction_id_(transaction_id)
       {}
 
-  Type type() const override { return ASYNC_ALTER_TABLE; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kAlterTable;
+  }
 
   std::string type_name() const override { return "Alter Table"; }
 
-  TableType table_type() const {
-    return tablet_->table()->GetTableType();
-  }
+  TableType table_type() const;
 
  protected:
   uint32_t schema_version_;
@@ -448,7 +496,9 @@ class AsyncBackfillDone : public AsyncAlterTable {
                     const std::string& table_id)
       : AsyncAlterTable(master, callback_pool, tablet), table_id_(table_id) {}
 
-  Type type() const override { return ASYNC_BACKFILL_DONE; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kBackfillDone;
+  }
 
   std::string type_name() const override { return "Mark backfill done."; }
 
@@ -465,7 +515,9 @@ class AsyncCopartitionTable : public RetryingTSRpcTask {
                         const scoped_refptr<TabletInfo>& tablet,
                         const scoped_refptr<TableInfo>& table);
 
-  Type type() const override { return ASYNC_COPARTITION_TABLE; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kCopartitionTable;
+  }
 
   std::string type_name() const override { return "Copartition Table"; }
 
@@ -490,7 +542,9 @@ class AsyncTruncate : public AsyncTabletLeaderTask {
   AsyncTruncate(Master* master, ThreadPool* callback_pool, const scoped_refptr<TabletInfo>& tablet)
       : AsyncTabletLeaderTask(master, callback_pool, tablet) {}
 
-  Type type() const override { return ASYNC_TRUNCATE_TABLET; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kTruncateTablet;
+  }
 
   // TODO: Could move Type to the outer scope and use YB_DEFINE_ENUM for it. So type_name() could
   // be removed.
@@ -509,13 +563,15 @@ class CommonInfoForRaftTask : public RetryingTSRpcTask {
       Master* master, ThreadPool* callback_pool, const scoped_refptr<TabletInfo>& tablet,
       const consensus::ConsensusStatePB& cstate, const std::string& change_config_ts_uuid);
 
+  ~CommonInfoForRaftTask();
+
   TabletId tablet_id() const override;
 
   virtual std::string change_config_ts_uuid() const { return change_config_ts_uuid_; }
 
  protected:
   // Used by SendOrReceiveData. Return's false if RPC should not be sent.
-  virtual CHECKED_STATUS PrepareRequest(int attempt) = 0;
+  virtual Status PrepareRequest(int attempt) = 0;
 
   TabletServerId permanent_uuid() const;
 
@@ -538,7 +594,9 @@ class AsyncChangeConfigTask : public CommonInfoForRaftTask {
       const consensus::ConsensusStatePB& cstate, const std::string& change_config_ts_uuid)
       : CommonInfoForRaftTask(master, callback_pool, tablet, cstate, change_config_ts_uuid) {}
 
-  Type type() const override { return ASYNC_CHANGE_CONFIG; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kChangeConfig;
+  }
 
   std::string type_name() const override { return "ChangeConfig"; }
 
@@ -556,23 +614,25 @@ class AsyncAddServerTask : public AsyncChangeConfigTask {
  public:
   AsyncAddServerTask(
       Master* master, ThreadPool* callback_pool, const scoped_refptr<TabletInfo>& tablet,
-      consensus::RaftPeerPB::MemberType member_type, const consensus::ConsensusStatePB& cstate,
+      consensus::PeerMemberType member_type, const consensus::ConsensusStatePB& cstate,
       const std::string& change_config_ts_uuid)
       : AsyncChangeConfigTask(master, callback_pool, tablet, cstate, change_config_ts_uuid),
         member_type_(member_type) {}
 
-  Type type() const override { return ASYNC_ADD_SERVER; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kAddServer;
+  }
 
   std::string type_name() const override { return "AddServer ChangeConfig"; }
 
   bool started_by_lb() const override { return true; }
 
  protected:
-  CHECKED_STATUS PrepareRequest(int attempt) override;
+  Status PrepareRequest(int attempt) override;
 
  private:
   // PRE_VOTER or PRE_OBSERVER (for async replicas).
-  consensus::RaftPeerPB::MemberType member_type_;
+  consensus::PeerMemberType member_type_;
 };
 
 // Task to remove a tablet server peer from an overly-replicated tablet config.
@@ -583,14 +643,16 @@ class AsyncRemoveServerTask : public AsyncChangeConfigTask {
       const consensus::ConsensusStatePB& cstate, const std::string& change_config_ts_uuid)
       : AsyncChangeConfigTask(master, callback_pool, tablet, cstate, change_config_ts_uuid) {}
 
-  Type type() const override { return ASYNC_REMOVE_SERVER; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kRemoveServer;
+  }
 
   std::string type_name() const override { return "RemoveServer ChangeConfig"; }
 
   bool started_by_lb() const override { return true; }
 
  protected:
-  CHECKED_STATUS PrepareRequest(int attempt) override;
+  Status PrepareRequest(int attempt) override;
 };
 
 // Task to step down tablet server leader and optionally to remove it from an overly-replicated
@@ -609,7 +671,9 @@ class AsyncTryStepDown : public CommonInfoForRaftTask {
         should_remove_(should_remove),
         new_leader_uuid_(new_leader_uuid) {}
 
-  Type type() const override { return ASYNC_TRY_STEP_DOWN; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kTryStepDown;
+  }
 
   std::string type_name() const override { return "Stepdown Leader"; }
 
@@ -622,7 +686,7 @@ class AsyncTryStepDown : public CommonInfoForRaftTask {
   bool started_by_lb() const override { return true; }
 
  protected:
-  CHECKED_STATUS PrepareRequest(int attempt) override;
+  Status PrepareRequest(int attempt) override;
   bool SendRequest(int attempt) override;
   void HandleResponse(int attempt) override;
 
@@ -640,7 +704,9 @@ class AsyncAddTableToTablet : public RetryingTSRpcTask {
       Master* master, ThreadPool* callback_pool, const scoped_refptr<TabletInfo>& tablet,
       const scoped_refptr<TableInfo>& table);
 
-  Type type() const override { return ASYNC_ADD_TABLE_TO_TABLET; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kAddTableToTablet;
+  }
 
   std::string type_name() const override { return "Add Table to Tablet"; }
 
@@ -667,7 +733,9 @@ class AsyncRemoveTableFromTablet : public RetryingTSRpcTask {
       Master* master, ThreadPool* callback_pool, const scoped_refptr<TabletInfo>& tablet,
       const scoped_refptr<TableInfo>& table);
 
-  Type type() const override { return ASYNC_REMOVE_TABLE_FROM_TABLET; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kRemoveTableFromTablet;
+  }
 
   std::string type_name() const override { return "Remove Table from Tablet"; }
 
@@ -696,9 +764,11 @@ class AsyncGetTabletSplitKey : public AsyncTabletLeaderTask {
 
   AsyncGetTabletSplitKey(
       Master* master, ThreadPool* callback_pool, const scoped_refptr<TabletInfo>& tablet,
-      DataCallbackType result_cb);
+      ManualSplit is_manual_split, DataCallbackType result_cb);
 
-  Type type() const override { return ASYNC_GET_TABLET_SPLIT_KEY; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kGetTabletSplitKey;
+  }
 
   std::string type_name() const override { return "Get Tablet Split Key"; }
 
@@ -719,24 +789,76 @@ class AsyncSplitTablet : public AsyncTabletLeaderTask {
   AsyncSplitTablet(
       Master* master, ThreadPool* callback_pool, const scoped_refptr<TabletInfo>& tablet,
       const std::array<TabletId, kNumSplitParts>& new_tablet_ids,
-      const std::string& split_encoded_key, const std::string& split_partition_key,
-      std::function<void(const Status&)> result_cb);
+      const std::string& split_encoded_key, const std::string& split_partition_key);
 
-  Type type() const override { return ASYNC_SPLIT_TABLET; }
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kSplitTablet;
+  }
 
   std::string type_name() const override { return "Split Tablet"; }
 
  protected:
   void HandleResponse(int attempt) override;
   bool SendRequest(int attempt) override;
+
+  tablet::SplitTabletRequestPB req_;
+  tserver::SplitTabletResponsePB resp_;
+  TabletSplitCompleteHandlerIf* tablet_split_complete_handler_;
+};
+
+class AsyncTestRetry : public RetrySpecificTSRpcTask {
+ public:
+  AsyncTestRetry(
+      Master* master, ThreadPool* callback_pool, const TabletServerId& ts_uuid,
+      int32_t num_retries, StdStatusCallback callback);
+
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kTestRetry;
+  }
+
+  std::string type_name() const override { return "Test retry"; }
+
+  std::string description() const override;
+
+ private:
+  TabletId tablet_id() const override { return TabletId(); }
+  TabletServerId permanent_uuid() const;
+
+  void HandleResponse(int attempt) override;
+  bool SendRequest(int attempt) override;
+
+  tserver::TestRetryResponsePB resp_;
+  int32_t num_retries_;
+  StdStatusCallback callback_;
+};
+
+class AsyncUpdateTransactionTablesVersion: public RetrySpecificTSRpcTask {
+ public:
+  AsyncUpdateTransactionTablesVersion(Master *master,
+                                      ThreadPool* callback_pool,
+                                      const TabletServerId& ts_uuid,
+                                      uint64_t version,
+                                      StdStatusCallback callback);
+
+  server::MonitoredTaskType type() const override {
+    return server::MonitoredTaskType::kUpdateTransactionTablesVersion;
+  }
+
+  std::string type_name() const override { return "Update Transaction Tables Version"; }
+
+  std::string description() const override;
+
+ private:
+  TabletId tablet_id() const override { return TabletId(); }
+
+  void HandleResponse(int attempt) override;
+  bool SendRequest(int attempt) override;
   void Finished(const Status& status) override;
 
-  tserver::SplitTabletRequestPB req_;
-  tserver::SplitTabletResponsePB resp_;
-  std::function<void(const Status&)> result_cb_;
+  uint64_t version_;
+  StdStatusCallback callback_;
+  tserver::UpdateTransactionTablesVersionResponsePB resp_;
 };
 
 } // namespace master
 } // namespace yb
-
-#endif // YB_MASTER_ASYNC_RPC_TASKS_H

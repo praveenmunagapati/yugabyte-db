@@ -8,8 +8,7 @@ menu:
   stable:
     identifier: ddl_create_extension
     parent: statements
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 ## Synopsis
@@ -21,13 +20,13 @@ Use the `CREATE EXTENSION` statement to load an extension into a database.
 <ul class="nav nav-tabs nav-tabs-yb">
   <li >
     <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
+      <i class="fa-solid fa-file-lines" aria-hidden="true"></i>
       Grammar
     </a>
   </li>
   <li>
     <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
+      <i class="fa-solid fa-diagram-project" aria-hidden="true"></i>
       Diagram
     </a>
   </li>
@@ -35,10 +34,10 @@ Use the `CREATE EXTENSION` statement to load an extension into a database.
 
 <div class="tab-content">
   <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_extension.grammar.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_extension.grammar.md" %}}
   </div>
   <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_extension.diagram.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/create_extension.diagram.md" %}}
   </div>
 </div>
 
@@ -53,7 +52,7 @@ CREATE SCHEMA myschema;
 CREATE EXTENSION pgcrypto WITH SCHEMA myschema VERSION '1.3';
 ```
 
-```
+```output
 CREATE EXTENSION
 ```
 
@@ -61,12 +60,12 @@ CREATE EXTENSION
 CREATE EXTENSION IF NOT EXISTS earthdistance CASCADE;
 ```
 
-```
+```output
 NOTICE:  installing required extension "cube"
 CREATE EXTENSION
 ```
 
 ## See also
 
-- [Extensions page](../../../extensions)
-- [`DROP EXTENSION`](../ddl_drop_extension)
+- [PostgreSQL Extensions](../../../../../explore/ysql-language-features/pg-extensions/)
+- [DROP EXTENSION](../ddl_drop_extension)

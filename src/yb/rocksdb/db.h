@@ -21,24 +21,22 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSDB_DB_H
-#define YB_ROCKSDB_DB_H
+#pragma once
 
 #include <stdint.h>
 #include <stdio.h>
+
 #include <memory>
-#include <vector>
 #include <string>
 #include <unordered_map>
-#include "yb/rocksdb/immutable_options.h"
+#include <vector>
+
 #include "yb/rocksdb/iterator.h"
 #include "yb/rocksdb/listener.h"
 #include "yb/rocksdb/metadata.h"
 #include "yb/rocksdb/options.h"
-#include "yb/rocksdb/snapshot.h"
 #include "yb/rocksdb/transaction_log.h"
 #include "yb/rocksdb/types.h"
-#include "yb/util/result.h"
 
 #ifdef _WIN32
 // Windows API macro interference
@@ -62,7 +60,6 @@ class WriteBatch;
 class Env;
 class EventListener;
 
-using std::unique_ptr;
 
 extern const char kDefaultColumnFamilyName[];
 
@@ -130,9 +127,6 @@ class DB {
   // that modify data, like put/delete, will return error.
   // If the db is opened in read only mode, then no compactions
   // will happen.
-  //
-  // Not supported in ROCKSDB_LITE, in which case the function will
-  // return Status::NotSupported.
   static Status OpenForReadOnly(const Options& options,
       const std::string& name, DB** dbptr,
       bool error_if_log_file_exist = false);
@@ -142,9 +136,6 @@ class DB {
   // database that should be opened. However, you always need to specify default
   // column family. The default column family name is 'default' and it's stored
   // in rocksdb::kDefaultColumnFamilyName
-  //
-  // Not supported in ROCKSDB_LITE, in which case the function will
-  // return Status::NotSupported.
   static Status OpenForReadOnly(
       const DBOptions& db_options, const std::string& name,
       const std::vector<ColumnFamilyDescriptor>& column_families,
@@ -343,7 +334,6 @@ class DB {
   // use "snapshot" after this call.
   virtual void ReleaseSnapshot(const Snapshot* snapshot) = 0;
 
-#ifndef ROCKSDB_LITE
   // Contains all valid property arguments for GetProperty().
   //
   // NOTE: Property names cannot end in numbers since those are interpreted as
@@ -494,7 +484,6 @@ class DB {
     //      specified level "N" at the target column family.
     static const std::string kAggregatedTablePropertiesAtLevel;
   };
-#endif /* ROCKSDB_LITE */
 
   // DB implementations can export properties about their state via this method.
   // If "property" is a valid property understood by this DB implementation (see
@@ -731,7 +720,6 @@ class DB {
   // The sequence number of the most recent transaction.
   virtual SequenceNumber GetLatestSequenceNumber() const = 0;
 
-#ifndef ROCKSDB_LITE
 
   // Prevent file deletions. Compactions will continue to occur,
   // but no obsolete files will be deleted. Calling this multiple
@@ -781,7 +769,7 @@ class DB {
   // cleared aggressively and the iterator might keep getting invalid before
   // an update is read.
   virtual Status GetUpdatesSince(
-      SequenceNumber seq_number, unique_ptr<TransactionLogIterator>* iter,
+      SequenceNumber seq_number, std::unique_ptr<TransactionLogIterator>* iter,
       const TransactionLogIterator::ReadOptions&
           read_options = TransactionLogIterator::ReadOptions()) = 0;
 
@@ -822,7 +810,7 @@ class DB {
 
   virtual UserFrontierPtr GetFlushedFrontier() { return nullptr; }
 
-  virtual CHECKED_STATUS ModifyFlushedFrontier(
+  virtual Status ModifyFlushedFrontier(
       UserFrontierPtr values,
       FrontierModificationMode mode) {
     return Status::OK();
@@ -831,6 +819,10 @@ class DB {
   virtual FlushAbility GetFlushAbility() { return FlushAbility::kHasNewData; }
 
   virtual UserFrontierPtr GetMutableMemTableFrontier(UpdateUserValueType type) { return nullptr; }
+
+  virtual UserFrontierPtr CalcMemTableFrontier(UpdateUserValueType type) {
+    return nullptr;
+  }
 
   virtual void ListenFilesChanged(std::function<void()> listener) {}
 
@@ -848,6 +840,12 @@ class DB {
       ColumnFamilyMetaData* metadata) {
     GetColumnFamilyMetaData(DefaultColumnFamily(), metadata);
   }
+
+  // Obtains all column family options and corresponding names,
+  // dropped columns are not included into the resulting collections.
+  virtual void GetColumnFamiliesOptions(
+      std::vector<std::string>* column_family_names,
+      std::vector<ColumnFamilyOptions>* column_family_options) = 0;
 
   // Load table file located at "file_path" into "column_family", a pointer to
   // ExternalSstFileInfo can be used instead of "file_path" to do a blind add
@@ -876,7 +874,6 @@ class DB {
     return AddFile(DefaultColumnFamily(), file_info, move_file);
   }
 
-#endif  // ROCKSDB_LITE
 
   // Sets the globally unique ID created at database creation time by invoking
   // Env::GenerateUniqueId(), in identity. Returns Status::OK if identity could
@@ -886,7 +883,6 @@ class DB {
   // Returns default column family handle
   virtual ColumnFamilyHandle* DefaultColumnFamily() const = 0;
 
-#ifndef ROCKSDB_LITE
   virtual Status GetPropertiesOfAllTables(ColumnFamilyHandle* column_family,
                                           TablePropertiesCollection* props) = 0;
   virtual Status GetPropertiesOfAllTables(TablePropertiesCollection* props) {
@@ -895,12 +891,11 @@ class DB {
   virtual Status GetPropertiesOfTablesInRange(
       ColumnFamilyHandle* column_family, const Range* range, std::size_t n,
       TablePropertiesCollection* props) = 0;
-#endif  // ROCKSDB_LITE
 
   // Needed for StackableDB
   virtual DB* GetRootDB() { return this; }
 
-  virtual CHECKED_STATUS Import(const std::string& source_dir) {
+  virtual Status Import(const std::string& source_dir) {
     return STATUS(NotSupported, "");
   }
 
@@ -908,6 +903,11 @@ class DB {
 
   // Returns approximate middle key (see Version::GetMiddleKey).
   virtual yb::Result<std::string> GetMiddleKey() = 0;
+
+  // Returns a table reader for the largest SST file.
+  virtual yb::Result<TableReader*> TEST_GetLargestSstTableReader() {
+    return STATUS(NotSupported, "");
+  }
 
   // Used in testing to make the old memtable immutable and start writing to a new one.
   virtual void TEST_SwitchMemtable() {}
@@ -922,14 +922,10 @@ class DB {
 // Be very careful using this method.
 Status DestroyDB(const std::string& name, const Options& options);
 
-#ifndef ROCKSDB_LITE
 // If a DB cannot be opened, you may attempt to call this method to
 // resurrect as much of the contents of the database as possible.
 // Some data may be lost, so be careful when calling this function
 // on a database that contains important information.
 Status RepairDB(const std::string& dbname, const Options& options);
-#endif
 
 }  // namespace rocksdb
-
-#endif  // YB_ROCKSDB_DB_H

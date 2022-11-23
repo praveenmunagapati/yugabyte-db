@@ -15,17 +15,34 @@
 // Treenode implementation for DML including SELECT statements.
 //--------------------------------------------------------------------------------------------------
 
+#include "yb/yql/cql/ql/ptree/pt_dml.h"
+
 #include <unordered_map>
 
-#include "yb/yql/cql/ql/ptree/pt_dml.h"
-#include "yb/yql/cql/ql/ptree/pt_expr.h"
-#include "yb/yql/cql/ql/ptree/ycql_predtest.h"
-
+#include "yb/client/schema.h"
 #include "yb/client/table.h"
 
 #include "yb/common/common.pb.h"
+#include "yb/common/index.h"
+#include "yb/common/index_column.h"
+#include "yb/common/ql_type.h"
 #include "yb/common/schema.h"
+
+#include "yb/gutil/casts.h"
+
+#include "yb/util/result.h"
+#include "yb/util/status_format.h"
+#include "yb/util/status_log.h"
+
+#include "yb/yql/cql/ql/ptree/column_arg.h"
+#include "yb/yql/cql/ql/ptree/column_desc.h"
+#include "yb/yql/cql/ql/ptree/pt_dml_using_clause.h"
+#include "yb/yql/cql/ql/ptree/pt_expr.h"
+#include "yb/yql/cql/ql/ptree/pt_select.h"
 #include "yb/yql/cql/ql/ptree/sem_context.h"
+#include "yb/yql/cql/ql/ptree/ycql_predtest.h"
+
+using std::string;
 
 DECLARE_bool(allow_index_table_read_write);
 DECLARE_bool(use_cassandra_authentication);
@@ -36,11 +53,11 @@ namespace ql {
 using strings::Substitute;
 
 PTDmlStmt::PTDmlStmt(MemoryContext *memctx,
-                     YBLocation::SharedPtr loc,
+                     YBLocationPtr loc,
                      PTExpr::SharedPtr where_clause,
                      PTExpr::SharedPtr if_clause,
                      const bool else_error,
-                     PTDmlUsingClause::SharedPtr using_clause,
+                     PTDmlUsingClausePtr using_clause,
                      const bool returns_status)
     : PTCollection(memctx, loc),
       where_clause_(where_clause),
@@ -53,6 +70,7 @@ PTDmlStmt::PTDmlStmt(MemoryContext *memctx,
       func_ops_(memctx),
       key_where_ops_(memctx),
       where_ops_(memctx),
+      multi_col_where_ops_(memctx),
       subscripted_col_where_ops_(memctx),
       json_col_where_ops_(memctx),
       partition_key_ops_(memctx),
@@ -79,6 +97,7 @@ PTDmlStmt::PTDmlStmt(MemoryContext *memctx, const PTDmlStmt& other, bool copy_if
       func_ops_(memctx),
       key_where_ops_(memctx),
       where_ops_(memctx),
+      multi_col_where_ops_(memctx),
       subscripted_col_where_ops_(memctx),
       json_col_where_ops_(memctx),
       partition_key_ops_(memctx),
@@ -93,22 +112,22 @@ PTDmlStmt::PTDmlStmt(MemoryContext *memctx, const PTDmlStmt& other, bool copy_if
 PTDmlStmt::~PTDmlStmt() {
 }
 
-int PTDmlStmt::num_columns() const {
+size_t PTDmlStmt::num_columns() const {
   return table_->schema().num_columns();
 }
 
-int PTDmlStmt::num_key_columns() const {
+size_t PTDmlStmt::num_key_columns() const {
   return table_->schema().num_key_columns();
 }
 
-int PTDmlStmt::num_hash_key_columns() const {
+size_t PTDmlStmt::num_hash_key_columns() const {
   return table_->schema().num_hash_key_columns();
 }
 
 string PTDmlStmt::hash_key_columns() const {
   std::stringstream s;
   auto &schema = table_->schema();
-  for (int i = 0; i < schema.num_hash_key_columns(); ++i) {
+  for (size_t i = 0; i < schema.num_hash_key_columns(); ++i) {
     if (i != 0) s << ", ";
     s << schema.Column(i).name();
   }
@@ -267,7 +286,7 @@ Status PTDmlStmt::AnalyzeWhereExpr(SemContext *sem_context, PTExpr *expr) {
   ColumnOpCounter partition_key_counter;
   WhereExprState where_state(&where_ops_, &key_where_ops_, &subscripted_col_where_ops_,
                              &json_col_where_ops_, &partition_key_ops_, &op_counters,
-                             &partition_key_counter, opcode(), &func_ops_);
+                             &partition_key_counter, opcode(), &func_ops_, &multi_col_where_ops_);
 
   SemState sem_state(sem_context, QLType::Create(BOOL), InternalType::kBoolValue);
   sem_state.SetWhereState(&where_state);
@@ -275,7 +294,7 @@ Status PTDmlStmt::AnalyzeWhereExpr(SemContext *sem_context, PTExpr *expr) {
 
   if (IsWriteOp()) {
     // Make sure that all hash entries are referenced in where expression.
-    for (int idx = 0; idx < num_hash_key_columns(); idx++) {
+    for (size_t idx = 0; idx < num_hash_key_columns(); idx++) {
       if (op_counters[idx].eq_count() == 0) {
         return sem_context->Error(expr, "Missing condition on key columns in WHERE clause",
                                   ErrorCode::CQL_STATEMENT_INVALID);
@@ -284,8 +303,8 @@ Status PTDmlStmt::AnalyzeWhereExpr(SemContext *sem_context, PTExpr *expr) {
 
     // If writing static columns only, check that either all range key entries are referenced in the
     // where expression or none is referenced. Else, check that all range key are referenced.
-    int range_keys = 0;
-    for (int idx = num_hash_key_columns(); idx < num_key_columns(); idx++) {
+    size_t range_keys = 0;
+    for (auto idx = num_hash_key_columns(); idx < num_key_columns(); idx++) {
       if (op_counters[idx].eq_count() != 0) {
         range_keys++;
       }
@@ -301,7 +320,7 @@ Status PTDmlStmt::AnalyzeWhereExpr(SemContext *sem_context, PTExpr *expr) {
       if (range_keys != num_key_columns() - num_hash_key_columns()) {
         if (opcode() == TreeNodeOpcode::kPTDeleteStmt) {
           // Range expression in write requests are allowed for deletes only.
-          for (int idx = num_hash_key_columns(); idx < num_key_columns(); idx++) {
+          for (auto idx = num_hash_key_columns(); idx < num_key_columns(); idx++) {
             if (op_counters[idx].eq_count() != 0) {
               where_ops_.push_front(key_where_ops_[idx]);
             }
@@ -316,14 +335,15 @@ Status PTDmlStmt::AnalyzeWhereExpr(SemContext *sem_context, PTExpr *expr) {
   } else { // ReadOp
     // Add the hash to the where clause if the list is incomplete. Clear key_where_ops_ to do
     // whole-table scan.
-    for (int idx = 0; idx < num_hash_key_columns(); idx++) {
+    for (size_t idx = 0; idx < num_hash_key_columns(); idx++) {
       if (!key_where_ops_[idx].IsInitialized()) {
         has_incomplete_hash_ = true;
         break;
       }
     }
     if (has_incomplete_hash_) {
-      for (int idx = num_hash_key_columns() - 1; idx >= 0; idx--) {
+      for (auto idx = num_hash_key_columns(); idx > 0;) {
+        --idx;
         if (key_where_ops_[idx].IsInitialized()) {
           where_ops_.push_front(key_where_ops_[idx]);
         }
@@ -332,7 +352,7 @@ Status PTDmlStmt::AnalyzeWhereExpr(SemContext *sem_context, PTExpr *expr) {
     } else {
       select_has_primary_keys_set_ = true;
       // Unset if there is a range key without a condition.
-      for (int idx = num_hash_key_columns(); idx < num_key_columns(); idx++) {
+      for (auto idx = num_hash_key_columns(); idx < num_key_columns(); idx++) {
         if (op_counters[idx].IsEmpty()) {
           select_has_primary_keys_set_ = false;
           break;
@@ -396,7 +416,7 @@ Status PTDmlStmt::AnalyzeIndexesForWrites(SemContext *sem_context) {
       pk_only_indexes_.insert(index_table);
     } else {
       non_pk_only_indexes_.insert(index_id);
-      for (const IndexInfo::IndexColumn& column : index.columns()) {
+      for (const auto& column : index.columns()) {
         const ColumnId indexed_column_id = column.indexed_column_id;
         if (!indexed_schema.is_key_column(indexed_column_id)) {
           column_refs_.insert(indexed_column_id);
@@ -439,7 +459,7 @@ Status PTDmlStmt::AnalyzeColumnArgs(SemContext *sem_context) {
   }
 
   // If we have range keys we modify the primary row.
-  for (int idx = num_hash_key_columns(); idx < num_key_columns(); idx++) {
+  for (auto idx = num_hash_key_columns(); idx < num_key_columns(); idx++) {
     if (column_args_->at(idx).IsInitialized()) {
       modifies_primary_row_ = true;
       break;
@@ -451,7 +471,7 @@ Status PTDmlStmt::AnalyzeColumnArgs(SemContext *sem_context) {
   //  - Writing to non-static columns -> modify primary row.
 
   // Check plain column args.
-  for (int idx = num_key_columns(); idx < column_args_->size(); idx++) {
+  for (auto idx = num_key_columns(); idx < column_args_->size(); idx++) {
     if (column_args_->at(idx).IsInitialized()) {
       if (column_args_->at(idx).desc()->is_static()) {
         modifies_static_row_ = true;
@@ -497,6 +517,107 @@ bool PTDmlStmt::StaticColumnArgsOnly() const {
 }
 
 //--------------------------------------------------------------------------------------------------
+
+Status AnalyzeStepState::AnalyzePartitionKeyOp(SemContext *sem_context,
+                                               const PTRelationExpr *expr,
+                                               PTExprPtr value) {
+  partition_key_ops_->emplace_back(expr->ql_op(), value);
+  return Status::OK();
+}
+
+//--------------------------------------------------------------------------------------------------
+
+Status WhereExprState::AnalyzeMultiColumnOp(
+    SemContext* sem_context,
+    const PTRelationExpr* expr,
+    const std::vector<const ColumnDesc*>
+        col_descs,
+    PTExprPtr value) {
+  for (const auto& col_desc : col_descs) {
+    if (col_desc == nullptr) {
+      return STATUS(InternalError, "Column does not exist");
+    }
+  }
+
+  if (col_descs.empty()) {
+    return sem_context->Error(expr, "No range columns specified", ErrorCode::CQL_STATEMENT_INVALID);
+  }
+
+  if (statement_type_ != TreeNodeOpcode::kPTSelectStmt) {
+    return sem_context->Error(
+        expr, "Operator not supported for write operations",
+        ErrorCode::FEATURE_NOT_YET_IMPLEMENTED);
+  }
+
+  if (expr->ql_op() != QL_OP_IN) {
+    return sem_context->Error(
+        expr, "Multi-column relation not supported for the operator",
+        ErrorCode::CQL_STATEMENT_INVALID);
+  }
+
+  if (!value->has_no_column_ref()) {
+    return sem_context->Error(
+        value,
+        "Argument of this opreator cannot reference a column",
+        ErrorCode::CQL_STATEMENT_INVALID);
+  }
+
+  if (value->expr_op() != ExprOperator::kCollection && value->expr_op() != ExprOperator::kBindVar) {
+    return sem_context->Error(
+        value, "Invalid operand for IN clause", ErrorCode::CQL_STATEMENT_INVALID);
+  }
+
+  if (value->expr_op() == ExprOperator::kCollection) {
+    const auto options = static_cast<const PTCollectionExpr*>(value.get());
+
+    for (const auto& option : options->values()) {
+      if (option->expr_op() != ExprOperator::kCollection &&
+          option->expr_op() != ExprOperator::kBindVar) {
+        return sem_context->Error(
+            option, "Invalid operand for IN clause", ErrorCode::CQL_STATEMENT_INVALID);
+      }
+    }
+  }
+
+  int idx = -1;
+  for (const auto& col_desc : col_descs) {
+    if (sem_context->void_primary_key_condition() && col_desc->is_primary()) {
+      // Drop the key condition from where clause as instructed.
+      return Status::OK();
+    }
+    if (!col_desc->is_primary() || col_desc->is_hash()) {
+      return sem_context->Error(
+          expr,
+          Format(
+              "Multi-column relations can only be applied to clustering columns but was applied "
+              "to: $0",
+              col_desc->name()),
+          ErrorCode::CQL_STATEMENT_INVALID);
+    }
+    if (idx != -1 && (idx + 1) != static_cast<int>(col_desc->index())) {
+      if (idx == static_cast<int>(col_desc->index())) {
+        // repeating column
+        return sem_context->Error(
+            expr,
+            Format("Column \"$0\" appeared twice in a relation", col_desc->name()),
+            ErrorCode::CQL_STATEMENT_INVALID);
+      }
+      return sem_context->Error(
+          expr, "Clustering columns must appear in the PRIMARY KEY order in multi-column relations",
+          ErrorCode::CQL_STATEMENT_INVALID);
+    }
+    idx = static_cast<int>(col_desc->index());
+    ColumnOpCounter& counter = op_counters_->at(col_desc->index());
+    counter.increase_in();
+    if (!counter.is_valid()) {
+      return sem_context->Error(
+          expr, "Illogical condition for where clause", ErrorCode::CQL_STATEMENT_INVALID);
+    }
+  }
+  multi_colum_ops_->emplace_back(col_descs, value, expr->ql_op());
+
+  return Status::OK();
+}
 
 Status WhereExprState::AnalyzeColumnOp(SemContext *sem_context,
                                        const PTRelationExpr *expr,
@@ -547,7 +668,7 @@ Status WhereExprState::AnalyzeColumnOp(SemContext *sem_context,
       if (idx_info.where_predicate_spec()) {
         // First attempt to preserve the sub-clause if it might be useful.
         bool preserve_col_op = false;
-        int prefix_len = sem_context->index_select_prefix_length();
+        auto prefix_len = sem_context->index_select_prefix_length();
         // Only in case all hash cols are set, we can even attempt to preserve the sub-clause.
         bool all_hash_cols_set = prefix_len >= idx_info.hash_column_count();
         if (all_hash_cols_set) {
@@ -564,7 +685,7 @@ Status WhereExprState::AnalyzeColumnOp(SemContext *sem_context,
         }
 
         if (!preserve_col_op) {
-          const IndexInfo::IndexColumn& idx_col = idx_info.column(col_desc->index());
+          const auto& idx_col = idx_info.column(col_desc->index());
           // Change to id in indexed table because we are have those ids in the index predicate
           // as well.
           ColumnDesc translated_col_desc(*col_desc);
@@ -588,7 +709,7 @@ Status WhereExprState::AnalyzeColumnOp(SemContext *sem_context,
   switch (expr->ql_op()) {
     case QL_OP_EQUAL: {
       counter.increase_eq(col_args != nullptr);
-      if (!counter.isValid()) {
+      if (!counter.is_valid()) {
         return sem_context->Error(expr, "Illogical condition for where clause",
             ErrorCode::CQL_STATEMENT_INVALID);
       }
@@ -646,7 +767,7 @@ Status WhereExprState::AnalyzeColumnOp(SemContext *sem_context,
           counter.increase_gt(col_args != nullptr);
         }
 
-        if (!counter.isValid()) {
+        if (!counter.is_valid()) {
           return sem_context->Error(expr, "Illogical condition for where clause",
               ErrorCode::CQL_STATEMENT_INVALID);
         }
@@ -711,7 +832,7 @@ Status WhereExprState::AnalyzeColumnOp(SemContext *sem_context,
       }
 
       counter.increase_in(col_args != nullptr);
-      if (!counter.isValid()) {
+      if (!counter.is_valid()) {
         return sem_context->Error(expr, "Illogical condition for where clause",
                                   ErrorCode::CQL_STATEMENT_INVALID);
       }
@@ -735,7 +856,7 @@ Status WhereExprState::AnalyzeColumnOp(SemContext *sem_context,
 Status WhereExprState::AnalyzeColumnFunction(SemContext *sem_context,
                                              const PTRelationExpr *expr,
                                              PTExpr::SharedPtr value,
-                                             PTBcall::SharedPtr call) {
+                                             PTBcallPtr call) {
   switch (expr->ql_op()) {
     case QL_OP_LESS_THAN:
     case QL_OP_LESS_THAN_EQUAL:
@@ -787,13 +908,76 @@ Status WhereExprState::AnalyzePartitionKeyOp(SemContext *sem_context,
                                 ErrorCode::CQL_STATEMENT_INVALID);
   }
 
-  if (!partition_key_counter_->isValid()) {
+  if (!partition_key_counter_->is_valid()) {
     return sem_context->Error(expr, "Illogical where condition for token in where clause",
                               ErrorCode::CQL_STATEMENT_INVALID);
   }
 
-  partition_key_ops_->emplace_back(expr->ql_op(), value);
-  return Status::OK();
+  return AnalyzeStepState::AnalyzePartitionKeyOp(sem_context, expr, value);
+}
+
+std::vector<int64_t> PTDmlStmt::hash_col_indices() const {
+  std::vector<int64_t> indices;
+  indices.reserve(hash_col_bindvars_.size());
+  for (const PTBindVar* bindvar : hash_col_bindvars_) {
+    indices.emplace_back(bindvar->pos());
+  }
+  return indices;
+}
+
+void PTDmlStmt::AddColumnRef(const ColumnDesc& col_desc) {
+  if (col_desc.is_static()) {
+    static_column_refs_.insert(col_desc.id());
+  } else {
+    column_refs_.insert(col_desc.id());
+  }
+
+  if (column_ref_cnts_.find(col_desc.id()) == column_ref_cnts_.end())
+    column_ref_cnts_[col_desc.id()] = 0;
+  column_ref_cnts_[col_desc.id()]++;
+}
+
+std::string PTDmlStmt::PartitionKeyToString(const MCList<PartitionKeyOp>& conds) {
+  std::string str;
+  for (auto col_op = conds.begin(); col_op != conds.end(); ++col_op) {
+    std::stringstream s;
+    if (col_op != conds.begin()) {
+      s << " AND ";
+    }
+    // Partition_hash is stored as INT32, token is stored as INT64, unless you specify the
+    // rhs expression e.g partition_hash(h1, h2) >= 3 in which case it's stored as an VARINT.
+    // So setting the default to the yql partition_hash in that case seems reasonable.
+    string label = (col_op->expr()->expected_internal_type() == InternalType::kInt64Value) ?
+        "token" : "partition_hash";
+    s << "(" << label << "(" << hash_key_columns() <<  ") " << QLOperatorAsString(col_op->yb_op())
+      << " " << col_op->expr()->QLName() << ")";
+    str += s.str();
+  }
+  return str;
+}
+
+PTExprPtr PTDmlStmt::ttl_seconds() const {
+  return using_clause_ ? using_clause_->ttl_seconds() : nullptr;
+}
+
+PTExprPtr PTDmlStmt::user_timestamp_usec() const {
+  return using_clause_ ? using_clause_->user_timestamp_usec() : nullptr;
+}
+
+void PTDmlStmt::AddRefForAllColumns() {
+  for (const auto& pair : column_map_) {
+    AddColumnRef(pair.second);
+  }
+}
+
+void PTDmlStmt::AddHashColumnBindVar(PTBindVar* bindvar) {
+  hash_col_bindvars_.insert(bindvar);
+}
+
+bool PTDmlStmt::HashColCmp::operator()(const PTBindVar* v1, const PTBindVar* v2) const {
+  DCHECK(v1->hash_col() != nullptr) << "bindvar pos " << v1->pos() << " is not a hash column";
+  DCHECK(v2->hash_col() != nullptr) << "bindvar pos " << v2->pos() << " is not a hash column";
+  return v1->hash_col()->id() < v2->hash_col()->id();
 }
 
 }  // namespace ql

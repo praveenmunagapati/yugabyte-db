@@ -57,15 +57,14 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSDB_DB_INLINESKIPLIST_H
-#define YB_ROCKSDB_DB_INLINESKIPLIST_H
 
 #pragma once
 
 #include <assert.h>
 #include <stdlib.h>
+
 #include <atomic>
-#include "yb/rocksdb/port/port.h"
+
 #include "yb/rocksdb/util/allocator.h"
 #include "yb/rocksdb/util/random.h"
 
@@ -679,5 +678,3 @@ bool InlineSkipList<Comparator>::Contains(const char* key) const {
 }
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_DB_INLINESKIPLIST_H

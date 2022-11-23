@@ -11,10 +11,11 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_SHARED_MEM_H
-#define YB_UTIL_SHARED_MEM_H
+#pragma once
 
 #include <sys/mman.h>
+
+#include <glog/logging.h>
 
 #include "yb/util/result.h"
 
@@ -115,7 +116,7 @@ class SharedMemoryObject {
   template <class... Args>
   explicit SharedMemoryObject(SharedMemorySegment&& segment, Args&&... args)
       : segment_(std::move(segment)), owned_(true) {
-    new(DCHECK_NOTNULL(segment_.GetAddress())) Object(std::forward<Args>(args)...);
+    new (DCHECK_NOTNULL(segment_.GetAddress())) Object(std::forward<Args>(args)...);
   }
 
   class NotOwnedTag {};
@@ -129,5 +130,3 @@ class SharedMemoryObject {
 };
 
 }  // namespace yb
-
-#endif // YB_UTIL_SHARED_MEM_H

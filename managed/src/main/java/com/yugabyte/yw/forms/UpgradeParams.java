@@ -16,6 +16,8 @@ public class UpgradeParams extends UniverseDefinitionTaskParams {
   public String ybSoftwareVersion = null;
   // Previous software version.
   public String ybPrevSoftwareVersion = null;
+  // Whenever we run system catalog upgrade after software upgrade or not
+  public boolean upgradeSystemCatalog = true;
 
   public final Map<UUID, String> machineImages = new HashMap<>();
   public boolean forceVMImageUpgrade;
@@ -39,7 +41,7 @@ public class UpgradeParams extends UniverseDefinitionTaskParams {
   // This is deprecated use cluster.userIntent.tserverGFlags
   public Map<String, String> tserverGFlags = new HashMap<String, String>();
 
-  public static final int DEFAULT_SLEEP_AFTER_RESTART_MS = 240000;
+  public static final int DEFAULT_SLEEP_AFTER_RESTART_MS = 180000;
 
   // Time to sleep after a server restart, if there is no way to check/rpc if it is ready to server
   // requests.

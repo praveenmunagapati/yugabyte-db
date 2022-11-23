@@ -11,21 +11,19 @@
 // under the License.
 //
 
-#ifndef YB_DOCDB_DOCDB_COMPACTION_FILTER_INTENTS_H
-#define YB_DOCDB_DOCDB_COMPACTION_FILTER_INTENTS_H
+#pragma once
 
 #include <atomic>
 #include <memory>
 #include <vector>
 
-#include "yb/rocksdb/compaction_filter.h"
-
-#include "yb/client/transaction_manager.h"
-#include "yb/common/schema.h"
 #include "yb/common/hybrid_time.h"
-#include "yb/common/transaction.h"
-#include "yb/docdb/doc_key.h"
-#include "yb/tablet/tablet.h"
+
+#include "yb/docdb/docdb_fwd.h"
+
+#include "yb/tablet/tablet_fwd.h"
+
+#include "yb/rocksdb/compaction_filter.h"
 
 namespace yb {
 namespace docdb {
@@ -48,5 +46,3 @@ class DocDBIntentsCompactionFilterFactory : public rocksdb::CompactionFilterFact
 
 }  // namespace docdb
 }  // namespace yb
-
-#endif  // YB_DOCDB_DOCDB_COMPACTION_FILTER_INTENTS_H

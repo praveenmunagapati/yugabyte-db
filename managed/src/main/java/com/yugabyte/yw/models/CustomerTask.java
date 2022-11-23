@@ -2,10 +2,15 @@
 
 package com.yugabyte.yw.models;
 
+import static io.swagger.annotations.ApiModelProperty.AccessMode.READ_ONLY;
+import static play.mvc.Http.Status.BAD_REQUEST;
+
 import com.fasterxml.jackson.annotation.JsonFormat;
+import com.google.api.client.util.Strings;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.yugabyte.yw.common.PlatformServiceException;
+import com.yugabyte.yw.common.logging.LogUtil;
 import io.ebean.Finder;
 import io.ebean.Model;
 import io.ebean.annotation.EnumValue;
@@ -20,6 +25,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import javax.annotation.Nullable;
 import javax.persistence.Column;
 import javax.persistence.Entity;
 import javax.persistence.GeneratedValue;
@@ -27,9 +33,8 @@ import javax.persistence.GenerationType;
 import javax.persistence.Id;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import play.data.validation.Constraints;
-import static io.swagger.annotations.ApiModelProperty.AccessMode.READ_ONLY;
-import static play.mvc.Http.Status.BAD_REQUEST;
 
 @Entity
 @ApiModel(
@@ -56,11 +61,14 @@ public class CustomerTask extends Model {
     @EnumValue("Backup")
     Backup(false),
 
+    @EnumValue("Customer Configuration")
+    CustomerConfiguration(false),
+
     @EnumValue("KMS Configuration")
     KMSConfiguration(false),
 
     @EnumValue("XCluster Configuration")
-    XClusterConfig(false);
+    XClusterConfig(true);
 
     private final boolean universeTarget;
 
@@ -107,6 +115,18 @@ public class CustomerTask extends Model {
     @EnumValue("Release")
     Release,
 
+    @EnumValue("Reboot")
+    Reboot,
+
+    @EnumValue("Hard Reboot")
+    HardReboot,
+
+    @EnumValue("Edit")
+    Edit,
+
+    @EnumValue("Synchronize")
+    Sync,
+
     @EnumValue("RestartUniverse")
     RestartUniverse,
 
@@ -115,6 +135,9 @@ public class CustomerTask extends Model {
 
     @EnumValue("GFlagsUpgrade")
     GFlagsUpgrade,
+
+    @EnumValue("KubernetesOverridesUpgrade")
+    KubernetesOverridesUpgrade,
 
     @EnumValue("CertsRotate")
     CertsRotate,
@@ -127,6 +150,9 @@ public class CustomerTask extends Model {
 
     @EnumValue("SystemdUpgrade")
     SystemdUpgrade,
+
+    @EnumValue("RebootUniverse")
+    RebootUniverse,
 
     @Deprecated
     @EnumValue("UpgradeSoftware")
@@ -164,12 +190,21 @@ public class CustomerTask extends Model {
     @EnumValue("Restore")
     Restore,
 
+    @EnumValue("CreatePitrConfig")
+    CreatePitrConfig,
+
+    @EnumValue("RestoreSnapshotSchedule")
+    RestoreSnapshotSchedule,
+
     @Deprecated
     @EnumValue("SetEncryptionKey")
     SetEncryptionKey,
 
     @EnumValue("EnableEncryptionAtRest")
     EnableEncryptionAtRest,
+
+    @EnumValue("SetActiveUniverseKeys")
+    SetActiveUniverseKeys,
 
     @EnumValue("RotateEncryptionKey")
     RotateEncryptionKey,
@@ -183,45 +218,96 @@ public class CustomerTask extends Model {
     @EnumValue("CreateAlertDefinitions")
     CreateAlertDefinitions,
 
+    @EnumValue("ManageAlertDefinitions")
+    ManageAlertDefinitions,
+
     @EnumValue("ExternalScript")
     ExternalScript,
 
-    @EnumValue("CreateXClusterReplication")
-    CreateXClusterReplication,
-
+    /** @deprecated TargetType name must not be part of TaskType. Use {@link #Create} instead. */
+    @Deprecated
     @EnumValue("CreateXClusterConfig")
     CreateXClusterConfig,
 
-    @EnumValue("DeleteXClusterReplication")
-    DeleteXClusterReplication,
-
-    @EnumValue("DeleteXClusterConfig")
-    DeleteXClusterConfig,
-
-    @EnumValue("EditXClusterReplication")
-    EditXClusterReplication,
-
+    /** @deprecated TargetType name must not be part of TaskType. Use {@link #Edit} instead. */
+    @Deprecated
     @EnumValue("EditXClusterConfig")
     EditXClusterConfig,
 
-    @EnumValue("PauseXClusterReplication")
-    PauseXClusterReplication,
+    /** @deprecated TargetType name must not be part of TaskType. Use {@link #Delete} instead. */
+    @Deprecated
+    @EnumValue("DeleteXClusterConfig")
+    DeleteXClusterConfig,
 
-    @EnumValue("ResumeXClusterReplication")
-    ResumeXClusterReplication;
+    /** @deprecated TargetType name must not be part of TaskType. Use {@link #Sync} instead. */
+    @Deprecated
+    @EnumValue("SyncXClusterConfig")
+    SyncXClusterConfig,
+
+    @EnumValue("PrecheckNode")
+    PrecheckNode,
+
+    @EnumValue("Abort")
+    Abort,
+
+    @EnumValue("CreateSupportBundle")
+    CreateSupportBundle,
+
+    @EnumValue("CreateTableSpaces")
+    CreateTableSpaces,
+
+    @EnumValue("ThirdpartySoftwareUpgrade")
+    ThirdpartySoftwareUpgrade,
+
+    @EnumValue("RotateAccessKey")
+    RotateAccessKey,
+
+    @EnumValue("CreateAndRotateAccessKey")
+    CreateAndRotateAccessKey,
+
+    @EnumValue("RunApiTriggeredHooks")
+    RunApiTriggeredHooks,
+
+    @EnumValue("InstallYbcSoftware")
+    InstallYbcSoftware,
+
+    @EnumValue("UpgradeUniverseYbc")
+    UpgradeUniverseYbc,
+
+    @EnumValue("DisableYbc")
+    DisableYbc;
 
     public String toString(boolean completed) {
       switch (this) {
+        case Add:
+          return completed ? "Added " : "Adding ";
         case Create:
           return completed ? "Created " : "Creating ";
         case Pause:
           return completed ? "Paused " : "Pausing ";
+        case Release:
+          return completed ? "Released " : "Releasing ";
+        case Reboot:
+        case HardReboot:
+          return completed ? "Rebooted " : "Rebooting ";
+        case Remove:
+          return completed ? "Removed " : "Removing ";
+        case ResizeNode:
+          return completed ? "Resized Node " : "Resizing Node ";
         case Resume:
           return completed ? "Resumed " : "Resuming ";
+        case Start:
+          return completed ? "Started " : "Starting ";
+        case Stop:
+          return completed ? "Stopped " : "Stopping ";
         case Update:
           return completed ? "Updated " : "Updating ";
         case Delete:
           return completed ? "Deleted " : "Deleting ";
+        case Edit:
+          return completed ? "Edited " : "Editing ";
+        case Sync:
+          return completed ? "Synchronized " : "Synchronizing ";
         case RestartUniverse:
           return completed ? "Restarted " : "Restarting ";
         case SoftwareUpgrade:
@@ -230,14 +316,19 @@ public class CustomerTask extends Model {
           return completed ? "Upgraded to Systemd " : "Upgrading to Systemd ";
         case GFlagsUpgrade:
           return completed ? "Upgraded GFlags " : "Upgrading GFlags ";
+        case KubernetesOverridesUpgrade:
+          return completed ? "Upgraded Kubernetes Overrides " : "Upgrading Kubernetes Overrides ";
         case CertsRotate:
           return completed ? "Updated Certificates " : "Updating Certificates ";
         case TlsToggle:
           return completed ? "Toggled TLS " : "Toggling TLS ";
         case VMImageUpgrade:
+        case UpgradeVMImage:
           return completed ? "Upgraded VM Image " : "Upgrading VM Image ";
         case UpgradeSoftware:
           return completed ? "Upgraded Software " : "Upgrading Software ";
+        case UpdateDiskSize:
+          return completed ? "Updated Disk Size " : "Updating Disk Size ";
         case UpdateCert:
           return completed ? "Updated Cert " : "Updating Cert ";
         case ToggleTls:
@@ -248,6 +339,10 @@ public class CustomerTask extends Model {
           return completed ? "Bulk imported data" : "Bulk importing data";
         case Restore:
           return completed ? "Restored " : "Restoring ";
+        case CreatePitrConfig:
+          return completed ? "Created PITR Config" : "Creating PITR Config";
+        case RestoreSnapshotSchedule:
+          return completed ? "Restored Snapshot Schedule" : "Restoring Snapshot Schedule";
         case Restart:
           return completed ? "Restarted " : "Restarting ";
         case Backup:
@@ -256,6 +351,8 @@ public class CustomerTask extends Model {
           return completed ? "Set encryption key" : "Setting encryption key";
         case EnableEncryptionAtRest:
           return completed ? "Enabled encryption at rest" : "Enabling encryption at rest";
+        case SetActiveUniverseKeys:
+          return completed ? "Set active universe keys" : "Setting active universe keys";
         case RotateEncryptionKey:
           return completed
               ? "Rotated encryption at rest universe key"
@@ -266,18 +363,46 @@ public class CustomerTask extends Model {
           return completed ? "Started Master process on " : "Starting Master process on ";
         case CreateAlertDefinitions:
           return completed ? "Created alert definitions " : "Creating alert definitions ";
+        case ManageAlertDefinitions:
+          return completed ? "Managed alert definitions " : "Managing alert definitions ";
         case ExternalScript:
           return completed ? "Script execution completed " : "Script execution is running";
-        case CreateXClusterReplication:
-          return completed ? "Created xCluster replication " : "Creating xCluster replication ";
-        case DeleteXClusterReplication:
-          return completed ? "Deleted xCluster replication " : "Deleting xCluster replication ";
-        case EditXClusterReplication:
-          return completed ? "Edited xCluster replication " : "Editing xCluster replication ";
-        case PauseXClusterReplication:
-          return completed ? "Paused xCluster replication " : "Pausing xCluster replication ";
-        case ResumeXClusterReplication:
-          return completed ? "Resumed xCluster replication " : "Resuming xCluster replication ";
+        case CreateXClusterConfig:
+          return completed ? "Created xcluster config " : "Creating xcluster config ";
+        case DeleteXClusterConfig:
+          return completed ? "Deleted xcluster config " : "Deleting xcluster config ";
+        case EditXClusterConfig:
+          return completed ? "Edited xcluster config " : "Editing xcluster config ";
+        case SyncXClusterConfig:
+          return completed ? "Synchronized xcluster config " : "Synchronizing xcluster config ";
+        case PrecheckNode:
+          return completed ? "Performed preflight check on " : "Performing preflight check on ";
+        case Abort:
+          return completed ? "Task aborted " : "Aborting task ";
+        case CreateSupportBundle:
+          return completed ? "Created Support Bundle in " : "Creating Support Bundle in ";
+        case ThirdpartySoftwareUpgrade:
+          return completed
+              ? "Upgraded third-party software for "
+              : "Upgrading third-party software for ";
+        case CreateTableSpaces:
+          return completed ? "Created tablespaces in " : "Creating tablespaces in ";
+        case RotateAccessKey:
+          return completed ? "Rotated Access Key" : "Rotating Access Key";
+        case RebootUniverse:
+          return completed ? "Rebooted " : "Rebooting ";
+        case CreateAndRotateAccessKey:
+          return completed
+              ? "Creating Access Key and Rotation Tasks"
+              : "Created New Access Key and Rotation Tasks";
+        case RunApiTriggeredHooks:
+          return completed ? "Ran API Triggered Hooks" : "Running API Triggered Hooks";
+        case InstallYbcSoftware:
+          return completed ? "Installed Ybc" : "Installing Ybc";
+        case UpgradeUniverseYbc:
+          return completed ? "Upgraded Ybc" : "Upgrading Ybc";
+        case DisableYbc:
+          return completed ? "Disabled Ybc" : "Disabling Ybc";
         default:
           return null;
       }
@@ -301,6 +426,12 @@ public class CustomerTask extends Model {
       switch (this) {
         case StartMaster:
           return "Start Master Process on";
+        case PrecheckNode:
+          return "Precheck";
+        case RebootUniverse:
+          return "Reboot";
+        case RestartUniverse:
+          return "Restart";
         default:
           return toFriendlyTypeName();
       }
@@ -337,6 +468,12 @@ public class CustomerTask extends Model {
 
   public UUID getTaskUUID() {
     return taskUUID;
+  }
+
+  public CustomerTask setTaskUUID(UUID newTaskUUID) {
+    this.taskUUID = newTaskUUID;
+    save();
+    return this;
   }
 
   @Constraints.Required
@@ -377,11 +514,11 @@ public class CustomerTask extends Model {
 
   @Constraints.Required
   @Column(nullable = false)
-  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd HH:mm:ss")
+  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ssZ")
   @ApiModelProperty(
       value = "Creation time",
       accessMode = READ_ONLY,
-      example = "2021-06-17 15:00:05",
+      example = "2021-06-17T15:00:05-0400",
       required = true)
   private Date createTime;
 
@@ -390,15 +527,39 @@ public class CustomerTask extends Model {
   }
 
   @Column
-  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd HH:mm:ss")
+  @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ssZ")
   @ApiModelProperty(
       value = "Completion time (present only if a task has completed)",
       accessMode = READ_ONLY,
-      example = "2021-06-17 15:00:05")
+      example = "2021-06-17T15:00:05-0400")
   private Date completionTime;
 
   public Date getCompletionTime() {
     return completionTime;
+  }
+
+  public void resetCompletionTime() {
+    this.completionTime = null;
+    this.save();
+  }
+
+  @Column
+  @ApiModelProperty(value = "Custom type name", accessMode = READ_ONLY, example = "TLS Toggle ON")
+  private String customTypeName;
+
+  public String getCustomTypeName() {
+    return customTypeName;
+  }
+
+  @Column
+  @ApiModelProperty(
+      value = "Correlation id",
+      accessMode = READ_ONLY,
+      example = "3e6ac43a-15d9-46c0-831c-460775ce87ad")
+  private String correlationId;
+
+  public String getCorrelationId() {
+    return correlationId;
   }
 
   public void markAsCompleted() {
@@ -422,7 +583,8 @@ public class CustomerTask extends Model {
       UUID taskUUID,
       TargetType targetType,
       TaskType type,
-      String targetName) {
+      String targetName,
+      @Nullable String customTypeName) {
     CustomerTask th = new CustomerTask();
     th.customerUUID = customer.uuid;
     th.targetUUID = targetUUID;
@@ -431,8 +593,21 @@ public class CustomerTask extends Model {
     th.type = type;
     th.targetName = targetName;
     th.createTime = new Date();
+    th.customTypeName = customTypeName;
+    String correlationId = (String) MDC.get(LogUtil.CORRELATION_ID);
+    if (!Strings.isNullOrEmpty(correlationId)) th.correlationId = correlationId;
     th.save();
     return th;
+  }
+
+  public static CustomerTask create(
+      Customer customer,
+      UUID targetUUID,
+      UUID taskUUID,
+      TargetType targetType,
+      TaskType type,
+      String targetName) {
+    return create(customer, targetUUID, taskUUID, targetType, type, targetName, null);
   }
 
   public static CustomerTask get(Long id) {

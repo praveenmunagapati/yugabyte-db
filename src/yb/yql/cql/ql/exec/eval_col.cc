@@ -16,7 +16,16 @@
 #include "yb/common/jsonb.h"
 #include "yb/common/ql_value.h"
 
+#include "yb/util/result.h"
+
+#include "yb/yql/cql/ql/exec/exec_context.h"
 #include "yb/yql/cql/ql/exec/executor.h"
+#include "yb/yql/cql/ql/ptree/column_arg.h"
+#include "yb/yql/cql/ql/ptree/column_desc.h"
+#include "yb/yql/cql/ql/ptree/pt_dml.h"
+#include "yb/yql/cql/ql/ptree/pt_expr.h"
+#include "yb/yql/cql/ql/ptree/pt_update.h"
+#include "yb/yql/cql/ql/util/statement_params.h"
 
 namespace yb {
 namespace ql {
@@ -25,8 +34,8 @@ using std::shared_ptr;
 
 //--------------------------------------------------------------------------------------------------
 
-CHECKED_STATUS Executor::ColumnRefsToPB(const PTDmlStmt *tnode,
-                                        QLReferencedColumnsPB *columns_pb) {
+Status Executor::ColumnRefsToPB(const PTDmlStmt *tnode,
+                                QLReferencedColumnsPB *columns_pb) {
   // Write a list of columns to be read before executing the statement.
   const MCSet<int32>& column_refs = tnode->column_refs();
   for (auto column_ref : column_refs) {
@@ -40,7 +49,7 @@ CHECKED_STATUS Executor::ColumnRefsToPB(const PTDmlStmt *tnode,
   return Status::OK();
 }
 
-CHECKED_STATUS Executor::ColumnArgsToPB(const PTDmlStmt *tnode, QLWriteRequestPB *req) {
+Status Executor::ColumnArgsToPB(const PTDmlStmt *tnode, QLWriteRequestPB *req) {
   const MCVector<ColumnArg>& column_args = tnode->column_args();
 
   for (const ColumnArg& col : column_args) {
@@ -91,8 +100,6 @@ CHECKED_STATUS Executor::ColumnArgsToPB(const PTDmlStmt *tnode, QLWriteRequestPB
     }
   }
 
-  common::Jsonb jsonb_null;
-  RETURN_NOT_OK(jsonb_null.FromString("null"));
   const MCVector<JsonColumnArg>& jsoncol_args = tnode->json_col_args();
   for (const JsonColumnArg& col : jsoncol_args) {
     QLExpressionPB expr_pb;
@@ -104,7 +111,7 @@ CHECKED_STATUS Executor::ColumnArgsToPB(const PTDmlStmt *tnode, QLWriteRequestPB
           update_tnode->update_properties()->ignore_null_jsonb_attributes()) {
         if (expr_pb.expr_case() == QLExpressionPB::kValue &&
             expr_pb.value().value_case() == QLValuePB::kJsonbValue &&
-            expr_pb.value().jsonb_value() == jsonb_null.SerializedJsonb()) {
+            expr_pb.value().jsonb_value() == common::Jsonb::kSerializedJsonbNull) {
           // TODO(Piyush): Log attribute json path as well.
           VLOG(1) << "Ignoring null for json attribute in UPDATE statement " \
             "for column " << col.desc()->MangledName();

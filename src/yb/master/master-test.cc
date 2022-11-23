@@ -1,3 +1,4 @@
+// Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
 // regarding copyright ownership.  The ASF licenses this file
@@ -36,40 +37,51 @@
 #include <tuple>
 #include <vector>
 
-#include <gmock/internal/gmock-internal-utils.h>
 #include <gtest/gtest.h>
 
-#include "yb/common/partial_row.h"
-#include "yb/gutil/strings/join.h"
+#include "yb/common/ql_type.h"
+#include "yb/common/schema.h"
+#include "yb/common/wire_protocol.h"
+
+#include "yb/gutil/casts.h"
 #include "yb/gutil/strings/substitute.h"
-#include "yb/master/master-test_base.h"
+
+#include "yb/master/master_call_home.h"
+#include "yb/server/call_home-test-util.h"
+#include "yb/server/call_home.h"
+#include "yb/master/catalog_manager.h"
 #include "yb/master/master-test-util.h"
-#include "yb/master/call_home.h"
+#include "yb/master/master-test_base.h"
 #include "yb/master/master.h"
-#include "yb/master/master.proxy.h"
+#include "yb/master/master_client.proxy.h"
+#include "yb/master/master_cluster.proxy.h"
+#include "yb/master/master_ddl.proxy.h"
+#include "yb/master/master_heartbeat.proxy.h"
+#include "yb/master/master_error.h"
 #include "yb/master/mini_master.h"
 #include "yb/master/sys_catalog.h"
-#include "yb/master/ts_descriptor.h"
-#include "yb/master/ts_manager.h"
+
 #include "yb/rpc/messenger.h"
-#include "yb/server/rpc_server.h"
+#include "yb/rpc/proxy.h"
+
 #include "yb/server/server_base.proxy.h"
-#include "yb/util/capabilities.h"
+
+#include "yb/util/backoff_waiter.h"
 #include "yb/util/countdown_latch.h"
-#include "yb/util/jsonreader.h"
 #include "yb/util/metrics.h"
 #include "yb/util/monotime.h"
 #include "yb/util/random_util.h"
 #include "yb/util/status.h"
-#include "yb/util/test_util.h"
+#include "yb/util/status_log.h"
+#include "yb/util/thread.h"
 #include "yb/util/tsan_util.h"
 #include "yb/util/user.h"
 
-DECLARE_string(callhome_collection_level);
-DECLARE_string(callhome_tag);
-DECLARE_string(callhome_url);
-DECLARE_bool(callhome_enabled);
-DECLARE_int32(callhome_interval_secs);
+using std::shared_ptr;
+using std::make_shared;
+using std::string;
+using std::vector;
+
 DECLARE_double(leader_failure_max_missed_heartbeat_periods);
 DECLARE_int32(TEST_simulate_slow_table_create_secs);
 DECLARE_bool(TEST_return_error_if_namespace_not_found);
@@ -88,6 +100,8 @@ namespace master {
 using strings::Substitute;
 
 class MasterTest : public MasterTestBase {
+ public:
+  string GetWebserverDir() { return GetTestPath("webserver-docroot"); }
 };
 
 TEST_F(MasterTest, TestPingServer) {
@@ -113,143 +127,23 @@ TEST_F(MasterTest, TestShutdownWithoutStart) {
 }
 
 TEST_F(MasterTest, TestCallHome) {
-  string json;
-  CountDownLatch latch(1);
-  const char* tag_value = "callhome-test";
-
-  auto webserver_dir = GetTestPath("webserver-docroot");
+  const auto webserver_dir = GetWebserverDir();
   CHECK_OK(env_->CreateDir(webserver_dir));
-
-  WebserverOptions opts;
-  opts.port = 0;
-  opts.doc_root = webserver_dir;
-  Webserver webserver(opts, "WebserverTest");
-  ASSERT_OK(webserver.Start());
-
-  std::vector<Endpoint> addrs;
-  ASSERT_OK(webserver.GetBoundAddresses(&addrs));
-  ASSERT_EQ(addrs.size(), 1);
-  auto addr = addrs[0];
-
-  auto handler = [&json, &latch] (const Webserver::WebRequest& req, Webserver::WebResponse* resp) {
-    ASSERT_EQ(req.request_method, "POST");
-    ASSERT_EQ(json, req.post_data);
-    latch.CountDown();
-  };
-
-  webserver.RegisterPathHandler("/callhome", "callhome", handler);
-  FLAGS_callhome_tag = tag_value;
-  FLAGS_callhome_url = Format("http://$0/callhome", addr);
-
-  set<string> low {"cluster_uuid", "node_uuid", "server_type", "version_info",
-                   "timestamp", "tables", "masters",  "tservers", "tablets", "gflags"};
-  std::unordered_map<string, set<string>> collection_levels;
-  collection_levels["low"] = low;
-  collection_levels["medium"] = low;
-  collection_levels["medium"].insert({"hostname", "current_user"});
-  collection_levels["high"] = collection_levels["medium"];
-  collection_levels["high"].insert({"metrics", "rpcs"});
-
-  for (const auto& collection_level : collection_levels) {
-    LOG(INFO) << "Collection level: " << collection_level.first;
-    FLAGS_callhome_collection_level = collection_level.first;
-    CallHome call_home(mini_master_->master(), ServerType::MASTER);
-    json = call_home.BuildJson();
-    ASSERT_TRUE(!json.empty());
-    JsonReader reader(json);
-    ASSERT_OK(reader.Init());
-    for (const auto& field : collection_level.second) {
-      LOG(INFO) << "Checking json has field: " << field;
-      ASSERT_TRUE(reader.root()->HasMember(field.c_str()));
-    }
-    LOG(INFO) << "Checking json has field: tag";
-    ASSERT_TRUE(reader.root()->HasMember("tag"));
-
-    string received_tag;
-    ASSERT_OK(reader.ExtractString(reader.root(), "tag", &received_tag));
-    ASSERT_EQ(received_tag, tag_value);
-
-    if (collection_level.second.find("hostname") != collection_level.second.end()) {
-      string received_hostname;
-      ASSERT_OK(reader.ExtractString(reader.root(), "hostname", &received_hostname));
-      ASSERT_EQ(received_hostname, mini_master_->master()->get_hostname());
-    }
-
-    if (collection_level.second.find("current_user") != collection_level.second.end()) {
-      string received_user;
-      ASSERT_OK(reader.ExtractString(reader.root(), "current_user", &received_user));
-      auto expected_user = ASSERT_RESULT(GetLoggedInUser());
-      ASSERT_EQ(received_user, expected_user);
-    }
-
-    auto count = reader.root()->MemberEnd() - reader.root()->MemberBegin();
-    LOG(INFO) << "Number of elements for level " << collection_level.first << ": " << count;
-    // The number of fields should be equal to the number of collectors plus one for the tag field.
-    ASSERT_EQ(count, collection_level.second.size() + 1);
-
-    call_home.SendData(json);
-    ASSERT_TRUE(latch.WaitFor(MonoDelta::FromSeconds(10)));
-    latch.Reset(1);
-  }
+  TestCallHome<Master, MasterCallHome>(
+      webserver_dir, {"version_info", "masters", "tservers", "tables"}, mini_master_->master());
 }
 
 // This tests whether the enabling/disabling of callhome is happening dynamically
 // during runtime.
 TEST_F(MasterTest, TestCallHomeFlag) {
-  CountDownLatch latch(1);
-  const char* tag_value = "callhome-test";
-  bool disabled = false;
-
-  // Set up the webserver.
-  auto webserver_dir = GetTestPath("webserver-docroot");
+  const auto webserver_dir = GetWebserverDir();
   CHECK_OK(env_->CreateDir(webserver_dir));
+  TestCallHomeFlag<Master, MasterCallHome>(webserver_dir, mini_master_->master());
+}
 
-  WebserverOptions opts;
-  opts.port = 0;
-  opts.doc_root = webserver_dir;
-  Webserver webserver(opts, "WebserverTest");
-  ASSERT_OK(webserver.Start());
-
-  std::vector<Endpoint> addrs;
-  ASSERT_OK(webserver.GetBoundAddresses(&addrs));
-  ASSERT_EQ(addrs.size(), 1);
-  auto addr = addrs[0];
-
-  // By default callhome is enabled. This handler is expected to be called
-  // before disabling the flag. Once the flag is disabled, there shouldn't be any http posts.
-  auto handler = [&latch, &disabled] (const Webserver::WebRequest& req,
-                                        Webserver::WebResponse* resp) {
-    ASSERT_EQ(req.request_method, "POST");
-    // After callhome is disabled, assert if we get any more POST.
-    ASSERT_FALSE(disabled);
-    LOG(INFO) << "Received callhome data\n" << req.post_data;
-    latch.CountDown();
-  };
-
-  webserver.RegisterPathHandler("/callhome", "callhome", handler);
-  LOG(INFO) << "Started webserver to listen for callhome post requests.";
-
-  FLAGS_callhome_tag = tag_value;
-  FLAGS_callhome_url = Format("http://$0/callhome", addr);
-  // Set the interval to 3 secs.
-  FLAGS_callhome_interval_secs = 3 * kTimeMultiplier;
-  // Start with the default value i.e. callhome enabled.
-  disabled = false;
-
-  CallHome call_home(mini_master_->master(), ServerType::MASTER);
-  call_home.ScheduleCallHome(1 * kTimeMultiplier);
-
-  // Wait for at least one non-empty response.
-  ASSERT_TRUE(latch.WaitFor(MonoDelta::FromSeconds(10 * kTimeMultiplier)));
-
-  // Disable the callhome flag now.
-  disabled = true;
-  ANNOTATE_UNPROTECTED_WRITE(FLAGS_callhome_enabled) = false;
-  LOG(INFO) << "Callhome disabled. No more traffic";
-
-  // Wait for 3 cycles for no callhome posts. The handler is expected to assert
-  // if it gets any new HTTP POST now.
-  SleepFor(MonoDelta::FromSeconds(3 * FLAGS_callhome_interval_secs * kTimeMultiplier));
+TEST_F(MasterTest, TestGFlagsCallHome) {
+  CHECK_OK(env_->CreateDir(GetWebserverDir()));
+  TestGFlagsCallHome<Master, MasterCallHome>(mini_master_->master());
 }
 
 TEST_F(MasterTest, TestRegisterAndHeartbeat) {
@@ -264,7 +158,7 @@ TEST_F(MasterTest, TestRegisterAndHeartbeat) {
     TSHeartbeatRequestPB req;
     TSHeartbeatResponsePB resp;
     req.mutable_common()->CopyFrom(common);
-    ASSERT_OK(proxy_->TSHeartbeat(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_heartbeat_->TSHeartbeat(req, &resp, ResetAndGetController()));
 
     ASSERT_TRUE(resp.needs_reregister());
     ASSERT_TRUE(resp.needs_full_tablet_report());
@@ -287,7 +181,7 @@ TEST_F(MasterTest, TestRegisterAndHeartbeat) {
     TSHeartbeatResponsePB resp;
     req.mutable_common()->CopyFrom(common);
     req.mutable_registration()->CopyFrom(fake_reg);
-    ASSERT_OK(proxy_->TSHeartbeat(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_heartbeat_->TSHeartbeat(req, &resp, ResetAndGetController()));
 
     ASSERT_FALSE(resp.needs_reregister());
     ASSERT_TRUE(resp.needs_full_tablet_report());
@@ -316,7 +210,7 @@ TEST_F(MasterTest, TestRegisterAndHeartbeat) {
     TSHeartbeatResponsePB resp;
     req.mutable_common()->CopyFrom(common);
     req.mutable_registration()->CopyFrom(fake_reg);
-    ASSERT_OK(proxy_->TSHeartbeat(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_heartbeat_->TSHeartbeat(req, &resp, ResetAndGetController()));
 
     ASSERT_FALSE(resp.needs_reregister());
     ASSERT_TRUE(resp.needs_full_tablet_report());
@@ -332,7 +226,7 @@ TEST_F(MasterTest, TestRegisterAndHeartbeat) {
     tr->set_is_incremental(false);
     tr->set_sequence_number(0);
     tr->set_remaining_tablet_count(1);
-    ASSERT_OK(proxy_->TSHeartbeat(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_heartbeat_->TSHeartbeat(req, &resp, ResetAndGetController()));
 
     ASSERT_FALSE(resp.needs_reregister());
     ASSERT_FALSE(resp.needs_full_tablet_report());
@@ -347,7 +241,7 @@ TEST_F(MasterTest, TestRegisterAndHeartbeat) {
     tr->set_is_incremental(false);
     tr->set_sequence_number(0);
     tr->set_remaining_tablet_count(0);
-    ASSERT_OK(proxy_->TSHeartbeat(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_heartbeat_->TSHeartbeat(req, &resp, ResetAndGetController()));
 
     ASSERT_FALSE(resp.needs_reregister());
     ASSERT_FALSE(resp.needs_full_tablet_report());
@@ -364,7 +258,7 @@ TEST_F(MasterTest, TestRegisterAndHeartbeat) {
   {
     ListTabletServersRequestPB req;
     ListTabletServersResponsePB resp;
-    ASSERT_OK(proxy_->ListTabletServers(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_cluster_->ListTabletServers(req, &resp, ResetAndGetController()));
     LOG(INFO) << resp.DebugString();
     ASSERT_EQ(1, resp.servers_size());
     ASSERT_EQ("my-ts-uuid", resp.servers(0).instance_id().permanent_uuid());
@@ -395,7 +289,7 @@ TEST_F(MasterTest, TestListTablesWithoutMasterCrash) {
     req.mutable_namespace_()->set_name(kNamespaceName);
     req.mutable_partition_schema()->set_hash_schema(PartitionSchemaPB::MULTI_COLUMN_HASH_SCHEMA);
     req.mutable_schema()->mutable_table_properties()->set_num_tablets(8);
-    ASSERT_OK(this->proxy_->CreateTable(req, &resp, controller.get()));
+    ASSERT_OK(this->proxy_ddl_->CreateTable(req, &resp, controller.get()));
     ASSERT_FALSE(resp.has_error());
     LOG(INFO) << "Done creating table";
   };
@@ -409,7 +303,7 @@ TEST_F(MasterTest, TestListTablesWithoutMasterCrash) {
     DeleteNamespaceRequestPB req;
     DeleteNamespaceResponsePB resp;
     req.mutable_namespace_()->set_name(kNamespaceName);
-    ASSERT_OK(proxy_->DeleteNamespace(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteNamespace(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_FALSE(resp.has_error());
   }
@@ -420,7 +314,7 @@ TEST_F(MasterTest, TestListTablesWithoutMasterCrash) {
     FLAGS_TEST_return_error_if_namespace_not_found = true;
     ListTablesRequestPB req;
     ListTablesResponsePB resp;
-    ASSERT_OK(proxy_->ListTables(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->ListTables(req, &resp, ResetAndGetController()));
     LOG(INFO) << "Finished first ListTables request";
     ASSERT_TRUE(resp.has_error());
     string msg = resp.error().status().message();
@@ -428,7 +322,7 @@ TEST_F(MasterTest, TestListTablesWithoutMasterCrash) {
 
     // After turning off this flag, ListTables should skip the table with the error.
     FLAGS_TEST_return_error_if_namespace_not_found = false;
-    ASSERT_OK(proxy_->ListTables(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->ListTables(req, &resp, ResetAndGetController()));
     LOG(INFO) << "Finished second ListTables request";
     ASSERT_FALSE(resp.has_error());
   }
@@ -546,6 +440,13 @@ TEST_F(MasterTest, TestCatalog) {
 
   {
     ListTablesRequestPB req;
+    req.add_relation_type_filter(MATVIEW_TABLE_RELATION);
+    DoListTables(req, &tables);
+    ASSERT_EQ(0, tables.tables_size());
+  }
+
+  {
+    ListTablesRequestPB req;
     req.add_relation_type_filter(SYSTEM_TABLE_RELATION);
     DoListTables(req, &tables);
     ASSERT_EQ(kNumSystemTables, tables.tables_size());
@@ -577,8 +478,7 @@ TEST_F(MasterTest, TestCatalogHasBlockCache) {
 
   // Check block cache metrics directly and verify
   // that the counters are greater than 0
-  const unordered_map<const MetricPrototype*, scoped_refptr<Metric> > metric_map =
-    mini_master_->master()->metric_entity()->UnsafeMetricsMapForTests();
+  const auto metric_map = mini_master_->master()->metric_entity()->UnsafeMetricsMapForTests();
 
   scoped_refptr<Counter> cache_misses_counter = down_cast<Counter *>(
       FindOrDie(metric_map,
@@ -592,68 +492,75 @@ TEST_F(MasterTest, TestCatalogHasBlockCache) {
 }
 
 TEST_F(MasterTest, TestTablegroups) {
-  // Tablegroup ID must be 32 characters in length
-  const char *kTablegroupId = "test_tablegroup00000000000000000";
-  const char *kTableName = "test_table";
+  TablegroupId kTablegroupId = GetPgsqlTablegroupId(12345, 67890);
+  TableId      kTableId = GetPgsqlTableId(123455, 67891);
+  const char*  kTableName = "test_table";
   const Schema kTableSchema({ ColumnSchema("key", INT32) }, 1);
   const NamespaceName ns_name = "test_tablegroup_ns";
 
   // Create a new namespace.
   NamespaceId ns_id;
-  ListNamespacesResponsePB namespaces;
   {
     CreateNamespaceResponsePB resp;
     ASSERT_OK(CreateNamespace(ns_name, YQL_DATABASE_PGSQL, &resp));
     ns_id = resp.id();
   }
+
   {
-    ASSERT_NO_FATALS(DoListAllNamespaces(&namespaces));
-    ASSERT_EQ(2 + kNumSystemNamespaces, namespaces.namespaces_size());
+    ListNamespacesResponsePB namespaces;
+    ASSERT_NO_FATALS(DoListAllNamespaces(YQL_DATABASE_PGSQL, &namespaces));
+    ASSERT_EQ(1, namespaces.namespaces_size());
     CheckNamespaces(
         {
-            EXPECTED_DEFAULT_AND_SYSTEM_NAMESPACES,
             std::make_tuple(ns_name, ns_id)
         }, namespaces);
   }
 
   SetAtomicFlag(true, &FLAGS_TEST_tablegroup_master_only);
   // Create tablegroup and ensure it exists in catalog manager maps.
-  ASSERT_OK(CreateTablegroup(kTablegroupId, ns_id, ns_name));
+  ASSERT_OK(CreateTablegroup(kTablegroupId, ns_id, ns_name, "" /* tablespace_id */));
   SetAtomicFlag(false, &FLAGS_TEST_tablegroup_master_only);
 
   ListTablegroupsRequestPB req;
-  ListTablegroupsResponsePB resp;
   req.set_namespace_id(ns_id);
-  ASSERT_NO_FATALS(DoListTablegroups(req, &resp));
+  {
+    ListTablegroupsResponsePB resp;
+    ASSERT_NO_FATALS(DoListTablegroups(req, &resp));
 
-  bool tablegroup_found = false;
-  for (auto& tg : *resp.mutable_tablegroups()) {
-    if (tg.id().compare(kTablegroupId) == 0) {
-      tablegroup_found = true;
+    bool tablegroup_found = false;
+    for (auto& tg : *resp.mutable_tablegroups()) {
+      if (tg.id().compare(kTablegroupId) == 0) {
+        tablegroup_found = true;
+      }
     }
+    ASSERT_TRUE(tablegroup_found);
   }
-  ASSERT_TRUE(tablegroup_found);
 
   // Restart the master, verify the tablegroup still shows up
   ASSERT_OK(mini_master_->Restart());
   ASSERT_OK(mini_master_->master()->WaitUntilCatalogManagerIsLeaderAndReadyForTests());
 
-  ListTablegroupsResponsePB new_resp;
-  ASSERT_NO_FATALS(DoListTablegroups(req, &new_resp));
+  {
+    ListTablegroupsResponsePB resp;
+    ASSERT_NO_FATALS(DoListTablegroups(req, &resp));
 
-  tablegroup_found = false;
-  for (auto& tg : *new_resp.mutable_tablegroups()) {
-    if (tg.id().compare(kTablegroupId) == 0) {
-      tablegroup_found = true;
+    bool tablegroup_found = false;
+    for (auto& tg : *resp.mutable_tablegroups()) {
+      if (tg.id().compare(kTablegroupId) == 0) {
+        tablegroup_found = true;
+      }
     }
+    ASSERT_TRUE(tablegroup_found);
   }
-  ASSERT_TRUE(tablegroup_found);
 
   // Now ensure that a table can be created in the tablegroup.
-  ASSERT_OK(CreateTablegroupTable(ns_id, kTableName, kTablegroupId, kTableSchema));
+  ASSERT_OK(CreateTablegroupTable(ns_id, kTableId, kTableName, kTablegroupId, kTableSchema));
 
-  // Delete the tablegroup
-  ASSERT_OK(DeleteTablegroup(kTablegroupId, ns_id));
+  // Delete the table to clean up tablegroup.
+  ASSERT_OK(DeleteTableById(kTableId));
+
+  // Delete the tablegroup.
+  ASSERT_OK(DeleteTablegroup(kTablegroupId));
 }
 
 // Regression test for KUDU-253/KUDU-592: crash if the schema passed to CreateTable
@@ -671,7 +578,7 @@ TEST_F(MasterTest, TestCreateTableInvalidSchema) {
     col->set_is_key(true);
   }
 
-  ASSERT_OK(proxy_->CreateTable(req, &resp, ResetAndGetController()));
+  ASSERT_OK(proxy_ddl_->CreateTable(req, &resp, ResetAndGetController()));
   SCOPED_TRACE(resp.DebugString());
   ASSERT_TRUE(resp.has_error());
   ASSERT_EQ(AppStatusPB::INVALID_ARGUMENT, resp.error().status().code());
@@ -687,8 +594,8 @@ TEST_F(MasterTest, TestTabletsDeletedWhenTableInDeletingState) {
   ASSERT_OK(CreateTable(kTableName, kTableSchema));
   vector<TabletId> tablet_ids;
   {
-    CatalogManager::SharedLock lock(mini_master_->master()->catalog_manager()->mutex_);
-    for (auto elem : *mini_master_->master()->catalog_manager()->tablet_map_) {
+    CatalogManager::SharedLock lock(mini_master_->catalog_manager_impl().mutex_);
+    for (auto elem : *mini_master_->catalog_manager_impl().tablet_map_) {
       auto tablet = elem.second;
       if (tablet->table()->name() == kTableName) {
         tablet_ids.push_back(elem.first);
@@ -706,10 +613,10 @@ TEST_F(MasterTest, TestTabletsDeletedWhenTableInDeletingState) {
 
   // Verify that the test table's tablets are in the DELETED state.
   {
-    CatalogManager::SharedLock lock(mini_master_->master()->catalog_manager()->mutex_);
+    CatalogManager::SharedLock lock(mini_master_->catalog_manager_impl().mutex_);
     for (const auto& tablet_id : tablet_ids) {
-      auto iter = mini_master_->master()->catalog_manager()->tablet_map_->find(tablet_id);
-      ASSERT_NE(iter, mini_master_->master()->catalog_manager()->tablet_map_->end());
+      auto iter = mini_master_->catalog_manager_impl().tablet_map_->find(tablet_id);
+      ASSERT_NE(iter, mini_master_->catalog_manager_impl().tablet_map_->end());
       auto l = iter->second->LockForRead();
       ASSERT_EQ(l->pb.state(), SysTabletsEntryPB::DELETED);
     }
@@ -729,7 +636,7 @@ TEST_F(MasterTest, TestInvalidGetTableLocations) {
     // Set the "start" key greater than the "end" key.
     req.set_partition_key_start("zzzz");
     req.set_partition_key_end("aaaa");
-    ASSERT_OK(proxy_->GetTableLocations(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_client_->GetTableLocations(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_TRUE(resp.has_error());
     ASSERT_EQ(AppStatusPB::INVALID_ARGUMENT, resp.error().status().code());
@@ -743,7 +650,8 @@ TEST_F(MasterTest, TestInvalidPlacementInfo) {
   Schema schema({ColumnSchema("key", INT32)}, 1);
   GetMasterClusterConfigRequestPB config_req;
   GetMasterClusterConfigResponsePB config_resp;
-  proxy_->GetMasterClusterConfig(config_req, &config_resp, ResetAndGetController());
+  ASSERT_OK(proxy_cluster_->GetMasterClusterConfig(
+      config_req, &config_resp, ResetAndGetController()));
   ASSERT_FALSE(config_resp.has_error());
   ASSERT_TRUE(config_resp.has_cluster_config());
   auto cluster_config = config_resp.cluster_config();
@@ -830,7 +738,7 @@ TEST_F(MasterTest, TestNamespaces) {
     DeleteNamespaceRequestPB req;
     DeleteNamespaceResponsePB resp;
     req.mutable_namespace_()->set_id(other_ns_id);
-    ASSERT_OK(proxy_->DeleteNamespace(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteNamespace(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_FALSE(resp.has_error());
   }
@@ -866,7 +774,7 @@ TEST_F(MasterTest, TestNamespaces) {
     DeleteNamespaceRequestPB req;
     DeleteNamespaceResponsePB resp;
     req.mutable_namespace_()->set_name(other_ns_name);
-    ASSERT_OK(proxy_->DeleteNamespace(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteNamespace(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_FALSE(resp.has_error());
   }
@@ -904,7 +812,7 @@ TEST_F(MasterTest, TestNamespaces) {
     DeleteNamespaceResponsePB resp;
 
     req.mutable_namespace_()->set_name("nonexistingns");
-    ASSERT_OK(proxy_->DeleteNamespace(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteNamespace(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_TRUE(resp.has_error());
     ASSERT_EQ(resp.error().code(), MasterErrorPB::NAMESPACE_NOT_FOUND);
@@ -1047,7 +955,7 @@ TEST_F(MasterTest, TestDeletingNonEmptyNamespace) {
     DeleteNamespaceResponsePB resp;
     req.set_database_type(YQLDatabase::YQL_DATABASE_PGSQL);
     req.mutable_namespace_()->set_id(other_ns_pgsql_id);
-    ASSERT_OK(proxy_->DeleteNamespace(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteNamespace(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_FALSE(resp.has_error());
 
@@ -1084,7 +992,7 @@ TEST_F(MasterTest, TestDeletingNonEmptyNamespace) {
     DeleteNamespaceResponsePB resp;
 
     req.mutable_namespace_()->set_name(other_ns_name);
-    ASSERT_OK(proxy_->DeleteNamespace(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteNamespace(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_TRUE(resp.has_error());
     ASSERT_EQ(resp.error().code(), MasterErrorPB::NAMESPACE_IS_NOT_EMPTY);
@@ -1108,7 +1016,7 @@ TEST_F(MasterTest, TestDeletingNonEmptyNamespace) {
     DeleteNamespaceResponsePB resp;
 
     req.mutable_namespace_()->set_id(other_ns_id);
-    ASSERT_OK(proxy_->DeleteNamespace(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteNamespace(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_TRUE(resp.has_error());
     ASSERT_EQ(resp.error().code(), MasterErrorPB::NAMESPACE_IS_NOT_EMPTY);
@@ -1145,7 +1053,7 @@ TEST_F(MasterTest, TestDeletingNonEmptyNamespace) {
     DeleteNamespaceRequestPB req;
     DeleteNamespaceResponsePB resp;
     req.mutable_namespace_()->set_name(other_ns_name);
-    ASSERT_OK(proxy_->DeleteNamespace(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteNamespace(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_FALSE(resp.has_error());
   }
@@ -1263,7 +1171,7 @@ TEST_F(MasterTest, TestTablesWithNamespace) {
     req.mutable_table()->set_table_name(kTableName);
     req.mutable_table()->mutable_namespace_()->set_name(other_ns_name);
     req.mutable_new_namespace()->set_name("nonexistingns");
-    ASSERT_OK(proxy_->AlterTable(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->AlterTable(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_TRUE(resp.has_error());
     ASSERT_EQ(resp.error().code(), MasterErrorPB::NAMESPACE_NOT_FOUND);
@@ -1285,7 +1193,7 @@ TEST_F(MasterTest, TestTablesWithNamespace) {
     req.mutable_table()->set_table_name(kTableName);
     req.mutable_table()->mutable_namespace_()->set_name(other_ns_name);
     req.mutable_new_namespace()->set_id("deadbeafdeadbeafdeadbeafdeadbeaf");
-    ASSERT_OK(proxy_->AlterTable(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->AlterTable(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_TRUE(resp.has_error());
     ASSERT_EQ(resp.error().code(), MasterErrorPB::NAMESPACE_NOT_FOUND);
@@ -1307,7 +1215,7 @@ TEST_F(MasterTest, TestTablesWithNamespace) {
     req.mutable_table()->set_table_name(kTableName);
     req.mutable_table()->mutable_namespace_()->set_name(other_ns_name);
     req.mutable_new_namespace()->set_name(default_namespace_name);
-    ASSERT_OK(proxy_->AlterTable(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->AlterTable(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_FALSE(resp.has_error());
   }
@@ -1336,7 +1244,7 @@ TEST_F(MasterTest, TestTablesWithNamespace) {
     DeleteNamespaceRequestPB req;
     DeleteNamespaceResponsePB resp;
     req.mutable_namespace_()->set_name(other_ns_name);
-    ASSERT_OK(proxy_->DeleteNamespace(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteNamespace(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_FALSE(resp.has_error());
   }
@@ -1385,14 +1293,14 @@ TEST_F(MasterTest, TestNamespaceCreateStates) {
     DeleteNamespaceResponsePB resp;
     req.mutable_namespace_()->set_name(test_name);
     req.mutable_namespace_()->set_database_type(YQLDatabase::YQL_DATABASE_PGSQL);
-    ASSERT_OK(proxy_->DeleteNamespace(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteNamespace(req, &resp, ResetAndGetController()));
     ASSERT_TRUE(resp.has_error());
     ASSERT_EQ(resp.error().code(), MasterErrorPB::IN_TRANSITION_CAN_RETRY);
   }
 
   // Finish Namespace create.
   SetAtomicFlag(false, &FLAGS_TEST_hang_on_namespace_transition);
-  CreateNamespaceWait(nsid, YQLDatabase::YQL_DATABASE_PGSQL);
+  ASSERT_OK(CreateNamespaceWait(nsid, YQLDatabase::YQL_DATABASE_PGSQL));
 
   // Verify that Basic Access to a Namespace is now available.
   // 1. Create a Table within the Schema.
@@ -1412,7 +1320,7 @@ TEST_F(MasterTest, TestNamespaceCreateStates) {
     DeleteNamespaceResponsePB del_resp;
     del_req.mutable_namespace_()->set_name("new_" + test_name);
     del_req.mutable_namespace_()->set_database_type(YQLDatabase::YQL_DATABASE_PGSQL);
-    ASSERT_OK(proxy_->DeleteNamespace(del_req, &del_resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteNamespace(del_req, &del_resp, ResetAndGetController()));
     ASSERT_FALSE(del_resp.has_error());
 
     // ListNamespaces should not show the Namespace, because it's in the DELETING state.
@@ -1431,10 +1339,9 @@ TEST_F(MasterTest, TestNamespaceCreateStates) {
 
     // We should be able to create a namespace with the same NAME at this time.
     ASSERT_OK(CreateNamespaceAsync("new_" + test_name, YQLDatabase::YQL_DATABASE_PGSQL, &resp));
-    CreateNamespaceWait(resp.id(), YQLDatabase::YQL_DATABASE_PGSQL);
+    ASSERT_OK(CreateNamespaceWait(resp.id(), YQLDatabase::YQL_DATABASE_PGSQL));
   }
 }
-
 
 TEST_F(MasterTest, TestNamespaceCreateFailure) {
   NamespaceName test_name = "test_pgsql";
@@ -1456,7 +1363,7 @@ TEST_F(MasterTest, TestNamespaceCreateFailure) {
 
     // Internal search of CatalogManager should reveal it's state (debug UI uses this function).
     std::vector<scoped_refptr<NamespaceInfo>> namespace_internal;
-    mini_master_->master()->catalog_manager()->GetAllNamespaces(&namespace_internal, false);
+    mini_master_->catalog_manager().GetAllNamespaces(&namespace_internal, false);
     auto pos = std::find_if(namespace_internal.begin(), namespace_internal.end(),
                  [&nsid](const scoped_refptr<NamespaceInfo>& ns) {
                    return ns && ns->id() == nsid;
@@ -1477,7 +1384,7 @@ TEST_F(MasterTest, TestNamespaceCreateFailure) {
 
     // Internal search of CatalogManager should reveal it's DELETING to cleanup any partial apply.
     std::vector<scoped_refptr<NamespaceInfo>> namespace_internal;
-    mini_master_->master()->catalog_manager()->GetAllNamespaces(&namespace_internal, false);
+    mini_master_->catalog_manager().GetAllNamespaces(&namespace_internal, false);
     auto pos = std::find_if(namespace_internal.begin(), namespace_internal.end(),
         [&nsid](const scoped_refptr<NamespaceInfo>& ns) {
           return ns && ns->id() == nsid;
@@ -1491,7 +1398,7 @@ TEST_F(MasterTest, TestNamespaceCreateFailure) {
 
   ASSERT_OK(LoggedWaitFor([&]() -> Result<bool> {
     std::vector<scoped_refptr<NamespaceInfo>> namespace_internal;
-    mini_master_->master()->catalog_manager()->GetAllNamespaces(&namespace_internal, false);
+    mini_master_->catalog_manager().GetAllNamespaces(&namespace_internal, false);
     auto pos = std::find_if(namespace_internal.begin(), namespace_internal.end(),
         [&nsid](const scoped_refptr<NamespaceInfo>& ns) {
           return ns && ns->id() == nsid;
@@ -1505,7 +1412,7 @@ TEST_F(MasterTest, TestNamespaceCreateFailure) {
 
   ASSERT_OK(LoggedWaitFor([&]() -> Result<bool> {
     std::vector<scoped_refptr<NamespaceInfo>> namespace_internal;
-    mini_master_->master()->catalog_manager()->GetAllNamespaces(&namespace_internal, false);
+    mini_master_->catalog_manager().GetAllNamespaces(&namespace_internal, false);
     auto pos = std::find_if(namespace_internal.begin(), namespace_internal.end(),
         [&nsid](const scoped_refptr<NamespaceInfo>& ns) {
           return ns && ns->id() == nsid;
@@ -1550,7 +1457,7 @@ TEST_P(LoopedMasterTest, TestNamespaceCreateSysCatalogFailure) {
 
     // Internal search of CatalogManager should reveal whether it was partially created.
     std::vector<scoped_refptr<NamespaceInfo>> namespace_internal;
-    mini_master_->master()->catalog_manager()->GetAllNamespaces(&namespace_internal, false);
+    mini_master_->catalog_manager().GetAllNamespaces(&namespace_internal, false);
     auto was_internally_created = std::any_of(namespace_internal.begin(), namespace_internal.end(),
         [&test_name](const scoped_refptr<NamespaceInfo>& ns) {
           if (ns && ns->name() == test_name && ns->state() != SysNamespaceEntryPB::DELETED) {
@@ -1564,7 +1471,7 @@ TEST_P(LoopedMasterTest, TestNamespaceCreateSysCatalogFailure) {
       ++created;
       // Ensure we can delete the failed namespace.
       DeleteNamespaceResponsePB del_resp;
-      ASSERT_OK(proxy_->DeleteNamespace(del_req, &del_resp, ResetAndGetController()));
+      ASSERT_OK(proxy_ddl_->DeleteNamespace(del_req, &del_resp, ResetAndGetController()));
       if (del_resp.has_error()) {
         LOG(INFO) << del_resp.error().DebugString();
       }
@@ -1605,7 +1512,7 @@ TEST_P(LoopedMasterTest, TestNamespaceDeleteSysCatalogFailure) {
     LOG(INFO) << "Iteration " << ++iter;
     bool delete_failed = false;
 
-    ASSERT_OK(proxy_->DeleteNamespace(del_req, &del_resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteNamespace(del_req, &del_resp, ResetAndGetController()));
 
     delete_failed = del_resp.has_error();
     if (del_resp.has_error()) {
@@ -1627,7 +1534,7 @@ TEST_P(LoopedMasterTest, TestNamespaceDeleteSysCatalogFailure) {
       LOG(INFO) << "Next Delete should succeed";
 
       // If the namespace delete fails, Ensure that we can restart the delete and it succeeds.
-      ASSERT_OK(proxy_->DeleteNamespace(del_req, &del_resp, ResetAndGetController()));
+      ASSERT_OK(proxy_ddl_->DeleteNamespace(del_req, &del_resp, ResetAndGetController()));
       ASSERT_FALSE(del_resp.has_error());
       ASSERT_OK(DeleteNamespaceWait(is_del_req));
     }
@@ -1711,7 +1618,7 @@ TEST_F(MasterTest, TestFullTableName) {
     req.mutable_table()->set_table_name(kTableName);
     req.mutable_table()->mutable_namespace_()->set_name(other_ns_name);
     req.mutable_new_namespace()->set_name(default_namespace_name);
-    ASSERT_OK(proxy_->AlterTable(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->AlterTable(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_TRUE(resp.has_error());
     ASSERT_EQ(resp.error().code(), MasterErrorPB::OBJECT_ALREADY_PRESENT);
@@ -1748,7 +1655,7 @@ TEST_F(MasterTest, TestFullTableName) {
     DeleteTableResponsePB resp;
     req.mutable_table()->set_table_name(kTableName);
     req.mutable_table()->mutable_namespace_()->set_name(other_ns_name);
-    ASSERT_OK(proxy_->DeleteTable(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteTable(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_TRUE(resp.has_error());
     ASSERT_EQ(resp.error().code(), MasterErrorPB::OBJECT_NOT_FOUND);
@@ -1773,7 +1680,7 @@ TEST_F(MasterTest, TestFullTableName) {
     DeleteNamespaceRequestPB req;
     DeleteNamespaceResponsePB resp;
     req.mutable_namespace_()->set_name(other_ns_name);
-    ASSERT_OK(proxy_->DeleteNamespace(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteNamespace(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_FALSE(resp.has_error());
   }
@@ -1839,7 +1746,7 @@ TEST_F(MasterTest, TestGetTableSchema) {
     req.mutable_table()->mutable_namespace_()->set_name(other_ns_name);
 
     // Check the request.
-    ASSERT_OK(proxy_->GetTableSchema(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->GetTableSchema(req, &resp, ResetAndGetController()));
 
     // Check the responsed data.
     SCOPED_TRACE(resp.DebugString());
@@ -1887,7 +1794,7 @@ TEST_F(MasterTest, TestGetTableSchema) {
     DeleteNamespaceRequestPB req;
     DeleteNamespaceResponsePB resp;
     req.mutable_namespace_()->set_name(other_ns_name);
-    ASSERT_OK(proxy_->DeleteNamespace(req, &resp, ResetAndGetController()));
+    ASSERT_OK(proxy_ddl_->DeleteNamespace(req, &resp, ResetAndGetController()));
     SCOPED_TRACE(resp.DebugString());
     ASSERT_FALSE(resp.has_error());
   }
@@ -1923,12 +1830,44 @@ TEST_F(MasterTest, TestNetworkErrorOnFirstRun) {
   ASSERT_OK(mini_master_->Start());
 }
 
-static void GetTableSchema(const char* table_name,
-                           const char* namespace_name,
-                           const Schema* kSchema,
-                           MasterServiceProxy* proxy,
-                           CountDownLatch* started,
-                           AtomicBool* done) {
+TEST_F(MasterTest, TestMasterAddressInBroadcastAddress) {
+  // Test the scenario where master_address exists in broadcast_addresses
+  // but not in rpc_bind_addresses.
+  std::vector<std::string> master_addresses = {"127.0.0.51"};
+  std::vector<std::string> rpc_bind_addresses = {"127.0.0.52"};
+  std::vector<std::string> broadcast_addresses = {"127.0.0.51"};
+
+  TearDown();
+  mini_master_.reset(new MiniMaster(Env::Default(), GetTestPath("Master-test"),
+                                    AllocateFreePort(), AllocateFreePort(), 0));
+  mini_master_->SetCustomAddresses(
+      master_addresses, rpc_bind_addresses, broadcast_addresses);
+  ASSERT_OK(mini_master_->Start());
+}
+
+TEST_F(MasterTest, TestMasterAddressNotInRpcAndBroadcastAddress) {
+  // Test the scenario where master_address does not exist in either
+  // broadcast_addresses or rpc_bind_addresses.
+  std::vector<std::string> master_addresses = {"127.0.0.51"};
+  std::vector<std::string> rpc_bind_addresses = {"127.0.0.52"};
+  std::vector<std::string> broadcast_addresses = {"127.0.0.53"};
+
+  TearDown();
+  mini_master_.reset(new MiniMaster(Env::Default(), GetTestPath("Master-test"),
+                                    AllocateFreePort(), AllocateFreePort(), 0));
+  mini_master_->SetCustomAddresses(
+      master_addresses, rpc_bind_addresses, broadcast_addresses);
+  ASSERT_NOK(mini_master_->Start());
+}
+
+namespace {
+
+void GetTableSchema(const char* table_name,
+                    const char* namespace_name,
+                    const Schema* kSchema,
+                    const MasterDdlProxy& proxy,
+                    CountDownLatch* started,
+                    AtomicBool* done) {
   GetTableSchemaRequestPB req;
   GetTableSchemaResponsePB resp;
   req.mutable_table()->set_table_name(table_name);
@@ -1938,7 +1877,7 @@ static void GetTableSchema(const char* table_name,
   while (!done->Load()) {
     RpcController controller;
 
-    CHECK_OK(proxy->GetTableSchema(req, &resp, &controller));
+    CHECK_OK(proxy.GetTableSchema(req, &resp, &controller));
     SCOPED_TRACE(resp.DebugString());
 
     // There are two possible outcomes:
@@ -1961,6 +1900,8 @@ static void GetTableSchema(const char* table_name,
   }
 }
 
+} // namespace
+
 // The catalog manager had a bug wherein GetTableSchema() interleaved with
 // CreateTable() could expose intermediate uncommitted state to clients. This
 // test ensures that bug does not regress.
@@ -1978,7 +1919,7 @@ TEST_F(MasterTest, TestGetTableSchemaIsAtomicWithCreateTable) {
   scoped_refptr<Thread> t;
   ASSERT_OK(Thread::Create("test", "test",
                            &GetTableSchema, kTableName, default_namespace_name.c_str(),
-                           &kTableSchema, proxy_.get(), &started, &done, &t));
+                           &kTableSchema, std::cref(*proxy_ddl_), &started, &done, &t));
 
   // Only create the table after the thread has started.
   started.Wait();

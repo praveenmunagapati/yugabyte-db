@@ -13,13 +13,15 @@
 //
 //
 
-#ifndef YB_UTIL_RESULT_H
-#define YB_UTIL_RESULT_H
+#pragma once
 
 #include <string>
 #include <type_traits>
 
+#include "yb/gutil/dynamic_annotations.h"
+
 #include "yb/util/status.h"
+#include "yb/util/tostring.h"
 
 namespace yb {
 
@@ -51,6 +53,8 @@ struct ResultTraits<TValue&> {
   static void Destroy(Stored* value) {}
   static TValue* GetPtr(const Stored* value) { return *value; }
 };
+
+void StatusCheck(bool);
 
 template<class TValue>
 class NODISCARD_CLASS Result {
@@ -88,11 +92,11 @@ class NODISCARD_CLASS Result {
   Result(Status::OK&&) = delete; // NOLINT
 
   Result(const Status& status) : success_(false), status_(status) { // NOLINT
-    CHECK(!status_.ok());
+    StatusCheck(!status_.ok());
   }
 
   Result(Status&& status) : success_(false), status_(std::move(status)) { // NOLINT
-    CHECK(!status_.ok());
+    StatusCheck(!status_.ok());
   }
 
   Result(const TValue& value) : success_(true), value_(Traits::ToStored(value)) {} // NOLINT
@@ -131,13 +135,13 @@ class NODISCARD_CLASS Result {
   }
 
   Result& operator=(const Status& status) {
-    CHECK(!status.ok());
+    StatusCheck(!status.ok());
     this->~Result();
     return *new (this) Result(status);
   }
 
   Result& operator=(Status&& status) {
-    CHECK(!status.ok());
+    StatusCheck(!status.ok());
     this->~Result();
     return *new (this) Result(std::move(status));
   }
@@ -172,25 +176,25 @@ class NODISCARD_CLASS Result {
 
   const Status& status() const& {
 #ifndef NDEBUG
-    CHECK(ANNOTATE_UNPROTECTED_READ(success_checked_));
+    StatusCheck(ANNOTATE_UNPROTECTED_READ(success_checked_));
 #endif
-    CHECK(!success_);
+    StatusCheck(!success_);
     return status_;
   }
 
   Status& status() & {
 #ifndef NDEBUG
-    CHECK(ANNOTATE_UNPROTECTED_READ(success_checked_));
+    StatusCheck(ANNOTATE_UNPROTECTED_READ(success_checked_));
 #endif
-    CHECK(!success_);
+    StatusCheck(!success_);
     return status_;
   }
 
   Status&& status() && {
 #ifndef NDEBUG
-    CHECK(ANNOTATE_UNPROTECTED_READ(success_checked_));
+    StatusCheck(ANNOTATE_UNPROTECTED_READ(success_checked_));
 #endif
-    CHECK(!success_);
+    StatusCheck(!success_);
     return std::move(status_);
   }
 
@@ -200,9 +204,9 @@ class NODISCARD_CLASS Result {
 
   TValue&& operator*() && {
 #ifndef NDEBUG
-    CHECK(ANNOTATE_UNPROTECTED_READ(success_checked_));
+    StatusCheck(ANNOTATE_UNPROTECTED_READ(success_checked_));
 #endif
-    CHECK(success_);
+    StatusCheck(success_);
     return value_;
   }
 
@@ -211,21 +215,21 @@ class NODISCARD_CLASS Result {
 
   auto get_ptr() const {
 #ifndef NDEBUG
-    CHECK(ANNOTATE_UNPROTECTED_READ(success_checked_));
+    StatusCheck(ANNOTATE_UNPROTECTED_READ(success_checked_));
 #endif
-    CHECK(success_);
+    StatusCheck(success_);
     return Traits::GetPtr(&value_);
   }
 
   auto get_ptr() {
 #ifndef NDEBUG
-    CHECK(ANNOTATE_UNPROTECTED_READ(success_checked_));
+    StatusCheck(ANNOTATE_UNPROTECTED_READ(success_checked_));
 #endif
-    CHECK(success_);
+    StatusCheck(success_);
     return Traits::GetPtr(&value_);
   }
 
-  CHECKED_STATUS MoveTo(typename Traits::Pointer value) {
+  Status MoveTo(typename Traits::Pointer value) {
     if (!ok()) {
       return status();
     }
@@ -290,7 +294,7 @@ class ResultToStatusAdaptor {
   explicit ResultToStatusAdaptor(const Functor& functor) : functor_(functor) {}
 
   template <class Output, class... Args>
-  CHECKED_STATUS operator()(Output* output, Args&&... args) {
+  Status operator()(Output* output, Args&&... args) {
     auto result = functor_(std::forward<Args>(args)...);
     RETURN_NOT_OK(result);
     *output = std::move(*result);
@@ -306,17 +310,37 @@ ResultToStatusAdaptor<Functor> ResultToStatus(const Functor& functor) {
 }
 
 template<class TValue>
-CHECKED_STATUS ResultToStatus(const Result<TValue>& result) {
+Status ResultToStatus(const Result<TValue>& result) {
   return result.ok() ? Status::OK() : result.status();
+}
+
+template<class TValue>
+TValue ResultToValue(const Result<TValue>& result, const TValue& value_for_error) {
+  return result.ok() ? *result : value_for_error;
+}
+
+template<class TValue>
+TValue ResultToValue(Result<TValue>&& result, const TValue& value_for_error) {
+  return result.ok() ? std::move(*result) : value_for_error;
+}
+
+template<class TValue>
+TValue ResultToValue(const Result<TValue>& result, TValue&& value_for_error) {
+  return result.ok() ? *result : std::move(value_for_error);
+}
+
+template<class TValue>
+TValue ResultToValue(Result<TValue>&& result, TValue&& value_for_error) {
+  return result.ok() ? std::move(*result) : std::move(value_for_error);
 }
 
 /*
  * GNU statement expression extension forces to return value and not rvalue reference.
  * As a result VERIFY_RESULT or similar helpers will call move or copy constructor of T even
  * for Result<T&>/Result<const T&>
- * To void this undesirable behavior for Result<T&>/Result<const T&> the std::reference_wrapper<T>
+ * To avoid this undesirable behavior for Result<T&>/Result<const T&>, the std::reference_wrapper<T>
  * is returned from statement.
- * Next functions are the helps to implement this strategy
+ * The following functions help implement this strategy.
  */
 template<class T>
 T&& WrapMove(Result<T>&& result) {
@@ -339,26 +363,21 @@ struct IsNonConstResultRvalue : std::false_type {};
 template<class T>
 struct IsNonConstResultRvalue<Result<T>&&> : std::true_type {};
 
-// TODO(dmitry): Subsitute __static_assert array with real static_assert when
-//               old compilers (gcc 5.5) will not be used.
-//               static_assert(yb::IsNonConstResultRvalue<decltype(__result)>::value,
-//                             "only non const Result<T> rvalue reference is allowed");
 #define RESULT_CHECKER_HELPER(expr, checker) \
   __extension__ ({ \
     auto&& __result = (expr); \
-    __attribute__((unused)) constexpr char __static_assert[ \
-        ::yb::IsNonConstResultRvalue<decltype(__result)>::value ? 1 : -1] = {0}; \
+    static_assert(yb::IsNonConstResultRvalue<decltype(__result)>::value, \
+                  "only non-const Result<T> rvalue reference is allowed"); \
     checker; \
     WrapMove(std::move(__result)); })
-
-// Checks that result is ok, extracts result value is case of success.
-#define CHECK_RESULT(expr) \
-  RESULT_CHECKER_HELPER(expr, CHECK_OK(__result))
 
 // Returns if result is not ok, extracts result value in case of success.
 #define VERIFY_RESULT(expr) \
   RESULT_CHECKER_HELPER(expr, RETURN_NOT_OK(__result))
 
+// Returns if result is not ok, extracts result value in case of success.
+#define VERIFY_RESULT_OR_SET_CODE(expr, code) \
+  RESULT_CHECKER_HELPER(expr, RETURN_NOT_OK_SET_CODE(__result, code))
 
 // Helper version of VERIFY_RESULT which returns reference instead of std::reference_wrapper.
 #define VERIFY_RESULT_REF(expr) \
@@ -382,5 +401,3 @@ struct IsNonConstResultRvalue<Result<T>&&> : std::true_type {};
   RESULT_CHECKER_HELPER(expr, ASSERT_OK_FAST(__result))
 
 } // namespace yb
-
-#endif // YB_UTIL_RESULT_H

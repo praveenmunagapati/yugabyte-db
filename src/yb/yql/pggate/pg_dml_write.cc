@@ -14,25 +14,11 @@
 //--------------------------------------------------------------------------------------------------
 
 #include "yb/yql/pggate/pg_dml_write.h"
-#include "yb/client/yb_op.h"
+
+#include "yb/gutil/casts.h"
 
 namespace yb {
 namespace pggate {
-
-using std::make_shared;
-using std::shared_ptr;
-using std::string;
-using namespace std::literals;  // NOLINT
-
-using client::YBClient;
-using client::YBSession;
-using client::YBMetaDataCache;
-using client::YBTable;
-using client::YBTableName;
-using client::YBPgsqlWriteOp;
-
-// TODO(neil) This should be derived from a GFLAGS.
-static MonoDelta kSessionTimeout = 60s;
 
 //--------------------------------------------------------------------------------------------------
 // PgDmlWrite
@@ -40,8 +26,10 @@ static MonoDelta kSessionTimeout = 60s;
 
 PgDmlWrite::PgDmlWrite(PgSession::ScopedRefPtr pg_session,
                        const PgObjectId& table_id,
-                       const bool is_single_row_txn)
-    : PgDml(std::move(pg_session), table_id), is_single_row_txn_(is_single_row_txn) {
+                       bool is_single_row_txn,
+                       bool is_region_local)
+    : PgDml(std::move(pg_session), table_id, is_region_local),
+      is_single_row_txn_(is_single_row_txn) {
 }
 
 PgDmlWrite::~PgDmlWrite() {
@@ -61,7 +49,7 @@ void PgDmlWrite::PrepareColumns() {
   // Because DocDB API requires that primary columns must be listed in their created-order,
   // the slots for primary column bind expressions are allocated here in correct order.
   for (auto& col : target_.columns()) {
-    col.AllocPrimaryBindPB(write_req_);
+    col.AllocPrimaryBindPB(write_req_.get());
   }
 }
 
@@ -93,8 +81,8 @@ Status PgDmlWrite::DeleteEmptyPrimaryBinds() {
       }
     }
   } else {
-    write_req_->clear_partition_column_values();
-    write_req_->clear_range_column_values();
+    write_req_->mutable_partition_column_values()->clear();
+    write_req_->mutable_range_column_values()->clear();
   }
 
   // Check for missing key.  This is okay when binding the whole table (for colocated truncate).
@@ -105,7 +93,7 @@ Status PgDmlWrite::DeleteEmptyPrimaryBinds() {
   return Status::OK();
 }
 
-Status PgDmlWrite::Exec(bool force_non_bufferable) {
+Status PgDmlWrite::Exec(ForceNonBufferable force_non_bufferable) {
 
   // Delete allocated binds that are not associated with a value.
   // YBClient interface enforce us to allocate binds for primary key columns in their indexing
@@ -118,7 +106,7 @@ Status PgDmlWrite::Exec(bool force_non_bufferable) {
   RETURN_NOT_OK(UpdateAssignPBs());
 
   if (write_req_->has_ybctid_column_value()) {
-    PgsqlExpressionPB *exprpb = write_req_->mutable_ybctid_column_value();
+    auto* exprpb = write_req_->mutable_ybctid_column_value();
     CHECK(exprpb->has_value() && exprpb->value().has_binary_value())
       << "YBCTID must be of BINARY datatype";
   }
@@ -127,12 +115,14 @@ Status PgDmlWrite::Exec(bool force_non_bufferable) {
   RETURN_NOT_OK(doc_op_->ExecuteInit(nullptr));
 
   // Set column references in protobuf.
+  ColRefsToPB();
+  // Compatibility: set column ids as expected by legacy nodes
   ColumnRefsToPB(write_req_->mutable_column_refs());
 
   // Execute the statement. If the request has been sent, get the result and handle any rows
   // returned.
   if (VERIFY_RESULT(doc_op_->Execute(force_non_bufferable)) == RequestSent::kTrue) {
-    RETURN_NOT_OK(doc_op_->GetResult(&rowsets_));
+    rowsets_.splice(rowsets_.end(), VERIFY_RESULT(doc_op_->GetResult()));
 
     // Save the number of rows affected by the op.
     rows_affected_count_ = VERIFY_RESULT(doc_op_->GetRowsAffectedCount());
@@ -148,23 +138,42 @@ Status PgDmlWrite::SetWriteTime(const HybridTime& write_time) {
 }
 
 void PgDmlWrite::AllocWriteRequest() {
-  auto wop = AllocWriteOperation();
-  DCHECK(wop);
-  wop->set_is_single_row_txn(is_single_row_txn_);
-  write_req_ = wop->mutable_request();
-  doc_op_ = make_shared<PgDocWriteOp>(pg_session_, &target_, table_id_, std::move(wop));
+  auto write_op = ArenaMakeShared<PgsqlWriteOp>(arena_ptr(), &arena(), !is_single_row_txn_,
+                                                is_region_local_);
+
+  write_req_ = std::shared_ptr<LWPgsqlWriteRequestPB>(write_op, &write_op->write_request());
+  write_req_->set_stmt_type(stmt_type());
+  write_req_->set_client(YQL_CLIENT_PGSQL);
+  write_req_->dup_table_id(table_id_.GetYbTableId());
+  write_req_->set_schema_version(target_->schema_version());
+  write_req_->set_stmt_id(reinterpret_cast<uint64_t>(write_req_.get()));
+
+  doc_op_ = std::make_shared<PgDocWriteOp>(pg_session_, &target_, std::move(write_op));
 }
 
-PgsqlExpressionPB *PgDmlWrite::AllocColumnBindPB(PgColumn *col) {
-  return col->AllocBindPB(write_req_);
+LWPgsqlExpressionPB *PgDmlWrite::AllocColumnBindPB(PgColumn *col) {
+  return col->AllocBindPB(write_req_.get());
 }
 
-PgsqlExpressionPB *PgDmlWrite::AllocColumnAssignPB(PgColumn *col) {
-  return col->AllocAssignPB(write_req_);
+LWPgsqlExpressionPB *PgDmlWrite::AllocColumnAssignPB(PgColumn *col) {
+  return col->AllocAssignPB(write_req_.get());
 }
 
-PgsqlExpressionPB *PgDmlWrite::AllocTargetPB() {
+LWPgsqlExpressionPB *PgDmlWrite::AllocTargetPB() {
   return write_req_->add_targets();
+}
+
+LWPgsqlExpressionPB *PgDmlWrite::AllocQualPB() {
+  LOG(FATAL) << "Pure virtual function is being called";
+  return nullptr;
+}
+
+LWPgsqlColRefPB *PgDmlWrite::AllocColRefPB() {
+  return write_req_->add_col_refs();
+}
+
+void PgDmlWrite::ClearColRefPBs() {
+  write_req_->mutable_col_refs()->clear();
 }
 
 }  // namespace pggate

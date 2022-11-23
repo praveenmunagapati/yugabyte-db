@@ -12,20 +12,25 @@
 // under the License.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_PGGATE_PG_STATEMENT_H_
-#define YB_YQL_PGGATE_PG_STATEMENT_H_
+#pragma once
 
+#include <stdint.h>
+
+#include <memory>
 #include <string>
-#include <vector>
+#include <utility>
 
-#include <boost/intrusive/list.hpp>
+#include "yb/common/entity_ids.h"
+#include "yb/common/pg_types.h"
+#include "yb/common/ybc_util.h"
 
 #include "yb/gutil/ref_counted.h"
 
-#include "yb/yql/pggate/pg_session.h"
-#include "yb/yql/pggate/pg_env.h"
+#include "yb/util/bytes_formatter.h"
+
 #include "yb/yql/pggate/pg_expr.h"
 #include "yb/yql/pggate/pg_memctx.h"
+#include "yb/yql/pggate/pg_session.h"
 
 namespace yb {
 namespace pggate {
@@ -63,12 +68,13 @@ class PgStatement : public PgMemctx::Registrable {
   // Constructors.
   // pg_session is the session that this statement belongs to. If PostgreSQL cancels the session
   // while statement is running, pg_session::sharedptr can still be accessed without crashing.
-  explicit PgStatement(PgSession::ScopedRefPtr pg_session);
-  virtual ~PgStatement();
-
-  const PgSession::ScopedRefPtr& pg_session() {
-    return pg_session_;
+  explicit PgStatement(PgSession::ScopedRefPtr pg_session)
+      : pg_session_(std::move(pg_session)), arena_(std::make_shared<Arena>()) {
   }
+
+  virtual ~PgStatement() = default;
+
+  const PgSession::ScopedRefPtr& pg_session() { return pg_session_; }
 
   // Statement type.
   virtual StmtOp stmt_op() const = 0;
@@ -78,9 +84,9 @@ class PgStatement : public PgMemctx::Registrable {
     return (stmt != nullptr && stmt->stmt_op() == op);
   }
 
-  //------------------------------------------------------------------------------------------------
-  // Add expressions that are belong to this statement.
-  void AddExpr(PgExpr::SharedPtr expr);
+  const std::shared_ptr<Arena>& arena_ptr() const { return arena_; }
+
+  Arena& arena() const { return *arena_; }
 
  protected:
   // YBSession that this statement belongs to.
@@ -88,13 +94,10 @@ class PgStatement : public PgMemctx::Registrable {
 
   // Execution status.
   Status status_;
-  string errmsg_;
+  std::string errmsg_;
 
-  // Expression list to be destroyed as soon as the statement is removed from the API.
-  std::list<PgExpr::SharedPtr> exprs_;
+  std::shared_ptr<Arena> arena_;
 };
 
 }  // namespace pggate
 }  // namespace yb
-
-#endif // YB_YQL_PGGATE_PG_STATEMENT_H_

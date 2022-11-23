@@ -2,15 +2,16 @@
 
 package com.yugabyte.yw.commissioner.tasks.subtasks;
 
+import static com.yugabyte.yw.common.TestHelper.testDatabase;
 import static org.mockito.Mockito.mock;
 import static play.inject.Bindings.bind;
 
 import com.yugabyte.yw.commissioner.Commissioner;
 import com.yugabyte.yw.common.ModelFactory;
 import com.yugabyte.yw.common.NodeManager;
+import com.yugabyte.yw.common.PlatformGuiceApplicationBaseTest;
 import com.yugabyte.yw.common.alerts.AlertConfigurationWriter;
 import com.yugabyte.yw.models.Customer;
-import java.util.Map;
 import kamon.instrumentation.play.GuiceModule;
 import org.junit.Before;
 import org.pac4j.play.CallbackController;
@@ -18,11 +19,8 @@ import org.pac4j.play.store.PlayCacheSessionStore;
 import org.pac4j.play.store.PlaySessionStore;
 import play.Application;
 import play.inject.guice.GuiceApplicationBuilder;
-import play.modules.swagger.SwaggerModule;
-import play.test.Helpers;
-import play.test.WithApplication;
 
-public class NodeTaskBaseTest extends WithApplication {
+public class NodeTaskBaseTest extends PlatformGuiceApplicationBaseTest {
   NodeManager mockNodeManager;
   Customer defaultCustomer;
   Commissioner mockCommissioner;
@@ -44,9 +42,8 @@ public class NodeTaskBaseTest extends WithApplication {
     mockAlertConfigurationWriter = mock(AlertConfigurationWriter.class);
 
     return new GuiceApplicationBuilder()
-        .disable(SwaggerModule.class)
         .disable(GuiceModule.class)
-        .configure((Map) Helpers.inMemoryDatabase())
+        .configure(testDatabase())
         .overrides(bind(NodeManager.class).toInstance(mockNodeManager))
         .overrides(bind(Commissioner.class).toInstance(mockCommissioner))
         .overrides(bind(CallbackController.class).toInstance(mockCallbackController))

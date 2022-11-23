@@ -29,8 +29,7 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_CLIENT_ERROR_COLLECTOR_H
-#define YB_CLIENT_ERROR_COLLECTOR_H
+#pragma once
 
 #include <memory>
 #include <vector>
@@ -38,9 +37,6 @@
 #include "yb/client/client_fwd.h"
 
 #include "yb/gutil/ref_counted.h"
-#include "yb/gutil/thread_annotations.h"
-
-#include "yb/util/locks.h"
 
 namespace yb {
 namespace client {
@@ -59,20 +55,13 @@ class ErrorCollector {
   void AddError(YBOperationPtr operation, Status status);
 
   // See YBSession for details.
-  int CountErrors() const;
+  size_t CountErrors() const;
 
   // See YBSession for details.
   CollectedErrors GetAndClearErrors();
 
-  void ClearErrors();
-
-  // If there is only one error in the error collector, returns its associated status. Otherwise
-  // returns Status::OK().
-  Status GetSingleErrorStatus();
-
  private:
-  mutable simple_spinlock mutex_;
-  CollectedErrors errors_ GUARDED_BY(mutex_);
+  CollectedErrors errors_;
 
   DISALLOW_COPY_AND_ASSIGN(ErrorCollector);
 };
@@ -80,4 +69,3 @@ class ErrorCollector {
 } // namespace internal
 } // namespace client
 } // namespace yb
-#endif /* YB_CLIENT_ERROR_COLLECTOR_H */

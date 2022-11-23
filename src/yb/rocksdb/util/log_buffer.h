@@ -18,17 +18,12 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSDB_UTIL_LOG_BUFFER_H
-#define YB_ROCKSDB_UTIL_LOG_BUFFER_H
 
 #pragma once
-
-#include <ctime>
 
 #include "yb/rocksdb/env.h"
 #include "yb/rocksdb/util/arena.h"
 #include "yb/rocksdb/util/autovector.h"
-#include "yb/rocksdb/port/sys_time.h"
 
 #define LOG_TO_BUFFER(...) LogToBufferWithContext(__FILE__, __LINE__, ##__VA_ARGS__)
 
@@ -43,10 +38,7 @@ class LogBuffer {
   // info_log:  logger to write the logs to
   LogBuffer(const InfoLogLevel log_level, Logger* info_log);
 
-  ~LogBuffer() {
-    LOG_IF(DFATAL, !IsEmpty())
-        << "LogBuffer should be explicitly flushed in order to not lost accumulated log entries.";
-  }
+  ~LogBuffer();
 
   // Add a log entry to the buffer. Use default max_log_size.
   // max_log_size indicates maximize log size, including some metadata.
@@ -99,5 +91,3 @@ extern void LogToBufferWithContext(
     ...);
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_UTIL_LOG_BUFFER_H

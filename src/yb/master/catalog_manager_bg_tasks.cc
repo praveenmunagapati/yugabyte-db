@@ -29,37 +29,57 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 
+#include "yb/master/catalog_manager_bg_tasks.h"
+
 #include <memory>
 
-#include "yb/master/master_service_base.h"
-#include "yb/util/logging.h"
-#include "yb/util/mutex.h"
+#include "yb/gutil/casts.h"
 
-#include "yb/master/catalog_manager_bg_tasks.h"
-#include "yb/master/catalog_manager.h"
-#include "yb/master/scoped_leader_shared_lock.h"
-#include "yb/master/ts_descriptor.h"
 #include "yb/master/cluster_balance.h"
-#include "yb/master/encryption_manager.h"
-#include "yb/util/flag_tags.h"
+#include "yb/master/master.h"
+#include "yb/master/ts_descriptor.h"
+#include "yb/master/tablet_split_manager.h"
+
+#include "yb/util/debug-util.h"
+#include "yb/util/flags.h"
+#include "yb/util/mutex.h"
+#include "yb/util/status_log.h"
+#include "yb/util/thread.h"
 
 using std::shared_ptr;
+using std::vector;
 
-DEFINE_int32(catalog_manager_bg_task_wait_ms, 1000,
-             "Amount of time the catalog manager background task thread waits "
-             "between runs");
-TAG_FLAG(catalog_manager_bg_task_wait_ms, runtime);
+DEFINE_RUNTIME_int32(catalog_manager_bg_task_wait_ms, 1000,
+    "Amount of time the catalog manager background task thread waits between runs");
 
-DEFINE_int32(load_balancer_initial_delay_secs, yb::master::kDelayAfterFailoverSecs,
+DEFINE_UNKNOWN_int32(load_balancer_initial_delay_secs, yb::master::kDelayAfterFailoverSecs,
              "Amount of time to wait between becoming master leader and enabling the load "
              "balancer.");
 
-DEFINE_bool(sys_catalog_respect_affinity_task, true,
+DEFINE_UNKNOWN_bool(sys_catalog_respect_affinity_task, true,
             "Whether the master sys catalog tablet respects cluster config preferred zones "
             "and sends step down requests to a preferred leader.");
 
+DEFINE_test_flag(bool, pause_catalog_manager_bg_loop_start, false,
+                 "Pause the bg tasks thread at the beginning of the loop.");
+
+DEFINE_test_flag(bool, pause_catalog_manager_bg_loop_end, false,
+                 "Pause the bg tasks thread at the end of the loop.");
+
+DECLARE_bool(enable_ysql);
+
 namespace yb {
 namespace master {
+
+typedef std::unordered_map<TableId, std::list<scoped_refptr<CDCStreamInfo>>> TableStreamIdsMap;
+
+CatalogManagerBgTasks::CatalogManagerBgTasks(CatalogManager *catalog_manager)
+    : closing_(false),
+      pending_updates_(false),
+      cond_(&lock_),
+      thread_(nullptr),
+      catalog_manager_(down_cast<enterprise::CatalogManager*>(catalog_manager)) {
+}
 
 void CatalogManagerBgTasks::Wake() {
   MutexLock lock(lock_);
@@ -104,8 +124,33 @@ void CatalogManagerBgTasks::Shutdown() {
   }
 }
 
+void CatalogManagerBgTasks::TryResumeBackfillForTables(std::unordered_set<TableId>* tables) {
+  for (auto it = tables->begin(); it != tables->end(); it = tables->erase(it)) {
+    const auto& table_info_result = catalog_manager_->FindTableById(*it);
+    if (!table_info_result.ok()) {
+      LOG(WARNING) << "Table Info not found for id " << *it;
+      continue;
+    }
+    const auto& table_info = *table_info_result;
+    // Get schema version.
+    uint32_t version = table_info->LockForRead()->pb.version();
+    const auto& tablets = table_info->GetTablets();
+    for (const auto& tablet : tablets) {
+      LOG(INFO) << "PITR: Try resuming backfill for tablet " << tablet->id()
+                << ". If it is not a table for which backfill needs to be resumed"
+                << " then this is a NO-OP";
+      auto s = catalog_manager_->HandleTabletSchemaVersionReport(
+          tablet.get(), version, table_info);
+      // If schema version changed since PITR restore then backfill should restart
+      // by virtue of that particular alter if needed.
+      WARN_NOT_OK(s, Format("PITR: Resume backfill failed for tablet ", tablet->id()));
+    }
+  }
+}
+
 void CatalogManagerBgTasks::Run() {
   while (!closing_.load()) {
+    TEST_PAUSE_IF_FLAG(TEST_pause_catalog_manager_bg_loop_start);
     // Perform assignment processing.
     SCOPED_LEADER_SHARED_LOCK(l, catalog_manager_);
     if (!l.catalog_status().ok()) {
@@ -136,11 +181,17 @@ void CatalogManagerBgTasks::Run() {
 
       bool processed_tablets = false;
       if (!to_process.empty()) {
+        // For those tablets which need to be created in this round, assign replicas.
+        TSDescriptorVector ts_descs = catalog_manager_->GetAllLiveNotBlacklistedTServers();
+        CMGlobalLoadState global_load_state;
+        catalog_manager_->InitializeGlobalLoadState(ts_descs, &global_load_state);
         // Transition tablet assignment state from preparing to creating, send
         // and schedule creation / deletion RPC messages, etc.
+        // This is done table by table.
         for (const auto& entries : to_process) {
           LOG(INFO) << "Processing pending assignments for table: " << entries.first;
-          Status s = catalog_manager_->ProcessPendingAssignments(entries.second);
+          Status s = catalog_manager_->ProcessPendingAssignmentsPerTable(
+              entries.first, entries.second, &global_load_state);
           WARN_NOT_OK(s, "Assignment failed");
           // Set processed_tablets as true if the call succeeds for at least one table.
           processed_tablets = processed_tablets || s.ok();
@@ -148,6 +199,14 @@ void CatalogManagerBgTasks::Run() {
           // create/alter fault tolerant.
         }
       }
+
+      // Trigger pending backfills.
+      std::unordered_set<TableId> table_map;
+      {
+        std::lock_guard<rw_spinlock> lock(catalog_manager_->backfill_mutex_);
+        table_map.swap(catalog_manager_->pending_backfill_tables_);
+      }
+      TryResumeBackfillForTables(&table_map);
 
       // Do the LB enabling check
       if (!processed_tablets) {
@@ -157,28 +216,68 @@ void CatalogManagerBgTasks::Run() {
         }
       }
 
+      TableInfoMap table_info_map;
+      TabletInfoMap tablet_info_map;
+      {
+        CatalogManager::SharedLock lock(catalog_manager_->mutex_);
+        table_info_map = *catalog_manager_->table_ids_map_;
+        tablet_info_map = *catalog_manager_->tablet_map_;
+      }
+      catalog_manager_->tablet_split_manager()->MaybeDoSplitting(table_info_map, tablet_info_map);
+
       if (!to_delete.empty() || catalog_manager_->AreTablesDeleting()) {
         catalog_manager_->CleanUpDeletedTables();
       }
-      std::vector<scoped_refptr<CDCStreamInfo>> streams;
-      auto s = catalog_manager_->FindCDCStreamsMarkedAsDeleting(&streams);
-      if (s.ok() && !streams.empty()) {
-        s = catalog_manager_->CleanUpDeletedCDCStreams(streams);
+
+      {
+        // Find if there have been any new tables added to any namespace with an active cdcsdk
+        // stream.
+        TableStreamIdsMap table_unprocessed_streams_map;
+        // In case of master leader restart of leadership changes, we will scan all streams for
+        // unprocessed tables, but from the second iteration onwards we will only consider the
+        // 'cdcsdk_unprocessed_tables' field of CDCStreamInfo object stored in the cdc_state_map.
+        Status s =
+            catalog_manager_->FindCDCSDKStreamsForAddedTables(&table_unprocessed_streams_map);
+
+        if (s.ok() && !table_unprocessed_streams_map.empty()) {
+          s = catalog_manager_->AddTabletEntriesToCDCSDKStreamsForNewTables(
+              table_unprocessed_streams_map);
+        }
+        if (!s.ok()) {
+          YB_LOG_EVERY_N(WARNING, 10)
+              << "Encountered failure while trying to add unprocessed tables to cdc_state table: "
+              << s.ToString();
+        }
       }
 
       // Ensure the master sys catalog tablet follows the cluster's affinity specification.
       if (FLAGS_sys_catalog_respect_affinity_task) {
-        s = catalog_manager_->SysCatalogRespectLeaderAffinity();
+        Status s = catalog_manager_->SysCatalogRespectLeaderAffinity();
         if (!s.ok()) {
           YB_LOG_EVERY_N(INFO, 10) << s.message().ToBuffer();
         }
       }
 
-      // Start the tablespace background task.
-      catalog_manager_->StartTablespaceBgTaskIfStopped();
+      if (FLAGS_enable_ysql) {
+        // Start the tablespace background task.
+        catalog_manager_->StartTablespaceBgTaskIfStopped();
+      }
+
+      // Restart CDCSDK parent tablet deletion bg task.
+      catalog_manager_->StartCDCParentTabletDeletionTaskIfStopped();
+
+      // Run background tasks related to XCluster & CDC Schema.
+      WARN_NOT_OK(catalog_manager_->RunXClusterBgTasks(), "Failed XCluster Background Task");
+
+      was_leader_ = true;
     } else {
-      // Reset Metrics when leader_status is not ok.
-      catalog_manager_->ResetMetrics();
+      // leader_status is not ok.
+      if (was_leader_) {
+        LOG(INFO) << "Begin one-time cleanup on losing leadership";
+        catalog_manager_->ResetMetrics();
+        catalog_manager_->ResetTasksTrackers();
+        was_leader_ = false;
+      }
     }
     // Wait for a notification or a timeout expiration.
     //  - CreateTable will call Wake() to notify about the tablets to add
@@ -186,6 +285,7 @@ void CatalogManagerBgTasks::Run() {
     //    to notify about tablets creation.
     //  - DeleteTable will call Wake() to finish destructing any table internals
     l.Unlock();
+    TEST_PAUSE_IF_FLAG(TEST_pause_catalog_manager_bg_loop_end);
     Wait(FLAGS_catalog_manager_bg_task_wait_ms);
   }
   VLOG(1) << "Catalog manager background task thread shutting down";

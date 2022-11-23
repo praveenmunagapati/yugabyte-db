@@ -11,13 +11,12 @@ CREATE TABLE t3 (id int PRIMARY KEY, val int);
 CREATE TABLE t4 (id int PRIMARY KEY, val int);
 CREATE TABLE t5 (id int PRIMARY KEY, val int);
 CREATE TABLE p1 (id int PRIMARY KEY, val int);
--- TODOs LIKE INCLUDING ALL is unsupported
 -- TODOs INHERITANCE is unsupported
 CREATE TABLE p1_c1 (LIKE p1 INCLUDING ALL, CHECK (id <= 100)) INHERITS(p1);
-ERROR:  LIKE ALL not supported yet
-LINE 1: CREATE TABLE p1_c1 (LIKE p1 INCLUDING ALL, CHECK (id <= 100)...
-                                              ^
-HINT:  See https://github.com/YugaByte/yugabyte-db/issues/1129. Click '+' on the description to raise its priority
+ERROR:  INHERITS not supported yet
+LINE 1: ... p1_c1 (LIKE p1 INCLUDING ALL, CHECK (id <= 100)) INHERITS(p...
+                                                             ^
+HINT:  See https://github.com/yugabyte/yugabyte-db/issues/1129. React with thumbs up to raise its priority
 -- CREATE TABLE p1_c2 (LIKE p1 INCLUDING ALL, CHECK (id > 100 AND id <= 200)) INHERITS(p1);
 -- CREATE TABLE p1_c3 (LIKE p1 INCLUDING ALL, CHECK (id > 200 AND id <= 300)) INHERITS(p1);
 -- CREATE TABLE p1_c4 (LIKE p1 INCLUDING ALL, CHECK (id > 300)) INHERITS(p1);
@@ -34,18 +33,13 @@ NOTICE:  index method "hash" was replaced with "lsm" in YugabyteDB
 CREATE INDEX p2_val_id_idx ON p2 (val, id);
 -- TODOs collage is unsupported
 CREATE INDEX p2_val_idx2 ON p2 (val COLLATE "ja_JP");
-ERROR:  CREATE INDEX COLLATE not supported yet
-LINE 1: CREATE INDEX p2_val_idx2 ON p2 (val COLLATE "ja_JP");
-                                            ^
-HINT:  Please report the issue on https://github.com/YugaByte/yugabyte-db/issues
+ERROR:  collation "ja_JP" for encoding "UTF8" does not exist
 CREATE INDEX p2_val_idx3 ON p2 (val varchar_ops);
 CREATE INDEX p2_val_idx4 ON p2 (val DESC NULLS LAST);
-CREATE INDEX p2_val_idx5 ON p2 (val NULLS FIRST);
 CREATE INDEX p2_expr ON p2 ((val < '120'));
 CREATE INDEX p2_expr2 ON p2 ((id * 2 < 120));
 CREATE INDEX p2_val_idx6 ON p2 (val) WHERE val >= '50' AND val < '51';
 CREATE INDEX p2_val_idx7 ON p2 (val) WHERE id < 120;
--- TODOs LIKE INCLUDING ALL is unsupported
 -- TODOs INHERITANCE is unsupported
 -- CREATE TABLE p2_c1 (LIKE p2 INCLUDING ALL, CHECK (id <= 100)) INHERITS(p2);
 -- CREATE TABLE p2_c2 (LIKE p2 INCLUDING ALL, CHECK (id > 100 AND id <= 200)) INHERITS(p2);

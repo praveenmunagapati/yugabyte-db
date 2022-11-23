@@ -30,61 +30,71 @@
 // under the License.
 //
 
-#include <signal.h>
 #include <cmath>
 #include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
-#include <gflags/gflags.h>
+
+#include "yb/util/flags.h"
 #include <glog/logging.h>
 
+#include "yb/gutil/casts.h"
+
 #include "yb/client/callbacks.h"
-#include "yb/client/client.h"
 #include "yb/client/client-test-util.h"
+#include "yb/client/client.h"
+#include "yb/client/error.h"
+#include "yb/client/schema.h"
 #include "yb/client/session.h"
 #include "yb/client/table_handle.h"
 #include "yb/client/yb_op.h"
+#include "yb/client/yb_table_name.h"
+
 #include "yb/gutil/ref_counted.h"
 #include "yb/gutil/strings/split.h"
-#include "yb/gutil/strings/strcat.h"
 #include "yb/gutil/strings/substitute.h"
+
 #include "yb/integration-tests/mini_cluster.h"
 #include "yb/integration-tests/yb_mini_cluster_test_base.h"
+
 #include "yb/master/mini_master.h"
+
 #include "yb/tablet/maintenance_manager.h"
 #include "yb/tablet/tablet.h"
-#include "yb/tablet/tablet_metrics.h"
 #include "yb/tablet/tablet_peer.h"
+
 #include "yb/tserver/mini_tablet_server.h"
 #include "yb/tserver/tablet_server.h"
 #include "yb/tserver/ts_tablet_manager.h"
+
 #include "yb/util/async_util.h"
 #include "yb/util/countdown_latch.h"
 #include "yb/util/errno.h"
-#include "yb/util/stopwatch.h"
-#include "yb/util/test_macros.h"
-#include "yb/util/test_util.h"
-#include "yb/util/status.h"
-#include "yb/util/subprocess.h"
-#include "yb/util/thread.h"
 #include "yb/util/random.h"
 #include "yb/util/random_util.h"
+#include "yb/util/status.h"
+#include "yb/util/status_log.h"
+#include "yb/util/stopwatch.h"
+#include "yb/util/subprocess.h"
+#include "yb/util/test_macros.h"
+#include "yb/util/test_util.h"
+#include "yb/util/thread.h"
 
 using namespace std::literals;
 
 // Test size parameters
-DEFINE_int32(concurrent_inserts, -1, "Number of inserting clients to launch");
-DEFINE_int32(inserts_per_client, -1,
+DEFINE_UNKNOWN_int32(concurrent_inserts, -1, "Number of inserting clients to launch");
+DEFINE_UNKNOWN_int32(inserts_per_client, -1,
              "Number of rows inserted by each inserter client");
-DEFINE_int32(rows_per_batch, -1, "Number of rows per client batch");
+DEFINE_UNKNOWN_int32(rows_per_batch, -1, "Number of rows per client batch");
 
 // Perf-related FLAGS_perf_stat
-DEFINE_bool(perf_record_scan, false, "Call \"perf record --call-graph\" "
+DEFINE_UNKNOWN_bool(perf_record_scan, false, "Call \"perf record --call-graph\" "
             "for the duration of the scan, disabled by default");
-DEFINE_bool(perf_stat_scan, false, "Print \"perf stat\" results during"
+DEFINE_UNKNOWN_bool(perf_stat_scan, false, "Print \"perf stat\" results during"
             "scan to stdout, disabled by default");
-DEFINE_bool(perf_fp_flag, false, "Only applicable with --perf_record_scan,"
+DEFINE_UNKNOWN_bool(perf_fp_flag, false, "Only applicable with --perf_record_scan,"
             " provides argument \"fp\" to the --call-graph flag");
 DECLARE_bool(enable_maintenance_manager);
 
@@ -169,7 +179,7 @@ class FullStackInsertScanTest : public YBMiniClusterTestBase<MiniCluster> {
 
   // Adds newly generated client's session and table pointers to arrays at id
   void CreateNewClient(int id) {
-    while (tables_.size() <= id) {
+    while (tables_.size() <= implicit_cast<size_t>(id)) {
       auto table = std::make_unique<client::TableHandle>();
       ASSERT_OK(table->Open(kTableName, client_.get()));
       tables_.push_back(std::move(table));
@@ -235,11 +245,11 @@ void InterruptNotNull(std::unique_ptr<Subprocess> sub) {
 // Assumes that end - start + 1 fits into an int
 void ReportTenthDone(int64_t key, int64_t start, int64_t end,
                      int id, int numids) {
-  int done = key - start + 1;
-  int total = end - start + 1;
+  auto done = key - start + 1;
+  auto total = end - start + 1;
   if (total < 10) return;
   if (done % (total / 10) == 0) {
-    int percent = done * 100 / total;
+    auto percent = done * 100 / total;
     LOG(INFO) << "Insertion thread " << id << " of "
               << numids << " is "<< percent << "% done.";
   }
@@ -383,7 +393,7 @@ void FullStackInsertScanTest::DoTestScans() {
 }
 
 void FullStackInsertScanTest::FlushToDisk() {
-  for (int i = 0; i < cluster_->num_tablet_servers(); ++i) {
+  for (size_t i = 0; i < cluster_->num_tablet_servers(); ++i) {
     tserver::TabletServer* ts = cluster_->mini_tablet_server(i)->server();
     ts->maintenance_manager()->Shutdown();
     auto peers = ts->tablet_manager()->GetTabletPeers();
@@ -417,7 +427,7 @@ void FullStackInsertScanTest::InsertRows(CountDownLatch* start_latch, int id,
   for (int64_t key = start; key < end; ++key) {
     auto op = table->NewWriteOp(QLWriteRequestPB::QL_STMT_INSERT);
     RandomRow(&rng, op->mutable_request(), randstr, key, id, table);
-    ASSERT_OK(session->Apply(op));
+    session->Apply(op);
 
     // Report updates or flush every so often, using the synchronizer to always
     // start filling up the next batch while previous one is sent out.
@@ -451,7 +461,7 @@ void FullStackInsertScanTest::ScanProjection(const vector<string>& cols,
 
 vector<string> FullStackInsertScanTest::AllColumnNames() const {
   vector<string> ret;
-  for (int i = 0; i < schema_.num_columns(); i++) {
+  for (size_t i = 0; i < schema_.num_columns(); i++) {
     ret.push_back(schema_.Column(i).name());
   }
   return ret;

@@ -15,8 +15,7 @@
 // This class represents a SQL statement.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_CQL_QL_STATEMENT_H_
-#define YB_YQL_CQL_QL_STATEMENT_H_
+#pragma once
 
 #include "yb/yql/cql/ql/ptree/parse_tree.h"
 #include "yb/yql/cql/ql/util/statement_params.h"
@@ -44,12 +43,12 @@ class Statement {
   const std::string& text() const { return text_; }
 
   // Prepare the statement for execution. Optionally return prepared result if requested.
-  CHECKED_STATUS Prepare(QLProcessor *processor, const MemTrackerPtr& mem_tracker = nullptr,
-                         const bool internal = false, PreparedResult::UniPtr *result = nullptr);
+  Status Prepare(QLProcessor *processor, const MemTrackerPtr& mem_tracker = nullptr,
+                 const bool internal = false, PreparedResult::UniPtr *result = nullptr);
 
   // Execute the prepared statement.
-  CHECKED_STATUS ExecuteAsync(QLProcessor* processor, const StatementParameters& params,
-                              StatementExecutedCallback cb) const;
+  Status ExecuteAsync(QLProcessor* processor, const StatementParameters& params,
+                      StatementExecutedCallback cb) const;
 
   // Validate and return the parse tree.
   Result<const ParseTree&> GetParseTree() const;
@@ -89,5 +88,3 @@ class Statement {
 
 }  // namespace ql
 }  // namespace yb
-
-#endif  // YB_YQL_CQL_QL_STATEMENT_H_

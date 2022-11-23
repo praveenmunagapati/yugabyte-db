@@ -40,6 +40,13 @@ import com.google.common.collect.ImmutableMap;
 public class TestPgConfiguration extends BasePgSQLTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestPgConfiguration.class);
 
+  // default max_connections
+  private static final int CLUSTER_DEFAULT_MAX_CON = 300;
+  // default superuser_reserved_connections
+  private static final int CLUSTER_DEFAULT_SUPERUSER_RES_CON = 3;
+  // default max_wal_senders
+  private static final int CLUSTER_DEFAULT_MAX_WAL_SENDERS = 10;
+
   @Test
   public void testPostgresConfigDefault() throws Exception {
     int tserver = spawnTServer();
@@ -344,6 +351,44 @@ public class TestPgConfiguration extends BasePgSQLTest {
   }
 
   @Test
+  public void testAdjustedMaxConnectionsByRoles() throws Exception {
+    final int max_con_nonsuperuser = CLUSTER_DEFAULT_MAX_CON -
+        CLUSTER_DEFAULT_SUPERUSER_RES_CON -
+        CLUSTER_DEFAULT_MAX_WAL_SENDERS;
+    final String test_user = "test_user";
+
+    int tserver = spawnTServer();
+
+    try (Connection connection =
+           getConnectionBuilder().withTServer(tserver).withUser(DEFAULT_PG_USER).connect();
+         Statement statement = connection.createStatement()) {
+
+      // Verify the current user is yugabyte (superuser)
+      assertQuery(statement, "SELECT user", new Row(DEFAULT_PG_USER));
+      assertQuery(statement, "SELECT usesuper FROM pg_user WHERE usename = CURRENT_USER;",
+        new Row(true));
+
+      assertQuery(
+          statement, "SHOW max_connections", new Row(String.valueOf(CLUSTER_DEFAULT_MAX_CON)));
+
+      // Switch to non-superuser
+      statement.execute("CREATE USER " + test_user);
+      statement.execute("SET ROLE " + test_user);
+      assertQuery(statement, "SELECT user", new Row(test_user));
+      assertQuery(statement, "SELECT usesuper FROM pg_user WHERE usename = CURRENT_USER;",
+        new Row(false));
+
+      assertQuery(statement, "SHOW max_connections", new Row(String.valueOf(max_con_nonsuperuser)));
+      assertQuery(
+          statement,
+          "SELECT setting FROM pg_settings WHERE name = 'max_connections'",
+          new Row(String.valueOf(max_con_nonsuperuser))
+      );
+    }
+  }
+
+
+  @Test
   public void testDefaultTransactionIsolationFlag() throws Exception {
     int tserver = spawnTServerWithFlags(
         "ysql_default_transaction_isolation", "'serializable'");
@@ -468,6 +513,29 @@ public class TestPgConfiguration extends BasePgSQLTest {
       } finally {
         stmt.execute("DROP TABLE test_table;");
       }
+    }
+  }
+
+  @Test
+  public void testStatementTimeout() throws Exception {
+    int tserver = spawnTServer();
+
+    // By default, there is no statement timeout so "SELECT pg_sleep(5);" should finish
+    // successfully.
+    try (Connection connection = getConnectionBuilder().withTServer(tserver).connect();
+         Statement statement = connection.createStatement()) {
+      assertQuery(statement, "SHOW statement_timeout", new Row("0"));
+      assertQuery(statement, "SELECT pg_sleep(5);", new Row(""));
+    }
+
+    // If we set statement timeout to 1000ms in ysql_pg.conf via --ysql_pg_conf_csv, we should
+    // see the same "SELECT pg_sleep(5);" get cancelled due to statement timeout.
+    tserver = spawnTServerWithFlags("ysql_pg_conf_csv", "statement_timeout=1000");
+    try (Connection connection = getConnectionBuilder().withTServer(tserver).connect();
+         Statement statement = connection.createStatement()) {
+      assertQuery(statement, "SHOW statement_timeout", new Row("1s"));
+      runInvalidQuery(statement, "SELECT pg_sleep(5);",
+                      "ERROR: canceling statement due to statement timeout");
     }
   }
 

@@ -18,14 +18,10 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSDB_UTIL_HEAP_H
-#define YB_ROCKSDB_UTIL_HEAP_H
 
 #pragma once
 
 #include <algorithm>
-#include <cstdint>
-#include <functional>
 
 #include <boost/container/small_vector.hpp>
 
@@ -148,5 +144,3 @@ class BinaryHeap {
 };
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_UTIL_HEAP_H

@@ -83,6 +83,8 @@ IndexOnlyNext(IndexOnlyScanState *node)
 
 	if (scandesc == NULL)
 	{
+		IndexOnlyScan *plan = castNode(IndexOnlyScan, node->ss.ps.plan);
+
 		/*
 		 * We reach here if the index only scan is not parallel, or if we're
 		 * serially executing an index only scan that was planned to be
@@ -95,7 +97,9 @@ IndexOnlyNext(IndexOnlyScanState *node)
 								   node->ioss_NumOrderByKeys);
 
 		node->ioss_ScanDesc = scandesc;
-		scandesc->yb_scan_plan = (Scan *)node->ss.ps.plan;
+		scandesc->yb_scan_plan = (Scan *) plan;
+		scandesc->yb_rel_pushdown =
+			YbInstantiateRemoteParams(&plan->remote, estate);
 
 		/* Set it up for index-only scan */
 		node->ioss_ScanDesc->xs_want_itup = true;
@@ -121,12 +125,18 @@ IndexOnlyNext(IndexOnlyScanState *node)
 
 		// TODO(hector) Add row marks for INDEX_ONLY_SCAN
 		scandesc->yb_exec_params->rowmark = -1;
-		scandesc->yb_exec_params->read_from_followers = YBReadFromFollowersEnabled();
 	}
 
 	/*
 	 * OK, now that we have what we need, fetch the next tuple.
 	 */
+	MemoryContext oldcontext;
+	/*
+	 * To handle dead tuple for temp table, we shouldn't store its index
+	 * in per-tuple memory context.
+	 */
+	if (IsYBRelation(node->ss.ss_currentRelation))
+		oldcontext = MemoryContextSwitchTo(node->ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
 	while ((tid = index_getnext_tid(scandesc, direction)) != NULL)
 	{
 		HeapTuple	tuple = NULL;
@@ -169,7 +179,7 @@ IndexOnlyNext(IndexOnlyScanState *node)
 		 *
 		 * YugaByte index tuple is always visible.
 		 */
-		if (!IsYugaByteEnabled() &&
+		if (!IsYBRelation(node->ss.ss_currentRelation) &&
 			!VM_ALL_VISIBLE(scandesc->heapRelation,
 							ItemPointerGetBlockNumber(tid),
 							&node->ioss_VMBuffer))
@@ -229,9 +239,12 @@ IndexOnlyNext(IndexOnlyScanState *node)
 		if (scandesc->xs_recheck)
 		{
 			econtext->ecxt_scantuple = slot;
-			if (!ExecQualAndReset(node->indexqual, econtext))
+			ExprState *indexqual = node->yb_indexqual_for_recheck
+				? node->yb_indexqual_for_recheck : node->indexqual;
+			if (!ExecQual(indexqual, econtext))
 			{
 				/* Fails recheck, so drop it and loop back for another */
+				ResetExprContext(econtext);
 				InstrCountFiltered2(node, 1);
 				continue;
 			}
@@ -263,9 +276,12 @@ IndexOnlyNext(IndexOnlyScanState *node)
 			PredicateLockPage(scandesc->heapRelation,
 							  ItemPointerGetBlockNumber(tid),
 							  estate->es_snapshot);
-
+		if (IsYBRelation(node->ss.ss_currentRelation))
+			MemoryContextSwitchTo(oldcontext);
 		return slot;
 	}
+	if (IsYBRelation(node->ss.ss_currentRelation))
+		MemoryContextSwitchTo(oldcontext);
 
 	/*
 	 * if we get here it means the index scan failed so we are at the end of
@@ -373,9 +389,16 @@ ExecReScanIndexOnlyScan(IndexOnlyScanState *node)
 
 	/* reset index scan */
 	if (node->ioss_ScanDesc)
+	{
+		IndexScanDesc scandesc = node->ioss_ScanDesc;
+		IndexOnlyScan *plan = (IndexOnlyScan *) scandesc->yb_scan_plan;
+		EState *estate = node->ss.ps.state;
+		scandesc->yb_rel_pushdown =
+			YbInstantiateRemoteParams(&plan->remote, estate);
 		index_rescan(node->ioss_ScanDesc,
 					 node->ioss_ScanKeys, node->ioss_NumScanKeys,
 					 node->ioss_OrderByKeys, node->ioss_NumOrderByKeys);
+	}
 
 	ExecScanReScan(&node->ss);
 }
@@ -571,6 +594,10 @@ ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags)
 	indexstate->indexqual =
 		ExecInitQual(node->indexqual, (PlanState *) indexstate);
 
+	indexstate->yb_indexqual_for_recheck = node->yb_indexqual_for_recheck
+		? ExecInitQual(node->yb_indexqual_for_recheck, (PlanState *) indexstate)
+		: NULL;
+
 	/*
 	 * If we are just doing EXPLAIN (ie, aren't going to run the plan), stop
 	 * here.  This allows an index-advisor plugin to EXPLAIN a plan containing
@@ -754,4 +781,15 @@ ExecIndexOnlyScanInitializeWorker(IndexOnlyScanState *node,
 		index_rescan(node->ioss_ScanDesc,
 					 node->ioss_ScanKeys, node->ioss_NumScanKeys,
 					 node->ioss_OrderByKeys, node->ioss_NumOrderByKeys);
+}
+
+void
+YbExecUpdateInstrumentIndexOnlyScan(IndexOnlyScanState *node,
+									Instrumentation *instr)
+{
+	YbScanDesc ybscan = (YbScanDesc)node->ioss_ScanDesc->opaque;
+	Assert(PointerIsValid(ybscan));
+	if (ybscan->handle)
+		YbUpdateReadRpcStats(ybscan->handle,
+							 &instr->yb_read_rpcs, &instr->yb_tbl_read_rpcs);
 }

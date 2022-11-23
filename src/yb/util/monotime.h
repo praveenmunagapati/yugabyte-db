@@ -29,22 +29,14 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_MONOTIME_H
-#define YB_UTIL_MONOTIME_H
+
+#pragma once
 
 #include <chrono>
 #include <cstdint>
 #include <string>
 
-#ifdef YB_HEADERS_NO_STUBS
 #include <gtest/gtest_prod.h>
-#else
-// This is a poor module interdependency, but the stubs are header-only and
-// it's only for exported header builds, so we'll make an exception.
-#include "yb/client/stubs.h"
-#endif
-
-
 
 struct timeval;
 struct timespec;
@@ -59,6 +51,8 @@ class MonoTime;
 // may not be used for any operation.
 class MonoDelta {
  public:
+  static MonoDelta FromDays(double days);
+  static MonoDelta FromHours(double hours);
   static MonoDelta FromMinutes(double minutes);
   static MonoDelta FromSeconds(double seconds);
   static MonoDelta FromMilliseconds(int64_t ms);
@@ -83,10 +77,20 @@ class MonoDelta {
   std::string ToString() const;
   double ToSeconds() const;
   double ToMinutes() const;
+  double ToHours() const;
+  double ToDays() const;
   int64_t ToMilliseconds() const;
   int64_t ToMicroseconds() const;
   int64_t ToNanoseconds() const;
   std::chrono::steady_clock::duration ToSteadyDuration() const;
+
+  std::chrono::microseconds ToChronoMicroseconds() const {
+    return std::chrono::microseconds(ToMicroseconds());
+  }
+
+  std::chrono::milliseconds ToChronoMilliseconds() const {
+    return std::chrono::milliseconds(ToMilliseconds());
+  }
 
   MonoDelta& operator+=(const MonoDelta& rhs);
   MonoDelta& operator-=(const MonoDelta& rhs);
@@ -148,6 +152,9 @@ class MonoTime {
   static constexpr int64_t kMicrosecondsPerMillisecond = 1000L;
   static constexpr int64_t kMillisecondsPerSecond = 1000L;
   static constexpr int64_t kSecondsPerMinute = 60L;
+  static constexpr int64_t kSecondsPerHour = 60L * kSecondsPerMinute;
+  static constexpr int64_t kMinutesPerHour = 60L;
+  static constexpr int64_t kHoursPerDay = 24L;
 
   static constexpr int64_t kNanosecondsPerMillisecond =
       kNanosecondsPerMicrosecond * kMicrosecondsPerMillisecond;
@@ -160,6 +167,12 @@ class MonoTime {
 
   static constexpr int64_t kNanosecondsPerMinute =
       kNanosecondsPerSecond * kSecondsPerMinute;
+
+  static constexpr int64_t kNanosecondsPerHour =
+      kNanosecondsPerMinute * kMinutesPerHour;
+
+  static constexpr int64_t kNanosecondsPerDay =
+      kNanosecondsPerHour * kHoursPerDay;
 
   static const MonoTime kMin;
   static const MonoTime kMax;
@@ -263,18 +276,32 @@ inline bool operator!=(const MonoTime& lhs, const MonoTime& rhs) { return !(lhs 
 // MonoDelta duration.
 void SleepFor(const MonoDelta& delta);
 
+void SleepUntil(const MonoTime& deadline);
+
+// A monotonically increasing clock which lacks the precision of a hybrid clock but is suitable for
+// any use cases that just need a locally monotonic clock.
 class CoarseMonoClock {
  public:
   typedef std::chrono::nanoseconds duration;
   typedef duration Duration;
   typedef std::chrono::time_point<CoarseMonoClock> time_point;
   typedef time_point TimePoint;
+  typedef time_point::period period;
+  typedef time_point::rep rep;
 
   static constexpr bool is_steady = true;
 
   static time_point now();
   static TimePoint Now() { return now(); }
 };
+
+template <class Clock>
+typename Clock::duration ClockResolution() {
+  return typename Clock::duration(1);
+}
+
+template <>
+CoarseMonoClock::Duration ClockResolution<CoarseMonoClock>();
 
 typedef CoarseMonoClock::TimePoint CoarseTimePoint;
 typedef CoarseMonoClock::Duration CoarseDuration;
@@ -310,6 +337,6 @@ std::string ToString(CoarseMonoClock::TimePoint value);
 CoarseTimePoint ToCoarse(MonoTime monotime);
 std::chrono::steady_clock::time_point ToSteady(CoarseTimePoint time_point);
 
-} // namespace yb
+bool IsInitialized(CoarseTimePoint time_point);
 
-#endif // YB_UTIL_MONOTIME_H
+} // namespace yb

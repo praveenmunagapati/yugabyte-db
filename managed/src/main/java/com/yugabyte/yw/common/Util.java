@@ -1,26 +1,33 @@
 // Copyright (c) YugaByte, Inc.
 package com.yugabyte.yw.common;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.yugabyte.yw.common.PlacementInfoUtil.getNumMasters;
-import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 import static play.mvc.Http.Status.BAD_REQUEST;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.google.common.annotations.VisibleForTesting;
-import com.yugabyte.yw.commissioner.tasks.UniverseTaskBase;
-import com.yugabyte.yw.common.config.impl.RuntimeConfig;
+import com.google.common.collect.ImmutableMap;
+import com.yugabyte.yw.cloud.PublicCloudConstants.Architecture;
+import com.yugabyte.yw.cloud.PublicCloudConstants.OsType;
+import com.yugabyte.yw.commissioner.Common;
+import com.yugabyte.yw.common.utils.Pair;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.Cluster;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.ClusterType;
+import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.UserIntent;
+import com.yugabyte.yw.models.AccessKey;
 import com.yugabyte.yw.models.Customer;
+import com.yugabyte.yw.models.Provider;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.helpers.NodeDetails;
 import io.swagger.annotations.ApiModel;
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileWriter;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.InetAddress;
@@ -28,13 +35,13 @@ import java.net.InetSocketAddress;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.UnknownHostException;
-import java.nio.file.DirectoryStream;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
+import java.nio.file.Paths;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -44,13 +51,20 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TimeZone;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
+import java.util.zip.GZIPInputStream;
 import lombok.Getter;
+import org.apache.commons.codec.binary.Hex;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
+import org.apache.commons.io.IOUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import play.libs.Json;
@@ -59,13 +73,61 @@ public class Util {
   public static final Logger LOG = LoggerFactory.getLogger(Util.class);
   private static final Map<UUID, Process> processMap = new ConcurrentHashMap<>();
 
+  public static final String YSQL_PASSWORD_KEYWORD = "PASSWORD";
   public static final String DEFAULT_YSQL_USERNAME = "yugabyte";
   public static final String DEFAULT_YSQL_PASSWORD = "yugabyte";
   public static final String DEFAULT_YSQL_ADMIN_ROLE_NAME = "yb_superuser";
   public static final String DEFAULT_YCQL_USERNAME = "cassandra";
   public static final String DEFAULT_YCQL_PASSWORD = "cassandra";
   public static final String YUGABYTE_DB = "yugabyte";
+  public static final int MIN_NUM_BACKUPS_TO_RETAIN = 3;
+  public static final String REDACT = "REDACTED";
+  public static final String KEY_LOCATION_SUFFIX = "/backup_keys.json";
+  public static final String SYSTEM_PLATFORM_DB = "system_platform";
+  public static final int YB_SCHEDULER_INTERVAL = 2;
+  public static final String DEFAULT_YB_SSH_USER = "yugabyte";
+  public static final String DEFAULT_SUDO_SSH_USER = "centos";
 
+  public static final String AZ = "AZ";
+  public static final String GCS = "GCS";
+  public static final String S3 = "S3";
+  public static final String NFS = "NFS";
+
+  public static final String BLACKLIST_LEADERS = "yb.upgrade.blacklist_leaders";
+  public static final String BLACKLIST_LEADER_WAIT_TIME_MS =
+      "yb.upgrade.blacklist_leader_wait_time_ms";
+
+  public static final String AVAILABLE_MEMORY = "MemAvailable";
+
+  public static final String UNIVERSE_NAME_REGEX = "^[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?$";
+
+  public static final double EPSILON = 0.000001d;
+
+  public static final String YBC_COMPATIBLE_DB_VERSION = "2.15.0.0-b1";
+
+  public static final String LIVE_QUERY_TIMEOUTS = "yb.query_stats.live_queries.ws";
+
+  public static final String YB_RELEASES_PATH = "yb.releases.path";
+
+  public static final String YB_NODE_UI_WS_KEY = "yb.node_ui.ws";
+
+  public static final String K8S_POD_FQDN_TEMPLATE =
+      "{pod_name}.{service_name}.{namespace}.svc.{cluster_domain}";
+
+  private static final Map<String, Long> GO_DURATION_UNITS_TO_NANOS =
+      ImmutableMap.<String, Long>builder()
+          .put("s", TimeUnit.SECONDS.toNanos(1))
+          .put("m", TimeUnit.MINUTES.toNanos(1))
+          .put("h", TimeUnit.HOURS.toNanos(1))
+          .put("d", TimeUnit.DAYS.toNanos(1))
+          .put("ms", TimeUnit.MILLISECONDS.toNanos(1))
+          .put("us", TimeUnit.MICROSECONDS.toNanos(1))
+          .put("\u00b5s", TimeUnit.MICROSECONDS.toNanos(1))
+          .put("ns", 1L)
+          .build();
+
+  private static final Pattern GO_DURATION_REGEX =
+      Pattern.compile("(\\d+)(ms|us|\\u00b5s|ns|s|m|h|d)");
   /**
    * Returns a list of Inet address objects in the proxy tier. This is needed by Cassandra clients.
    */
@@ -79,6 +141,18 @@ public class Util {
       inetAddrs.add(new InetSocketAddress(privateIp, yqlRPCPort));
     }
     return inetAddrs;
+  }
+
+  public static String redactString(String input) {
+    String length = ((Integer) input.length()).toString();
+    String regex = "(.)" + "{" + length + "}";
+    String output = input.replaceAll(regex, REDACT);
+    return output;
+  }
+
+  public static String redactYsqlQuery(String input) {
+    return input.replaceAll(
+        YSQL_PASSWORD_KEYWORD + " (.+?)';", String.format("%s %s;", YSQL_PASSWORD_KEYWORD, REDACT));
   }
 
   /**
@@ -248,12 +322,13 @@ public class Util {
         && needMasterQuorumRestore(currentNode, nodes, replFactor - numMasters);
   }
 
-  public static String UNIV_NAME_ERROR_MESG =
-      "Invalid universe name format, valid characters [a-zA-Z0-9-].";
+  public static String UNIVERSE_NAME_ERROR_MESG =
+      String.format(
+          "Invalid universe name format, regex used for validation is %s.", UNIVERSE_NAME_REGEX);
 
   // Validate the universe name pattern.
   public static boolean isValidUniverseNameFormat(String univName) {
-    return univName.matches("^[a-zA-Z0-9-]*$");
+    return univName.matches(UNIVERSE_NAME_REGEX);
   }
 
   // Helper API to create a CSV of any keys present in existing map but not in new
@@ -296,81 +371,6 @@ public class Util {
     SimpleDateFormat format = new SimpleDateFormat();
 
     return format.format(date);
-  }
-
-  public static void writeStringToFile(File file, String contents) throws Exception {
-    try (FileWriter writer = new FileWriter(file)) {
-      writer.write(contents);
-    }
-  }
-
-  /**
-   * Extracts the name and extension parts of a file name.
-   *
-   * <p>The resulting string is the rightmost characters of fullName, starting with the first
-   * character after the path separator that separates the path information from the name and
-   * extension.
-   *
-   * <p>The resulting string is equal to fullName, if fullName contains no path.
-   *
-   * @param fullName
-   * @return
-   */
-  public static String getFileName(String fullName) {
-    if (fullName == null) {
-      return null;
-    }
-    int delimiterIndex = fullName.lastIndexOf(File.separatorChar);
-    return delimiterIndex >= 0 ? fullName.substring(delimiterIndex + 1) : fullName;
-  }
-
-  public static String getFileChecksum(String file) throws IOException, NoSuchAlgorithmException {
-    FileInputStream fis = new FileInputStream(file);
-    byte[] byteArray = new byte[1024];
-    int bytesCount = 0;
-
-    MessageDigest digest = MessageDigest.getInstance("MD5");
-
-    while ((bytesCount = fis.read(byteArray)) != -1) {
-      digest.update(byteArray, 0, bytesCount);
-    }
-
-    fis.close();
-
-    byte[] bytes = digest.digest();
-    StringBuilder sb = new StringBuilder();
-    for (byte b : bytes) {
-      sb.append(Integer.toString((b & 0xff) + 0x100, 16).substring(1));
-    }
-    return sb.toString();
-  }
-
-  public static List<File> listFiles(Path backupDir, String pattern) throws IOException {
-    try (DirectoryStream<Path> directoryStream = Files.newDirectoryStream(backupDir, pattern)) {
-      return StreamSupport.stream(directoryStream.spliterator(), false)
-          .map(Path::toFile)
-          .sorted(File::compareTo)
-          .collect(Collectors.toList());
-    }
-  }
-
-  public static void moveFile(Path source, Path destination) throws IOException {
-    Files.move(source, destination, REPLACE_EXISTING);
-  }
-
-  public static void writeJsonFile(String filePath, ArrayNode json) {
-    writeFile(filePath, Json.prettyPrint(json));
-  }
-
-  public static void writeFile(String filePath, String contents) {
-    try (FileWriter file = new FileWriter(filePath)) {
-      file.write(contents);
-      file.flush();
-      LOG.info("Written: {}", filePath);
-    } catch (IOException e) {
-      LOG.error("Unable to write: {}", filePath);
-      throw new RuntimeException(e.getMessage());
-    }
   }
 
   /**
@@ -427,7 +427,17 @@ public class Util {
     return details;
   }
 
+  // Wrapper on the existing compareYbVersions() method (to specify if format error
+  // should be suppressed)
   public static int compareYbVersions(String v1, String v2) {
+
+    return compareYbVersions(v1, v2, false);
+  }
+
+  // Compare v1 and v2 Strings. Returns 0 if the versions are equal, a
+  // positive integer if v1 is newer than v2, a negative integer if v1
+  // is older than v2.
+  public static int compareYbVersions(String v1, String v2, boolean suppressFormatError) {
     Pattern versionPattern = Pattern.compile("^(\\d+.\\d+.\\d+.\\d+)(-(b(\\d+)|(\\w+)))?$");
     Matcher v1Matcher = versionPattern.matcher(v1);
     Matcher v2Matcher = versionPattern.matcher(v2);
@@ -454,6 +464,25 @@ public class Util {
         int b = Integer.parseInt(v2BuildNumber);
         return a - b;
       }
+
+      return 0;
+    }
+
+    if (suppressFormatError) {
+
+      // If suppressFormat Error is true and the YB version strings
+      // are unable to be parsed, we output the log for debugging purposes
+      // and simply consider the versions as equal (similar to the custom
+      // build logic above).
+
+      String msg =
+          String.format(
+              "At least one YB version string out of %s and %s is unable to be parsed."
+                  + " The two versions are treated as equal because"
+                  + " suppressFormatError is set to true.",
+              v1, v2);
+
+      LOG.info(msg);
 
       return 0;
     }
@@ -504,50 +533,6 @@ public class Util {
     return BigDecimal.valueOf(value).stripTrailingZeros().toPlainString();
   }
 
-  // This will help us in insertion of set of keys in locked synchronized way as no
-  // extraction/deletion action should be performed on RunTimeConfig object during the process.
-  // TODO: Fix this locking static method - this locks whole Util class with unrelated methods.
-  //  This should really be using database transactions since runtime config is persisted.
-  public static synchronized void setLockedMultiKeyConfig(
-      RuntimeConfig<Universe> config, Map<String, String> configKeysMap) {
-    configKeysMap.forEach(
-        (key, value) -> {
-          config.setValue(key, value);
-        });
-  }
-
-  // This will help us in extraction of set of keys in locked synchronized way as no
-  // insertion/deletion action should be performed on RunTimeConfig object during the process.
-  public static synchronized Map<String, String> getLockedMultiKeyConfig(
-      RuntimeConfig<Universe> config, List<String> configKeys) {
-    Map<String, String> configKeysMap = new HashMap<>();
-    configKeys.forEach((key) -> configKeysMap.put(key, config.getString(key)));
-    return configKeysMap;
-  }
-
-  // This will help us in deletion of set of keys in locked synchronized way as no
-  // insertion/extraction action should be performed on RunTimeConfig object during the process.
-  public static synchronized void deleteLockedMultiKeyConfig(
-      RuntimeConfig<Universe> config, List<String> configKeys) {
-    configKeys.forEach(
-        (key) -> {
-          if (config.hasPath(key)) {
-            config.deleteEntry(key);
-          }
-        });
-  }
-
-  /** deleteDirectory deletes entire directory recursively. */
-  public static boolean deleteDirectory(File directoryToBeDeleted) {
-    File[] allContents = directoryToBeDeleted.listFiles();
-    if (allContents != null) {
-      for (File file : allContents) {
-        deleteDirectory(file);
-      }
-    }
-    return directoryToBeDeleted.delete();
-  }
-
   /**
    * Returns the Unix epoch timeStamp in microseconds provided the given timeStamp and it's format.
    */
@@ -567,18 +552,10 @@ public class Util {
     return formatter.format(new Date(unixTimestampMs));
   }
 
-  // Update the Universe's 'backupInProgress' flag to new state in synchronized manner to avoid
-  // race condition.
-  public static synchronized void lockedUpdateBackupState(
-      UUID universeUUID, UniverseTaskBase backupTask, boolean newState) {
-    if (Universe.getOrBadRequest(universeUUID).getUniverseDetails().backupInProgress == newState) {
-      if (newState) {
-        throw new RuntimeException("A backup for this universe is already in progress.");
-      } else {
-        return;
-      }
-    }
-    backupTask.updateBackupState(newState);
+  public static String unixTimeToDateString(long unixTimestampMs, String dateFormat, TimeZone tz) {
+    SimpleDateFormat formatter = new SimpleDateFormat(dateFormat);
+    formatter.setTimeZone(tz);
+    return formatter.format(new Date(unixTimestampMs));
   }
 
   public static String getHostname() {
@@ -596,6 +573,239 @@ public class Util {
     } catch (UnknownHostException e) {
       LOG.error("Could not determine the host IP", e);
       return "";
+    }
+  }
+
+  public static String getNodeIp(Universe universe, NodeDetails node) {
+    String ip = null;
+    if (node.cloudInfo == null || node.cloudInfo.private_ip == null) {
+      NodeDetails onDiskNode = universe.getNode(node.nodeName);
+      ip = onDiskNode.cloudInfo.private_ip;
+    } else {
+      ip = node.cloudInfo.private_ip;
+    }
+    return ip;
+  }
+
+  // Generate a deterministic node UUID from the universe UUID and the node name.
+  public static UUID generateNodeUUID(UUID universeUuid, String nodeName) {
+    return UUID.nameUUIDFromBytes((universeUuid.toString() + nodeName).getBytes());
+  }
+
+  // Generate hash string of given length for a given name.
+  // As each byte is represented by two hex chars, the length doubles.
+  public static String hashString(String name) {
+    int hashCode = name.hashCode();
+    byte[] bytes = ByteBuffer.allocate(4).putInt(hashCode).array();
+    return Hex.encodeHexString(bytes);
+  }
+
+  // TODO(bhavin192): Helm allows the release name to be 53 characters
+  // long, and with new naming style this becomes 43 for our case.
+  // Sanitize helm release name.
+  public static String sanitizeHelmReleaseName(String name) {
+    return sanitizeKubernetesNamespace(name, 0);
+  }
+
+  // Sanitize kubernetes namespace name. Additional suffix length can be reserved.
+  // Valid namespaces are not modified for backward compatibility.
+  // Only the non-conforming ones which have passed the UNIVERSE_NAME_REGEX are sanitized.
+  public static String sanitizeKubernetesNamespace(String name, int reserveSuffixLen) {
+    // Max allowed namespace length is 63.
+    int maxNamespaceLen = 63;
+    int firstPartLength = maxNamespaceLen - reserveSuffixLen;
+    checkArgument(firstPartLength > 0, "Invalid suffix length");
+    String sanitizedName = name.toLowerCase();
+    if (sanitizedName.equals(name) && firstPartLength >= sanitizedName.length()) {
+      // Backward compatibility taken care as old namespaces must have already passed this test for
+      // k8s.
+      return name;
+    }
+    // Decrease by 8 hash hex chars + 1 dash(-).
+    firstPartLength -= 9;
+    checkArgument(firstPartLength > 0, "Invalid suffix length");
+    if (sanitizedName.length() > firstPartLength) {
+      sanitizedName = sanitizedName.substring(0, firstPartLength);
+      LOG.warn("Name {} is longer than {}, truncated to {}.", name, firstPartLength, sanitizedName);
+    }
+    return String.format("%s-%s", sanitizedName, hashString(name));
+  }
+
+  public static boolean canConvertJsonNode(JsonNode jsonNode, Class<?> toValueType) {
+    try {
+      new ObjectMapper().treeToValue(jsonNode, toValueType);
+    } catch (JsonProcessingException e) {
+      return false;
+    }
+    return true;
+  }
+
+  public static boolean doubleEquals(double d1, double d2) {
+    return Math.abs(d1 - d2) < Util.EPSILON;
+  }
+
+  /** Checks if the given date is past the current time or not. */
+  public static boolean isTimeExpired(Date date) {
+    Date currentTime = new Date();
+    return currentTime.compareTo(date) >= 0 ? true : false;
+  }
+
+  public static synchronized Path getOrCreateDir(Path dirPath) {
+    // Parent of path ending with a path component separator is the path itself.
+    File dir = dirPath.toFile();
+    if (!dir.exists() && !dir.mkdirs() && !dir.exists()) {
+      throw new RuntimeException("Failed to create " + dirPath);
+    }
+    return dirPath;
+  }
+
+  public static String getNodeHomeDir(UUID universeUUID, String nodeName) {
+    Universe universe = Universe.getOrBadRequest(universeUUID);
+    String providerUUID = Universe.getCluster(universe, nodeName).userIntent.provider;
+    Provider provider = Provider.getOrBadRequest(UUID.fromString(providerUUID));
+    return provider.getYbHome();
+  }
+
+  public static boolean isOnPremManualProvisioning(Universe universe) {
+    UserIntent userIntent = universe.getUniverseDetails().getPrimaryCluster().userIntent;
+    if (userIntent.providerType == Common.CloudType.onprem) {
+      boolean manualProvisioning = false;
+      try {
+        AccessKey accessKey =
+            AccessKey.getOrBadRequest(
+                UUID.fromString(userIntent.provider), userIntent.accessKeyCode);
+        AccessKey.KeyInfo keyInfo = accessKey.getKeyInfo();
+        manualProvisioning = keyInfo.skipProvisioning;
+      } catch (PlatformServiceException ex) {
+        // no access code
+      }
+      return manualProvisioning;
+    }
+    return false;
+  }
+
+  /**
+   * @param ybServerPackage
+   * @return pair of string containing osType and archType of ybc-server-package
+   */
+  public static Pair<String, String> getYbcPackageDetailsFromYbServerPackage(
+      String ybServerPackage) {
+    String archType = null;
+    if (ybServerPackage.contains(Architecture.x86_64.name().toLowerCase())) {
+      archType = Architecture.x86_64.name();
+    } else if (ybServerPackage.contains(Architecture.aarch64.name().toLowerCase())) {
+      archType = Architecture.aarch64.name();
+    } else {
+      throw new RuntimeException(
+          "Cannot install ybc on machines of arch types other than x86_64, aarch64");
+    }
+
+    // We are using standard open-source OS names in case of different arch.
+    String osType = OsType.LINUX.toString();
+    if (!archType.equals(Architecture.x86_64.name())) {
+      osType = OsType.EL8.toString();
+    }
+    return new Pair<>(osType.toLowerCase(), archType.toLowerCase());
+  }
+
+  /**
+   * Basic DNS address check which allows only alphanumeric characters and hyphen (-) in the name.
+   * Hyphen cannot be at the beginning or at the end of a DNS label.
+   */
+  public static boolean isValidDNSAddress(String dns) {
+    return dns.matches("^((?!-)[A-Za-z0-9-]+(?<!-)\\.)+[A-Za-z]+$");
+  }
+
+  public static Duration goDurationToJava(String goDuration) {
+    if (StringUtils.isEmpty(goDuration)) {
+      throw new IllegalArgumentException("Duration string can't be empty");
+    }
+    Matcher m = GO_DURATION_REGEX.matcher(goDuration);
+    boolean found = false;
+    long nanos = 0;
+    while (m.find()) {
+      found = true;
+      long amount = Long.parseLong(m.group(1));
+      String unit = m.group(2);
+      long multiplier = GO_DURATION_UNITS_TO_NANOS.get(unit);
+      nanos += amount * multiplier;
+    }
+    if (!found) {
+      throw new IllegalArgumentException("Duration string " + goDuration + " is invalid");
+    }
+    return Duration.ofNanos(nanos);
+  }
+
+  /**
+   * Adds the file/directory from filePath to the archive tarArchive starting at the parent location
+   * in the archive
+   *
+   * @param filePath the directory/file we want to add to the archive.
+   * @param parent the location where we are storing the directory/file in the archive, "" is the
+   *     root of the archive
+   * @param tarArchive the archive we want the directory/file be added to.
+   */
+  public static void addFilesToTarGZ(
+      String filePath, String parent, TarArchiveOutputStream tarArchive) throws IOException {
+    File file = new File(filePath);
+    String entryName = parent + file.getName();
+    tarArchive.putArchiveEntry(new TarArchiveEntry(file, entryName));
+    if (file.isFile()) {
+      try (FileInputStream fis = new FileInputStream(file);
+          BufferedInputStream bis = new BufferedInputStream(fis)) {
+        IOUtils.copy(bis, tarArchive);
+        tarArchive.closeArchiveEntry();
+      }
+    } else if (file.isDirectory()) {
+      // no content to copy so close archive entry
+      tarArchive.closeArchiveEntry();
+      for (File f : file.listFiles()) {
+        addFilesToTarGZ(f.getAbsolutePath(), entryName + File.separator, tarArchive);
+      }
+    }
+  }
+
+  /**
+   * Adds the the file archive tarArchive in fileName
+   *
+   * @param file the file we want to add to the archive
+   * @param fileName the location we want the file to be saved in the archive
+   * @param tarArchive the archive we want the file be added to.
+   */
+  public static void copyFileToTarGZ(File file, String fileName, TarArchiveOutputStream tarArchive)
+      throws IOException {
+    tarArchive.putArchiveEntry(tarArchive.createArchiveEntry(file, fileName));
+    try (FileInputStream fis = new FileInputStream(file);
+        BufferedInputStream bis = new BufferedInputStream(fis)) {
+      IOUtils.copy(bis, tarArchive);
+      tarArchive.closeArchiveEntry();
+    }
+  }
+
+  /**
+   * Extracts the archive tarFile and untars to into folderPath directory
+   *
+   * @param tarFile the archive we want to sasve to folderPath
+   * @param folderPath the directory where we want to extract the archive to
+   */
+  public static void extractFilesFromTarGZ(File tarFile, String folderPath) throws IOException {
+    TarArchiveEntry currentEntry;
+    Files.createDirectories(Paths.get(folderPath));
+
+    try (FileInputStream fis = new FileInputStream(tarFile);
+        GZIPInputStream gis = new GZIPInputStream(new BufferedInputStream(fis));
+        TarArchiveInputStream tis = new TarArchiveInputStream(gis)) {
+      while ((currentEntry = tis.getNextTarEntry()) != null) {
+        File destPath = new File(folderPath, currentEntry.getName());
+        if (currentEntry.isDirectory()) {
+          destPath.mkdirs();
+        } else {
+          destPath.createNewFile();
+          try (FileOutputStream fos = new FileOutputStream(destPath)) {
+            IOUtils.copy(tis, fos);
+          }
+        }
+      }
     }
   }
 }

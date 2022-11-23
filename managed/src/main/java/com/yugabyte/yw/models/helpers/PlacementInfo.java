@@ -2,11 +2,14 @@
 
 package com.yugabyte.yw.models.helpers;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.swagger.annotations.ApiModelProperty;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * The placement info is a tree. The first level contains a list of clouds. Every cloud contains a
@@ -21,15 +24,21 @@ public class PlacementInfo {
     // The cloud provider code.
     @ApiModelProperty public String code;
     // The list of region in this cloud we want to place data in.
-    @ApiModelProperty public List<PlacementRegion> regionList = new ArrayList<PlacementRegion>();
+    @ApiModelProperty public List<PlacementRegion> regionList = new ArrayList<>();
+    // UUID of default region. For universes with more AZs than RF, the default
+    // placement for user tables will be RF AZs in the default region. This is
+    // commonly encountered in geo-partitioning use cases.
+    @ApiModelProperty public UUID defaultRegion;
 
     @Override
     public String toString() {
-      String ret = "Cloud=" + code + " ";
-      for (PlacementRegion region : regionList) {
-        ret += region;
-      }
-      return ret;
+      StringBuilder ret = new StringBuilder("Cloud=").append(code).append(" ");
+      ret.append(
+          String.join(
+              ", ",
+              regionList.stream().map(PlacementRegion::toString).collect(Collectors.toList())));
+      ret.append("; Default region=").append(defaultRegion);
+      return ret.toString();
     }
   }
 
@@ -46,9 +55,9 @@ public class PlacementInfo {
     @Override
     public String toString() {
       String ret = "Region=" + code + " : ";
-      for (PlacementAZ az : azList) {
-        ret += az;
-      }
+      ret +=
+          String.join(
+              ", ", azList.stream().map(PlacementAZ::toString).collect(Collectors.toList()));
       return ret;
     }
   }
@@ -87,6 +96,14 @@ public class PlacementInfo {
 
   // The list of clouds to place data in.
   public List<PlacementCloud> cloudList = new ArrayList<PlacementCloud>();
+
+  @JsonIgnore
+  public Stream<PlacementAZ> azStream() {
+    return cloudList
+        .stream()
+        .flatMap(cloud -> cloud.regionList.stream())
+        .flatMap(region -> region.azList.stream());
+  }
 
   @Override
   public String toString() {

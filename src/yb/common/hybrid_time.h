@@ -32,20 +32,21 @@
 
 // Portions Copyright (c) YugaByte, Inc.
 
-#ifndef YB_COMMON_HYBRID_TIME_H_
-#define YB_COMMON_HYBRID_TIME_H_
+#pragma once
 
 #include <inttypes.h>
 
-#include <string>
 #include <limits>
+#include <string>
 
-#include "yb/util/enums.h"
+#include "yb/util/status_fwd.h"
+#include "yb/util/faststring.h"
 #include "yb/util/monotime.h"
 #include "yb/util/physical_time.h"
-#include "yb/util/status.h"
 
 namespace yb {
+
+class Slice;
 
 // An alias for the raw in-memory representation of a HybridTime.
 using HybridTimeRepr = uint64_t;
@@ -164,13 +165,18 @@ class HybridTime {
   }
 
   // Sets this hybrid time from 'value'
-  CHECKED_STATUS FromUint64(uint64_t value);
+  Status FromUint64(uint64_t value);
 
   static HybridTime FromPB(uint64_t value) {
     return value ? HybridTime(value) : HybridTime();
   }
 
   HybridTimeRepr value() const { return v; }
+
+  // Returns this HybridTime if valid, otherwise returns the one provided.
+  HybridTime GetValueOr(const HybridTime& other) const {
+    return is_valid() ? *this : other;
+  }
 
   bool is_special() const {
     switch (v) {
@@ -181,8 +187,6 @@ class HybridTime {
       default:
         return false;
     }
-    LOG(FATAL) << "Should never happen";
-    return false;  // Never reached.
   }
 
   bool operator <(const HybridTime& other) const {
@@ -236,6 +240,12 @@ class HybridTime {
   // It is slower than default one.
   static void TEST_SetPrettyToString(bool flag);
 
+  // Acceptable system time formats:
+  //  1. HybridTime Timestamp (in Microseconds)
+  //  2. Interval
+  //  3. Human readable string
+  static Result<HybridTime> ParseHybridTime(std::string input);
+
  private:
 
   HybridTimeRepr v;
@@ -274,5 +284,3 @@ inline HybridTime operator "" _usec_ht(unsigned long long microseconds) { // NOL
 using hybrid_time_literals::operator"" _usec_ht;
 
 }  // namespace yb
-
-#endif  // YB_COMMON_HYBRID_TIME_H_

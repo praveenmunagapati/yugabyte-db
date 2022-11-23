@@ -36,6 +36,9 @@ export const CREATE_INSTANCE_TYPE_RESPONSE = 'CREATE_INSTANCE_TYPE_RESPONSE';
 export const CREATE_REGION = 'CREATE_REGION';
 export const CREATE_REGION_RESPONSE = 'CREATE_REGION_RESPONSE';
 
+export const DELETE_REGION = 'DELETE_REGION';
+export const DELETE_REGION_RESPONSE = 'DELETE_REGION_RESPONSE';
+
 export const CREATE_ZONES = 'CREATE_ZONES';
 export const CREATE_ZONES_RESPONSE = 'CREATE_ZONES_RESPONSE';
 
@@ -60,6 +63,7 @@ export const RESET_PROVIDER_BOOTSTRAP = 'RESET_PROVIDER_BOOTSTRAP';
 
 export const LIST_ACCESS_KEYS = 'LIST_ACCESS_KEYS';
 export const LIST_ACCESS_KEYS_RESPONSE = 'LIST_ACCESS_KEYS_RESPONSE';
+export const LIST_ACCESS_KEYS_REQUEST_COMPLETED = 'LIST_ACCESS_KEYS_REQUEST_COMPLETED';
 
 export const GET_EBS_TYPE_LIST = 'GET_EBS_TYPES';
 export const GET_EBS_TYPE_LIST_RESPONSE = 'GET_EBS_TYPES_RESPONSE';
@@ -92,6 +96,9 @@ export const BOOTSTRAP_PROVIDER_RESPONSE = 'BOOTSTRAP_PROVIDER_RESPONSE';
 export const DELETE_INSTANCE = 'DELETE_INSTANCE';
 export const DELETE_INSTANCE_RESPONSE = 'DELETE_INSTANCE_RESPONSE';
 
+export const PRECHECK_INSTANCE = 'PRECHECK_INSTANCE';
+export const PRECHECK_INSTANCE_RESPONSE = 'PRECHECK_INSTANCE_RESPONSE';
+
 export const EDIT_PROVIDER = 'EDIT_PROVIDER';
 export const EDIT_PROVIDER_RESPONSE = 'EDIT_PROVIDER_RESPONSE';
 
@@ -100,6 +107,9 @@ export const FETCH_AUTH_CONFIG_RESPONSE = 'FETCH_AUTH_CONFIG_RESPONSE';
 
 export const CREATE_KMS_CONFIGURATION = 'CREATE_KMS_CONFIGURATION';
 export const CREATE_KMS_CONFIGURATION_RESPONSE = 'CREATE_KMS_CONFIGURATION_RESPONSE';
+
+export const EDIT_KMS_CONFIGURATION = 'EDIT_KMS_CONFIGURATION';
+export const EDIT_KMS_CONFIGURATION_RESPONSE = 'EDIT_KMS_CONFIGURATION_RESPONSE';
 
 export const DELETE_KMS_CONFIGURATION = 'DELETE_KMS_CONFIGURATION';
 export const DELETE_KMS_CONFIGURATION_RESPONSE = 'DELETE_KMS_CONFIGURATION_RESPONSE';
@@ -143,7 +153,7 @@ export const getInstanceTypeListLoading = () => ({
 export function getInstanceTypeList(providerUUID, zones = []) {
   let url = getProviderEndpoint(providerUUID) + '/instance_types';
   if (zones.length) {
-    url = url + '?' + zones.map(item => `zone=${encodeURIComponent(item)}`).join('&');
+    url = url + '?' + zones.map((item) => `zone=${encodeURIComponent(item)}`).join('&');
   }
   const request = axios.get(url);
   return {
@@ -214,7 +224,7 @@ export function createProvider(type, name, config, regionFormVals = null) {
   const formValues = {
     code: provider.code,
     name: name,
-    config: config,
+    config: config
   };
   if (regionFormVals) {
     const region = Object.keys(regionFormVals.perRegionMetadata)[0] || '';
@@ -272,6 +282,22 @@ export function createRegionResponse(result) {
   };
 }
 
+export function deleteRegion(providerUUID, regionId) {
+  const url = getProviderEndpoint(providerUUID) + '/regions/' + regionId;
+  const request = axios.delete(url);
+  return {
+    type: DELETE_REGION,
+    payload: request
+  };
+}
+
+export function deleteRegionResponse(result) {
+  return {
+    type: DELETE_REGION_RESPONSE,
+    payload: result
+  };
+}
+
 export function createZones(providerUUID, regionUUID, zones) {
   const formValues = {
     availabilityZones: zones.map((zone) => {
@@ -311,7 +337,7 @@ export function createNodeInstancesResponse(result) {
   };
 }
 
-export function createAccessKey(providerUUID, regionUUID, keyInfo) {
+export function createAccessKey(providerUUID, regionUUID, keyInfo, ntpServers, setUpChrony) {
   const formValues = {
     keyCode: keyInfo.code,
     regionUUID: regionUUID,
@@ -324,7 +350,9 @@ export function createAccessKey(providerUUID, regionUUID, keyInfo) {
     installNodeExporter: keyInfo.installNodeExporter,
     nodeExporterUser: keyInfo.nodeExporterUser,
     nodeExporterPort: keyInfo.nodeExporterPort,
-    skipProvisioning: keyInfo.skipProvisioning
+    skipProvisioning: keyInfo.skipProvisioning,
+    ntpServers,
+    setUpChrony
   };
   const url = getProviderEndpoint(providerUUID) + '/access_keys';
   const request = axios.post(url, formValues);
@@ -376,6 +404,22 @@ export function createKMSProviderConfig(provider, body) {
 export function createKMSProviderConfigResponse(result) {
   return {
     type: CREATE_KMS_CONFIGURATION_RESPONSE,
+    payload: result
+  };
+}
+
+export function editKMSProviderConfig(configUUID, body) {
+  const endpoint = getCustomerEndpoint() + `/kms_configs/${configUUID}/edit`;
+  const request = axios.post(endpoint, body);
+  return {
+    type: EDIT_KMS_CONFIGURATION,
+    payload: request
+  };
+}
+
+export function editKMSProviderConfigResponse(result) {
+  return {
+    type: EDIT_KMS_CONFIGURATION_RESPONSE,
     payload: result
   };
 }
@@ -476,6 +520,12 @@ export function listAccessKeysResponse(response) {
     type: LIST_ACCESS_KEYS_RESPONSE,
     payload: response
   };
+}
+
+export function listAccessKeysReqCompleted(){
+  return {
+    type: LIST_ACCESS_KEYS_REQUEST_COMPLETED
+  }
 }
 
 export function getEBSTypeList() {
@@ -637,6 +687,22 @@ export function deleteInstance(providerUUID, instanceIP) {
 export function deleteInstanceResponse(response) {
   return {
     type: DELETE_INSTANCE_RESPONSE,
+    payload: response
+  };
+}
+
+export function precheckInstance(providerUUID, instanceIP) {
+  const uri = `${getProviderEndpoint(providerUUID)}/instances/${instanceIP}`;
+  const request = axios.post(uri, { nodeAction: 'PRECHECK_DETACHED' });
+  return {
+    type: PRECHECK_INSTANCE,
+    payload: request
+  };
+}
+
+export function precheckInstanceResponse(response) {
+  return {
+    type: PRECHECK_INSTANCE_RESPONSE,
     payload: response
   };
 }

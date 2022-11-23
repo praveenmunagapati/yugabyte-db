@@ -31,18 +31,28 @@
 //
 
 #include <cstddef>
+
 #include <glog/logging.h>
 
+#include "yb/common/ql_protocol_util.h"
 #include "yb/common/schema.h"
 #include "yb/common/wire_protocol-test-util.h"
-#include "yb/common/ql_protocol_util.h"
+
 #include "yb/fs/fs_manager.h"
+
 #include "yb/gutil/ref_counted.h"
+
 #include "yb/tablet/local_tablet_writer.h"
 #include "yb/tablet/operations/snapshot_operation.h"
-#include "yb/tablet/tablet_snapshots.h"
 #include "yb/tablet/tablet-test-util.h"
+#include "yb/tablet/tablet.h"
+#include "yb/tablet/tablet_metadata.h"
+#include "yb/tablet/tablet_snapshots.h"
+
 #include "yb/util/opid.h"
+#include "yb/util/status_log.h"
+
+using std::string;
 
 namespace yb {
 namespace tablet {
@@ -55,7 +65,7 @@ class TestRaftGroupMetadata : public YBTabletTest {
 
   void SetUp() override {
     YBTabletTest::SetUp();
-    writer_.reset(new LocalTabletWriter(harness_->tablet().get()));
+    writer_.reset(new LocalTabletWriter(harness_->tablet()));
   }
 
   void BuildPartialRow(int key, int intval, const char* strval,
@@ -88,7 +98,7 @@ TEST_F(TestRaftGroupMetadata, TestLoadFromSuperBlock) {
 
   // Shut down the tablet.
   harness_->tablet()->StartShutdown();
-  harness_->tablet()->CompleteShutdown();
+  harness_->tablet()->CompleteShutdown(DisableFlushOnShutdown::kFalse);
 
   RaftGroupMetadata* meta = harness_->tablet()->metadata();
 
@@ -130,7 +140,8 @@ TEST_F(TestRaftGroupMetadata, TestDeleteTabletDataClearsDisk) {
   const string snapshotId = "0123456789ABCDEF0123456789ABCDEF";
   tserver::TabletSnapshotOpRequestPB request;
   request.set_snapshot_id(snapshotId);
-  tablet::SnapshotOperation operation(tablet.get(), &request);
+  tablet::SnapshotOperation operation(tablet);
+  operation.AllocateRequest()->CopyFrom(request);
   operation.set_hybrid_time(tablet->clock()->Now());
   operation.set_op_id(OpId(-1, 2));
   ASSERT_OK(tablet->snapshots().Create(&operation));

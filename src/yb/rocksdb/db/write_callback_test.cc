@@ -18,7 +18,6 @@
 // under the License.
 //
 
-#ifndef ROCKSDB_LITE
 
 #include <atomic>
 #include <string>
@@ -33,13 +32,16 @@
 #include "yb/rocksdb/util/random.h"
 #include "yb/rocksdb/util/sync_point.h"
 #include "yb/rocksdb/util/testharness.h"
+#include "yb/rocksdb/util/testutil.h"
+
+#include "yb/util/test_util.h"
 
 using std::atomic;
 using std::string;
 
 namespace rocksdb {
 
-class WriteCallbackTest : public testing::Test {
+class WriteCallbackTest : public RocksDBTest {
  public:
   string dbname;
 
@@ -295,7 +297,7 @@ TEST_F(WriteCallbackTest, WriteWithCallbackTest) {
           ASSERT_EQ(seq.load(), db_impl->GetLatestSequenceNumber());
 
           delete db;
-          DestroyDB(dbname, options);
+          ASSERT_OK(DestroyDB(dbname, options));
         }
       }
     }
@@ -358,7 +360,7 @@ TEST_F(WriteCallbackTest, WriteCallBackTest) {
   ASSERT_EQ("value.a2", value);
 
   delete db;
-  DestroyDB(dbname, options);
+  ASSERT_OK(DestroyDB(dbname, options));
 }
 
 }  // namespace rocksdb
@@ -367,14 +369,3 @@ int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
-
-#else
-#include <stdio.h>
-
-int main(int argc, char** argv) {
-  fprintf(stderr,
-          "SKIPPED as WriteWithCallback is not supported in ROCKSDB_LITE\n");
-  return 0;
-}
-
-#endif  // !ROCKSDB_LITE

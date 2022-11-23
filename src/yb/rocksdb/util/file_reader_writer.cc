@@ -24,23 +24,26 @@
 #include "yb/rocksdb/util/file_reader_writer.h"
 
 #include <algorithm>
-#include <mutex>
 
 #include "yb/rocksdb/port/port.h"
+#include "yb/rocksdb/rate_limiter.h"
 #include "yb/rocksdb/util/histogram.h"
-#include "yb/rocksdb/util/random.h"
-#include "yb/rocksdb/util/rate_limiter.h"
-#include "yb/rocksdb/util/sync_point.h"
 #include "yb/rocksdb/util/stop_watch.h"
-#include "yb/util/stats/iostats_context_imp.h"
+#include "yb/rocksdb/util/sync_point.h"
 
 #include "yb/util/priority_thread_pool.h"
+#include "yb/util/stats/iostats_context_imp.h"
+#include "yb/util/status_log.h"
+#include "yb/util/test_kill.h"
+#include "yb/util/flags.h"
 
-DEFINE_bool(allow_preempting_compactions, true,
+using std::unique_ptr;
+
+DEFINE_UNKNOWN_bool(allow_preempting_compactions, true,
             "Whether a compaction may be preempted in favor of another compaction with higher "
             "priority");
 
-DEFINE_int32(rocksdb_file_starting_buffer_size, 8192,
+DEFINE_UNKNOWN_int32(rocksdb_file_starting_buffer_size, 8192,
              "Starting buffer size for writable files, grows by 2x every new allocation.");
 
 namespace rocksdb {
@@ -87,6 +90,10 @@ Status RandomAccessFileReader::ReadAndValidate(
   return s;
 }
 
+WritableFileWriter::~WritableFileWriter() {
+  WARN_NOT_OK(Close(), "Failed to close file");
+}
+
 Status WritableFileWriter::Append(const Slice& data) {
   const char* src = data.cdata();
   size_t left = data.size();
@@ -95,7 +102,7 @@ Status WritableFileWriter::Append(const Slice& data) {
   pending_fsync_ = true;
 
   TEST_KILL_RANDOM("WritableFileWriter::Append:0",
-                   rocksdb_kill_odds * REDUCE_ODDS2);
+                   test_kill_odds * REDUCE_ODDS2);
 
   {
     IOSTATS_TIMER_GUARD(prepare_write_nanos);
@@ -152,7 +159,7 @@ Status WritableFileWriter::Append(const Slice& data) {
     s = WriteBuffered(src, left);
   }
 
-  TEST_KILL_RANDOM("WritableFileWriter::Append:1", rocksdb_kill_odds);
+  TEST_KILL_RANDOM("WritableFileWriter::Append:1", test_kill_odds);
   if (s.ok()) {
     filesize_ += data.size();
   }
@@ -181,14 +188,14 @@ Status WritableFileWriter::Close() {
     s = interim;
   }
 
-  TEST_KILL_RANDOM("WritableFileWriter::Close:0", rocksdb_kill_odds);
+  TEST_KILL_RANDOM("WritableFileWriter::Close:0", test_kill_odds);
   interim = writable_file_->Close();
   if (!interim.ok() && s.ok()) {
     s = interim;
   }
 
   writable_file_.reset();
-  TEST_KILL_RANDOM("WritableFileWriter::Close:1", rocksdb_kill_odds);
+  TEST_KILL_RANDOM("WritableFileWriter::Close:1", test_kill_odds);
 
   return s;
 }
@@ -197,7 +204,7 @@ Status WritableFileWriter::Close() {
 Status WritableFileWriter::Flush() {
   Status s;
   TEST_KILL_RANDOM("WritableFileWriter::Flush:0",
-                   rocksdb_kill_odds * REDUCE_ODDS2);
+                   test_kill_odds * REDUCE_ODDS2);
 
   if (buf_.CurrentSize() > 0) {
     if (use_os_buffer_) {
@@ -250,14 +257,14 @@ Status WritableFileWriter::Sync(bool use_fsync) {
   if (!s.ok()) {
     return s;
   }
-  TEST_KILL_RANDOM("WritableFileWriter::Sync:0", rocksdb_kill_odds);
+  TEST_KILL_RANDOM("WritableFileWriter::Sync:0", test_kill_odds);
   if (!direct_io_ && pending_sync_) {
     s = SyncInternal(use_fsync);
     if (!s.ok()) {
       return s;
     }
   }
-  TEST_KILL_RANDOM("WritableFileWriter::Sync:1", rocksdb_kill_odds);
+  TEST_KILL_RANDOM("WritableFileWriter::Sync:1", test_kill_odds);
   pending_sync_ = false;
   if (use_fsync) {
     pending_fsync_ = false;
@@ -275,6 +282,10 @@ Status WritableFileWriter::SyncWithoutFlush(bool use_fsync) {
   Status s = SyncInternal(use_fsync);
   TEST_SYNC_POINT("WritableFileWriter::SyncWithoutFlush:2");
   return s;
+}
+
+Status WritableFileWriter::InvalidateCache(size_t offset, size_t length) {
+  return writable_file_->InvalidateCache(offset, length);
 }
 
 Status WritableFileWriter::SyncInternal(bool use_fsync) {
@@ -299,9 +310,8 @@ size_t WritableFileWriter::RequestToken(size_t bytes, bool align) {
   if (suspender_ && FLAGS_allow_preempting_compactions) {
     suspender_->PauseIfNecessary();
   }
-  Env::IOPriority io_priority;
-  if (rate_limiter_ && (io_priority = writable_file_->GetIOPriority()) <
-      Env::IO_TOTAL) {
+  yb::IOPriority io_priority;
+  if (rate_limiter_ && (io_priority = writable_file_->GetIOPriority()) < yb::IOPriority::kTotal) {
     bytes = std::min(
       bytes, static_cast<size_t>(rate_limiter_->GetSingleBurstBytes()));
 
@@ -338,7 +348,7 @@ Status WritableFileWriter::WriteBuffered(const char* data, size_t size) {
     }
 
     IOSTATS_ADD(bytes_written, allowed);
-    TEST_KILL_RANDOM("WritableFileWriter::WriteBuffered:0", rocksdb_kill_odds);
+    TEST_KILL_RANDOM("WritableFileWriter::WriteBuffered:0", test_kill_odds);
 
     left -= allowed;
     src += allowed;
@@ -440,7 +450,7 @@ class ReadaheadRandomAccessFile : public yb::RandomAccessFileWrapper {
 
   ReadaheadRandomAccessFile& operator=(const ReadaheadRandomAccessFile&) = delete;
 
-  CHECKED_STATUS Read(uint64_t offset, size_t n, Slice* result, uint8_t* scratch) const override {
+  Status Read(uint64_t offset, size_t n, Slice* result, uint8_t* scratch) const override {
     if (n >= readahead_size_) {
       return RandomAccessFileWrapper::Read(offset, n, result, scratch);
     }
@@ -510,7 +520,7 @@ Status NewWritableFile(Env* env, const std::string& fname,
                        unique_ptr<WritableFile>* result,
                        const EnvOptions& options) {
   Status s = env->NewWritableFile(fname, result, options);
-  TEST_KILL_RANDOM("NewWritableFile:0", rocksdb_kill_odds * REDUCE_ODDS2);
+  TEST_KILL_RANDOM("NewWritableFile:0", test_kill_odds * REDUCE_ODDS2);
   return s;
 }
 

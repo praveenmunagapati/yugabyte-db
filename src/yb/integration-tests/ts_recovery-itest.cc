@@ -36,11 +36,15 @@
 #include "yb/integration-tests/external_mini_cluster.h"
 #include "yb/integration-tests/test_workload.h"
 
+#include "yb/rpc/rpc_controller.h"
+
 #include "yb/tserver/tserver_admin.proxy.h"
 
+#include "yb/util/size_literals.h"
 #include "yb/util/test_util.h"
 
 using std::string;
+using std::vector;
 using namespace std::literals;
 
 namespace yb {
@@ -73,7 +77,8 @@ void TsRecoveryITest::StartCluster(const vector<string>& extra_tserver_flags,
 
 // Test that we replay from the recovery directory, if it exists.
 TEST_F(TsRecoveryITest, TestCrashDuringLogReplay) {
-  ASSERT_NO_FATALS(StartCluster({ "--TEST_fault_crash_during_log_replay=0.05" }));
+  const std::string crash_flag = "--TEST_fault_crash_during_log_replay=0.05";
+  ASSERT_NO_FATALS(StartCluster({ crash_flag }));
 
   TestWorkload work(cluster_.get());
   work.set_num_write_threads(4);
@@ -94,7 +99,7 @@ TEST_F(TsRecoveryITest, TestCrashDuringLogReplay) {
 
   // Restart might crash very quickly and actually return a bad status, so we
   // ignore the result.
-  ignore_result(cluster_->tablet_server(0)->Restart());
+  WARN_NOT_OK(cluster_->tablet_server(0)->Restart(), "Restart failed");
 
   // Wait for the process to crash during log replay.
   for (int i = 0; i < 3000 && cluster_->tablet_server(0)->IsProcessAlive(); i++) {
@@ -102,10 +107,12 @@ TEST_F(TsRecoveryITest, TestCrashDuringLogReplay) {
   }
   ASSERT_FALSE(cluster_->tablet_server(0)->IsProcessAlive()) << "TS didn't crash!";
 
+  cluster_->tablet_server(0)->Shutdown();
   // Now remove the crash flag, so the next replay will complete, and restart
   // the server once more.
-  cluster_->tablet_server(0)->Shutdown();
-  cluster_->tablet_server(0)->mutable_flags()->clear();
+  auto& flags = *cluster_->tablet_server(0)->mutable_flags();
+  flags.erase(std::remove_if(flags.begin(), flags.end(),
+      [&](std::string& flag){ return flag == crash_flag; }));
   ASSERT_OK(cluster_->tablet_server(0)->Restart());
 
   ClusterVerifier cluster_verifier(cluster_.get());
@@ -142,7 +149,7 @@ TEST_F(TsRecoveryITest, CrashAfterLogSegmentPreAllocationg) {
     tserver::FlushTabletsResponsePB resp;
     rpc::RpcController controller;
     controller.set_timeout(30s);
-    proxy->FlushTablets(req, &resp, &controller);
+    WARN_NOT_OK(proxy.FlushTablets(req, &resp, &controller), "FlushTablets failed");
     SleepFor(MonoDelta::FromMilliseconds(10));
   }
   work.StopAndJoin();

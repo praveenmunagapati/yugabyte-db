@@ -9,8 +9,7 @@ menu:
     identifier: aggregate-function-syntax-semantics
     parent: aggregate-functions
     weight: 90
-isTocNested: true
-showAsideToc: true
+type: indexpage
 ---
 
 The aggregate functions are categorized into four classes:
@@ -19,7 +18,7 @@ The aggregate functions are categorized into four classes:
 
 - [statistical aggregate functions](#statistical-aggregate-functions)
 
-- [_within-group ordered-set_ aggregate functions](#within-group-ordered-set-aggregate-functions) 
+- [_within-group ordered-set_ aggregate functions](#within-group-ordered-set-aggregate-functions)
 
 - [_within-group hypothetical-set_ aggregate functions](#within-group-hypothetical-set-aggregate-functions)
 
@@ -43,8 +42,8 @@ Arguably, `avg()` might be better classified as a statistical aggregate function
 | [`avg()`](./avg-count-max-min-sum/#avg) | Computes the arithmetic mean of a set of summable values by adding them all together and dividing by the number of values. If the set contains nulls, then these are simply ignored—both when computing the sum and when counting the number of values. |
 | [`bit_and()`](./bit-and-or-bool-and-or/#bit-and) | Returns a value that represents the outcome of the applying the two-by-two matrix `AND` rule to each alligned set of bits for the set of `NOT NULL` input values. |
 | [`bit_or()`](./bit-and-or-bool-and-or#bit-or) | Returns a value that represents the outcome of the applying the two-by-two matrix `OR` rule to each alligned set of bits for the set of `NOT NULL` input values. |
-| [`bool_and()`](./bit-and-or-bool-and-or/#bool-and) | Returns a value that represents the outcome of the applying the two-by-two matrix `AND` rule to to the set of `NOT NULL` input boolean values. |
-| [`bool_or()`](./bit-and-or-bool-and-or/#bool-or) | Returns a value that represents the outcome of the applying the two-by-two matrix `OR` rule to to the set of `NOT NULL` input boolean values. |
+| [`bool_and()`](./bit-and-or-bool-and-or/#bool-and) | Returns a value that represents the outcome of the applying the two-by-two matrix `AND` rule to the set of `NOT NULL` input boolean values. |
+| [`bool_or()`](./bit-and-or-bool-and-or/#bool-or) | Returns a value that represents the outcome of the applying the two-by-two matrix `OR` rule to the set of `NOT NULL` input boolean values. |
 | [`count()`](./avg-count-max-min-sum/#count) | Counts the number of non null values in a set. The data type of the values is of no consequence. |
 | `every()` | `every()` is a synonym for [`bool_and()`](./bit-and-or-bool-and-or/#bool-and) |
 | [`jsonb_agg()`](./array-string-jsonb-jsonb-object-agg/#jsonb-agg) | This, and `json_agg()` are described in detail the [`jsonb_agg()`](../../../datatypes/type_json/functions-operators/jsonb-agg/) section in the main [JSON](../../../datatypes/type_json/) section. |
@@ -106,7 +105,3 @@ These functions as invoked, as within-group hypothetical-set aggregate functions
 | [`dense_rank()`](./rank-dense-rank-percent-rank-cume-dist/#dense-rank) | Returns the integer ordinal rank of the distinct value of each row according to what the window `ORDER` BY clause specifies. The series of values starts with 1 and, even when the window contains ties, the series is dense. See the account of [dense_rank()](../../window_functions/function-syntax-semantics/row-number-rank-dense-rank/#dense-rank) in the [Window functions](../../window_functions/) section for more information.|
 | [`percent_rank()`](./rank-dense-rank-percent-rank-cume-dist/#percent-rank) | Returns the percentile rank of each row within the window, with respect to the argument of the window_definition's window `ORDER BY` clause. See the account of [percent_rank()](../../window_functions/function-syntax-semantics/percent-rank-cume-dist-ntile/#percent-rank) in the [Window functions](../../window_functions/) section for more information. |
 | [`cume_dist()`](./rank-dense-rank-percent-rank-cume-dist/#cume-dist) | Returns a value that represents the number of rows with values less than or equal to the current row’s value divided by the total number of rows—in other words, the relative position of a value in a set of values. See the account of [cume_dist()](../../window_functions/function-syntax-semantics/percent-rank-cume-dist-ntile/#cume-dist) in the [Window functions](../../window_functions/) section for more information. |
-
-
-
-

@@ -21,6 +21,8 @@
 #ifndef PG_YBGATE_YBGATE_API_H
 #define PG_YBGATE_YBGATE_API_H
 
+#include <setjmp.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include "yb/yql/pggate/ybc_pg_typedefs.h"
@@ -69,13 +71,30 @@ typedef struct YbgStatus YbgStatus;
 		YBCPgSetThreadLocalJumpBuffer(&buffer); \
 		int r = setjmp(buffer); \
 		if (r != 0) { \
-			return PG_STATUS(r, YBCPgGetThreadLocalErrMsg()); \
+			return PG_STATUS(r, (const char *) YBCPgGetThreadLocalErrMsg()); \
 		} \
 	} while(0) \
+
+YbgStatus YbgInit();
 
 //-----------------------------------------------------------------------------
 // Memory Context
 //-----------------------------------------------------------------------------
+
+#ifdef __cplusplus
+typedef void *YbgMemoryContext;
+#else
+typedef MemoryContext YbgMemoryContext;
+#endif
+
+YbgStatus YbgGetCurrentMemoryContext(YbgMemoryContext *memctx);
+
+YbgStatus YbgSetCurrentMemoryContext(YbgMemoryContext memctx,
+									 YbgMemoryContext *oldctx);
+
+YbgStatus YbgCreateMemoryContext(YbgMemoryContext parent,
+								 const char *name,
+								 YbgMemoryContext *memctx);
 
 YbgStatus YbgPrepareMemoryContext();
 
@@ -86,6 +105,34 @@ YbgStatus YbgDeleteMemoryContext();
 //-----------------------------------------------------------------------------
 // Types
 //-----------------------------------------------------------------------------
+
+struct PgAttributeRow
+{
+	uint32_t attrelid;
+	char	 attname[64];
+	uint32_t atttypid;
+	int32_t	 attstattarget;
+	int16_t	 attlen;
+	int16_t	 attnum;
+	int32_t	 attndims;
+	int32_t	 attcacheoff;
+	int32_t	 atttypmod;
+	bool	 attbyval;
+	char	 attstorage;
+	char	 attalign;
+	bool	 attnotnull;
+	bool	 atthasdef;
+	bool	 atthasmissing;
+	char	 attidentity;
+	bool	 attisdropped;
+	bool	 attislocal;
+	int32_t	 attinhcount;
+	uint32_t attcollation;
+};
+
+#ifndef __cplusplus
+typedef struct PgAttributeRow PgAttributeRow;
+#endif
 
 struct YbgTypeDesc {
 	int32_t type_id; /* type identifier */
@@ -102,14 +149,24 @@ typedef struct YbgTypeDesc YbgTypeDesc;
  */
 YbgStatus YbgGetTypeTable(const YBCPgTypeEntity **type_table, int *count);
 
+/*
+ * For non-primitive types (the ones without a corresponding YBCPgTypeEntity),
+ * get the corresponding primitive type's oid.
+ */
+YbgStatus YbgGetPrimitiveTypeOid(uint32_t type_oid, char typtype,
+								 uint32_t typbasetype,
+								 uint32_t *primitive_type_oid);
+
 //-----------------------------------------------------------------------------
 // Expression Evaluation
 //-----------------------------------------------------------------------------
 
 #ifdef __cplusplus
 typedef void* YbgExprContext;
+typedef void* YbgPreparedExpr;
 #else
 typedef struct YbgExprContextData* YbgExprContext;
+typedef struct Expr* YbgPreparedExpr;
 #endif
 
 /*
@@ -117,17 +174,27 @@ typedef struct YbgExprContextData* YbgExprContext;
  */
 YbgStatus YbgExprContextCreate(int32_t min_attno, int32_t max_attno, YbgExprContext *expr_ctx);
 
+YbgStatus YbgExprContextReset(YbgExprContext expr_ctx);
+
 /*
  * Add a column value from the table row.
  * Used by expression evaluation to resolve scan variables.
  */
 YbgStatus YbgExprContextAddColValue(YbgExprContext expr_ctx, int32_t attno, uint64_t datum, bool is_null);
 
+YbgStatus YbgPrepareExpr(char* expr_cstring, YbgPreparedExpr *expr);
+
+YbgStatus YbgExprType(const YbgPreparedExpr expr, int32_t *typid);
+
+YbgStatus YbgExprTypmod(const YbgPreparedExpr expr, int32_t *typmod);
+
+YbgStatus YbgExprCollation(const YbgPreparedExpr expr, int32_t *collid);
+
 /*
  * Evaluate an expression, using the expression context to resolve scan variables.
  * Will filling in datum and is_null with the result.
  */
-YbgStatus YbgEvalExpr(char* expr_cstring, YbgExprContext expr_ctx, uint64_t *datum, bool *is_null);
+YbgStatus YbgEvalExpr(YbgPreparedExpr expr, YbgExprContext expr_ctx, uint64_t *datum, bool *is_null);
 
 /*
  * Given a 'datum' of array type, split datum into individual elements of type 'type' and store
@@ -167,6 +234,36 @@ YbgStatus YbgSamplerRandomFract(YbgReservoirState yb_rs, double *value);
  * and requested sample size.
  */
 YbgStatus YbgReservoirGetNextS(YbgReservoirState yb_rs, double t, int n, double *s);
+
+char* DecodeDatum(char const* fn_name, uintptr_t datum);
+
+char* DecodeTZDatum(char const* fn_name, uintptr_t datum, const char *timezone, bool from_YB);
+
+char* DecodeArrayDatum(char const* arr_fn_name, uintptr_t datum,
+		int16_t elem_len, bool elem_by_val, char elem_align, char elem_delim, bool from_YB,
+		char const* fn_name, const char *timezone, char option);
+
+char* DecodeRangeDatum(char const* range_fn_name, uintptr_t datum,
+		int16_t elem_len, bool elem_by_val, char elem_align, char option, bool from_YB,
+		char const* elem_fn_name, int range_type, const char *timezone);
+
+char* DecodeRangeArrayDatum(char const* arr_fn_name, uintptr_t datum,
+		int16_t elem_len, int16_t range_len, bool elem_by_val, bool range_by_val,
+		char elem_align, char range_align, char elem_delim, char option, char range_option,
+		bool from_YB, char const* elem_fn_name, char const* range_fn_name, int range_type,
+		const char *timezone);
+
+char *DecodeRecordDatum(uintptr_t datum, void *attrs, size_t natts);
+
+char *GetOutFuncName(const int pg_data_type);
+
+uint32_t GetRecordTypeId(uintptr_t datum);
+
+uintptr_t HeapFormTuple(void *attrs, size_t natts, uintptr_t *values,
+						bool *nulls);
+
+void HeapDeformTuple(uintptr_t datum, void *attrs, size_t natts,
+					 uintptr_t *values, bool *nulls);
 
 #ifdef __cplusplus
 }

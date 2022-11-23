@@ -11,17 +11,29 @@
 // under the License.
 //
 
+#include "yb/client/callbacks.h"
+#include "yb/client/client.h"
+
+#include "yb/consensus/log.h"
 #include "yb/consensus/log_reader.h"
-#include "yb/tablet/tablet.h"
-#include "yb/tablet/tablet_peer.h"
-#include "yb/tserver/tablet_server.h"
-#include "yb/util/test_macros.h"
-#include "yb/util/test_util.h"
 
 #include "yb/integration-tests/mini_cluster.h"
 #include "yb/integration-tests/yb_table_test_base.h"
 
+#include "yb/tablet/tablet_peer.h"
+
+#include "yb/tserver/mini_tablet_server.h"
+#include "yb/tserver/tablet_server.h"
+#include "yb/tserver/ts_tablet_manager.h"
+
+#include "yb/util/test_macros.h"
+#include "yb/util/test_util.h"
+
+using std::string;
+
 DECLARE_bool(TEST_simulate_abrupt_server_restart);
+
+DECLARE_bool(log_enable_background_sync);
 
 namespace yb {
 namespace integration_tests {
@@ -31,7 +43,7 @@ class RestartTest : public YBTableTestBase {
 
   bool use_external_mini_cluster() override { return false; }
 
-  int num_tablet_servers() override { return 3; }
+  size_t num_tablet_servers() override { return 3; }
 
   int num_tablets() override { return 1; }
 
@@ -41,6 +53,30 @@ class RestartTest : public YBTableTestBase {
     ASSERT_OK(client_->GetTablets(table_name, 0 /* max_tablets */, &tablet_ids, &ranges));
     ASSERT_EQ(tablet_ids.size(), 1);
     *tablet_id = tablet_ids[0];
+  }
+
+  void ShutdownTabletPeer(const std::shared_ptr<tablet::TabletPeer> &tablet_peer) {
+    ASSERT_OK(tablet_peer->Shutdown(tablet::ShouldAbortActiveTransactions::kTrue,
+                                    tablet::DisableFlushOnShutdown::kFalse));
+  }
+
+  void CheckSampleKeysValues(int start, int end) {
+    auto result_kvs = GetScanResults(client::TableRange(table_));
+    ASSERT_EQ(end - start + 1, result_kvs.size());
+
+    for(int i = start ; i <= end ; i++) {
+      std::string num_str = std::to_string(i);
+      ASSERT_EQ("key_" + num_str, result_kvs[i - start].first);
+      ASSERT_EQ("value_" + num_str, result_kvs[i - start].second);
+    }
+  }
+};
+
+class LogSyncTest : public RestartTest {
+ protected:
+  void BeforeStartCluster() override {
+    // setting the flag immaterial of the default value
+    FLAGS_log_enable_background_sync = true;
   }
 };
 
@@ -56,19 +92,42 @@ TEST_F(RestartTest, WalFooterProperlyInitialized) {
 
   string tablet_id;
   ASSERT_NO_FATALS(GetTablet(table_.name(), &tablet_id));
-  std::shared_ptr<tablet::TabletPeer> tablet_peer;
-  ASSERT_OK(tablet_server->server()->tablet_manager()->GetTabletPeer(tablet_id, &tablet_peer));
+  auto tablet_peer = ASSERT_RESULT(
+      tablet_server->server()->tablet_manager()->GetServingTablet(tablet_id));
   ASSERT_OK(tablet_server->WaitStarted());
   log::SegmentSequence segments;
   ASSERT_OK(tablet_peer->log()->GetLogReader()->GetSegmentsSnapshot(&segments));
 
   ASSERT_EQ(2, segments.size());
-  auto segment = segments[0];
+  log::ReadableLogSegmentPtr segment = ASSERT_RESULT(segments.front());
   ASSERT_TRUE(segment->HasFooter());
   ASSERT_TRUE(segment->footer().has_close_timestamp_micros());
   ASSERT_TRUE(segment->footer().close_timestamp_micros() > timestamp_before_write &&
               segment->footer().close_timestamp_micros() < timestamp_after_write);
 
+}
+
+TEST_F(LogSyncTest, BackgroundSync) {
+
+  // triggers log background sync threadpool
+  PutKeyValue("key_0", "value_0");
+  auto* tablet_server = mini_cluster()->mini_tablet_server(0);
+  string tablet_id;
+  ASSERT_NO_FATALS(GetTablet(table_.name(), &tablet_id));
+  auto tablet_peer = ASSERT_RESULT(
+      tablet_server->server()->tablet_manager()->GetServingTablet(tablet_id));
+  CheckSampleKeysValues(0, 0);
+
+  ASSERT_OK(tablet_server->Restart());
+  ASSERT_NO_FATALS(GetTablet(table_.name(), &tablet_id));
+  tablet_peer = ASSERT_RESULT(
+      tablet_server->server()->tablet_manager()->GetServingTablet(tablet_id));
+  ASSERT_OK(tablet_server->WaitStarted());
+
+  // shutting down tablet_peer resets the BG sync threapool token maintained in the Log.
+  PutKeyValue("key_1", "value_1");
+  CheckSampleKeysValues(0, 1);
+  ShutdownTabletPeer(tablet_peer);
 }
 
 } // namespace integration_tests

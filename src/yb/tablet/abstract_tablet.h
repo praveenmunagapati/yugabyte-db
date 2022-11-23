@@ -11,31 +11,23 @@
 // under the License.
 //
 
-#ifndef YB_TABLET_ABSTRACT_TABLET_H
-#define YB_TABLET_ABSTRACT_TABLET_H
+#pragma once
 
-#include "yb/common/pgsql_protocol.pb.h"
-#include "yb/common/ql_protocol.pb.h"
-#include "yb/common/ql_storage_interface.h"
-#include "yb/common/redis_protocol.pb.h"
-#include "yb/common/schema.h"
+#include "yb/common/common_fwd.h"
+#include "yb/common/common_types.pb.h"
+#include "yb/common/hybrid_time.h"
+#include "yb/common/transaction.pb.h"
+
+#include "yb/docdb/docdb_fwd.h"
 
 #include "yb/tablet/tablet_fwd.h"
+#include "yb/util/result.h"
 
 namespace yb {
+
+class WriteBuffer;
+
 namespace tablet {
-
-struct QLReadRequestResult {
-  QLResponsePB response;
-  faststring rows_data;
-  HybridTime restart_read_ht;
-};
-
-struct PgsqlReadRequestResult {
-  PgsqlResponsePB response;
-  faststring rows_data;
-  HybridTime restart_read_ht;
-};
 
 class TabletRetentionPolicy;
 
@@ -43,9 +35,9 @@ class AbstractTablet {
  public:
   virtual ~AbstractTablet() {}
 
-  virtual yb::SchemaPtr GetSchema(const std::string& table_id = "") const = 0;
+  virtual docdb::DocReadContextPtr GetDocReadContext(const std::string& table_id = "") const = 0;
 
-  virtual const common::YQLStorageIf& QLStorage() const = 0;
+  virtual const docdb::YQLStorageIf& QLStorage() const = 0;
 
   virtual TableType table_type() const = 0;
 
@@ -55,7 +47,7 @@ class AbstractTablet {
 
   //------------------------------------------------------------------------------------------------
   // Redis support.
-  virtual CHECKED_STATUS HandleRedisReadRequest(
+  virtual Status HandleRedisReadRequest(
       CoarseTimePoint deadline,
       const ReadHybridTime& read_time,
       const RedisReadRequestPB& redis_read_request,
@@ -63,14 +55,15 @@ class AbstractTablet {
 
   //------------------------------------------------------------------------------------------------
   // CQL support.
-  virtual CHECKED_STATUS HandleQLReadRequest(
+  virtual Status HandleQLReadRequest(
       CoarseTimePoint deadline,
       const ReadHybridTime& read_time,
       const QLReadRequestPB& ql_read_request,
       const TransactionMetadataPB& transaction_metadata,
-      QLReadRequestResult* result) = 0;
+      QLReadRequestResult* result,
+      WriteBuffer* rows_data) = 0;
 
-  virtual CHECKED_STATUS CreatePagingStateForRead(const QLReadRequestPB& ql_read_request,
+  virtual Status CreatePagingStateForRead(const QLReadRequestPB& ql_read_request,
                                                   const size_t row_count,
                                                   QLResponsePB* response) const = 0;
 
@@ -86,9 +79,7 @@ class AbstractTablet {
   // a timeout.
   Result<HybridTime> SafeTime(RequireLease require_lease = RequireLease::kTrue,
                               HybridTime min_allowed = HybridTime::kMin,
-                              CoarseTimePoint deadline = CoarseTimePoint::max()) const {
-    return DoGetSafeTime(require_lease, min_allowed, deadline);
-  }
+                              CoarseTimePoint deadline = CoarseTimePoint::max()) const;
 
   template <class PB>
   Result<IsolationLevel> GetIsolationLevelFromPB(const PB& pb) {
@@ -98,40 +89,41 @@ class AbstractTablet {
     return GetIsolationLevel(pb.transaction());
   }
 
-  virtual CHECKED_STATUS HandlePgsqlReadRequest(
+  virtual Status HandlePgsqlReadRequest(
       CoarseTimePoint deadline,
       const ReadHybridTime& read_time,
       bool is_explicit_request_read_time,
       const PgsqlReadRequestPB& ql_read_request,
       const TransactionMetadataPB& transaction_metadata,
       const SubTransactionMetadataPB& subtransaction_metadata,
-      PgsqlReadRequestResult* result,
-      size_t* number_rows_read) = 0;
+      PgsqlReadRequestResult* result) = 0;
 
+  virtual Result<IsolationLevel> GetIsolationLevel(const LWTransactionMetadataPB& transaction) = 0;
   virtual Result<IsolationLevel> GetIsolationLevel(const TransactionMetadataPB& transaction) = 0;
 
   //-----------------------------------------------------------------------------------------------
   // PGSQL support.
   //-----------------------------------------------------------------------------------------------
 
-  CHECKED_STATUS HandleQLReadRequest(
+  Status HandleQLReadRequest(
       CoarseTimePoint deadline,
       const ReadHybridTime& read_time,
       const QLReadRequestPB& ql_read_request,
-      const TransactionOperationContextOpt& txn_op_context,
-      QLReadRequestResult* result);
+      const TransactionOperationContext& txn_op_context,
+      QLReadRequestResult* result,
+      WriteBuffer* rows_data);
 
-  virtual CHECKED_STATUS CreatePagingStateForRead(const PgsqlReadRequestPB& pgsql_read_request,
+  virtual Status CreatePagingStateForRead(const PgsqlReadRequestPB& pgsql_read_request,
                                                   const size_t row_count,
                                                   PgsqlResponsePB* response) const = 0;
 
-  CHECKED_STATUS HandlePgsqlReadRequest(CoarseTimePoint deadline,
-                                        const ReadHybridTime& read_time,
-                                        bool is_explicit_request_read_time,
-                                        const PgsqlReadRequestPB& pgsql_read_request,
-                                        const TransactionOperationContextOpt& txn_op_context,
-                                        PgsqlReadRequestResult* result,
-                                        size_t* num_rows_read);
+  Status ProcessPgsqlReadRequest(CoarseTimePoint deadline,
+                                 const ReadHybridTime& read_time,
+                                 bool is_explicit_request_read_time,
+                                 const PgsqlReadRequestPB& pgsql_read_request,
+                                 const std::shared_ptr<TableInfo>& table_info,
+                                 const TransactionOperationContext& txn_op_context,
+                                 PgsqlReadRequestResult* result);
 
   virtual bool IsTransactionalRequest(bool is_ysql_request) const = 0;
 
@@ -142,5 +134,3 @@ class AbstractTablet {
 
 }  // namespace tablet
 }  // namespace yb
-
-#endif // YB_TABLET_ABSTRACT_TABLET_H

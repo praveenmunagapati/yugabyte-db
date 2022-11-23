@@ -8,8 +8,7 @@ menu:
     identifier: imdb-data
     parent: bacon-numbers
     weight: 20
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 {{< tip title="Download a zip of scripts that include all the code examples that implement this case study" >}}
@@ -114,9 +113,9 @@ call insert_edges();
 
 with v(actor) as (
   select node_1 from edges
-  union all
+  union
   select node_2 from edges)
-select distinct actor from v order by 1
+select actor from v order by 1
 limit 10;
 
 select distinct unnest(movies) as movie
@@ -127,7 +126,7 @@ limit 10;
 select
   node_1,
   node_2,
-  replace(translate(movies::text, '{"}', ''), ',', ' > ') as movies
+  replace(translate(movies::text, '{"}', ''), ',', ' | ') as movies
 from edges
 where node_1 < node_2
 order by 1, 2
@@ -136,7 +135,7 @@ limit 10;
 select
   node_1,
   node_2,
-  replace(translate(movies::text, '{"}', ''), ',', ' > ') as movies
+  replace(translate(movies::text, '{"}', ''), ',', ' | ') as movies
 from edges
 where node_1 > node_2
 order by 2, 1
@@ -146,7 +145,7 @@ limit 10;
 Here are the results of all the queries:
 
 ```
-      actor       
+      actor
 ------------------
  Adam Sandler (I)
  Al Pacino
@@ -159,7 +158,7 @@ Here are the results of all the queries:
  Andy Dick
  Ann Pala
 
-                       movie                        
+                       movie
 ----------------------------------------------------
  180: Christopher Nolan Interviews Al Pacino (2002)
  Actor's Notebook: Christopher Lee (2002)
@@ -172,12 +171,12 @@ Here are the results of all the queries:
  Being John Malkovich (1999)
  Big Parade of Comedy, The (1964)
 
-      node_1      |       node_2       |                                        movies                                         
+      node_1      |       node_2       |                                        movies
 ------------------+--------------------+---------------------------------------------------------------------------------------
  Adam Sandler (I) | Allen Covert       | Adam Sandler Goes to Hell (2001)
  Adam Sandler (I) | Ann Pala           | Adam Sandler Goes to Hell (2001)
  Adam Sandler (I) | Betsy Asher Hall   | Adam Sandler Goes to Hell (2001)
- Adam Sandler (I) | Bill Murray (I)    | Saturday Night Live Christmas (1999) > Saturday Night Live: Game Show Parodies (1998)
+ Adam Sandler (I) | Bill Murray (I)    | Saturday Night Live Christmas (1999) | Saturday Night Live: Game Show Parodies (1998)
  Adam Sandler (I) | Billy Bob Thornton | Going Overboard (1989)
  Adam Sandler (I) | Billy Crystal      | Saturday Night Live: Game Show Parodies (1998)
  Adam Sandler (I) | Blake Clark        | Adam Sandler Goes to Hell (2001)
@@ -185,12 +184,12 @@ Here are the results of all the queries:
  Adam Sandler (I) | Dana Carvey        | Adam Sandler Goes to Hell (2001)
  Adam Sandler (I) | David Sosalla      | Adam Sandler Goes to Hell (2001)
 
-       node_1       |      node_2      |                                        movies                                         
+       node_1       |      node_2      |                                        movies
 --------------------+------------------+---------------------------------------------------------------------------------------
  Allen Covert       | Adam Sandler (I) | Adam Sandler Goes to Hell (2001)
  Ann Pala           | Adam Sandler (I) | Adam Sandler Goes to Hell (2001)
  Betsy Asher Hall   | Adam Sandler (I) | Adam Sandler Goes to Hell (2001)
- Bill Murray (I)    | Adam Sandler (I) | Saturday Night Live Christmas (1999) > Saturday Night Live: Game Show Parodies (1998)
+ Bill Murray (I)    | Adam Sandler (I) | Saturday Night Live Christmas (1999) | Saturday Night Live: Game Show Parodies (1998)
  Billy Bob Thornton | Adam Sandler (I) | Going Overboard (1989)
  Billy Crystal      | Adam Sandler (I) | Saturday Night Live: Game Show Parodies (1998)
  Blake Clark        | Adam Sandler (I) | Adam Sandler Goes to Hell (2001)

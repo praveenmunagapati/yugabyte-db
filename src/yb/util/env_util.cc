@@ -29,21 +29,18 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
+#include "yb/util/env_util.h"
 
-#include <algorithm>
 #include <memory>
 #include <string>
 
-#include <glog/logging.h>
-
 #include <boost/container/small_vector.hpp>
 
-#include "yb/gutil/strings/substitute.h"
-#include "yb/util/env.h"
-#include "yb/util/env_util.h"
-#include "yb/util/path_util.h"
-#include "yb/util/status.h"
 #include "yb/gutil/strings/util.h"
+#include "yb/util/env.h"
+#include "yb/util/path_util.h"
+#include "yb/util/result.h"
+#include "yb/util/status_log.h"
 
 using strings::Substitute;
 using std::shared_ptr;
@@ -144,11 +141,13 @@ Status ReadFully(RandomAccessFile* file, uint64_t offset, size_t n,
 
   bool first_read = true;
 
-  int rem = n;
+  size_t rem = n;
   uint8_t* dst = scratch;
   while (rem > 0) {
     Slice this_result;
-    RETURN_NOT_OK(file->Read(offset, rem, &this_result, dst));
+    RETURN_NOT_OK_PREPEND(
+        file->Read(offset, rem, &this_result, dst),
+        Format("Failed to read $0 bytes at $1", rem, offset));
     DCHECK_LE(this_result.size(), rem);
     if (this_result.size() == 0) {
       // EOF

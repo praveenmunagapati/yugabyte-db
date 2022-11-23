@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_YQL_PGWRAPPER_PG_WRAPPER_TEST_BASE_H
-#define YB_YQL_PGWRAPPER_PG_WRAPPER_TEST_BASE_H
+#pragma once
 
 #include "yb/integration-tests/external_mini_cluster.h"
 #include "yb/integration-tests/yb_mini_cluster_test_base.h"
@@ -33,6 +32,8 @@ class PgWrapperTestBase : public MiniClusterTestWithClient<ExternalMiniCluster> 
 
   virtual void UpdateMiniClusterOptions(ExternalMiniClusterOptions* options) {}
 
+  Result<TabletId> GetSingleTabletId(const TableName& table_name);
+
   // Tablet server to use to perform PostgreSQL operations.
   ExternalTabletServer* pg_ts = nullptr;
 };
@@ -46,12 +47,22 @@ class PgCommandTestBase : public PgWrapperTestBase {
     db_name_ = db_name;
   }
 
-  void RunPsqlCommand(const std::string &statement, const std::string &expected_output);
+  YB_STRONGLY_TYPED_BOOL(TuplesOnly);
+
+  Result<std::string> RunPsqlCommand(
+      const std::string &statement, TuplesOnly tuples_only = TuplesOnly::kFalse);
+
+  void RunPsqlCommand(
+      const std::string &statement, const std::string &expected_output, bool tuples_only = false);
 
   void UpdateMiniClusterOptions(ExternalMiniClusterOptions* options) override;
 
   void CreateTable(const std::string &statement) {
     RunPsqlCommand(statement, "CREATE TABLE");
+  }
+
+  void CreateType(const std::string &statement) {
+    RunPsqlCommand(statement, "CREATE TYPE");
   }
 
   void CreateIndex(const std::string &statement) {
@@ -95,5 +106,3 @@ class PgCommandTestBase : public PgWrapperTestBase {
 
 } // namespace pgwrapper
 } // namespace yb
-
-#endif // YB_YQL_PGWRAPPER_PG_WRAPPER_TEST_BASE_H

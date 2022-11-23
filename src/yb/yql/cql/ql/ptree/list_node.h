@@ -20,10 +20,14 @@
 // which is verified during Analyze step.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_CQL_QL_PTREE_LIST_NODE_H_
-#define YB_YQL_CQL_QL_PTREE_LIST_NODE_H_
+#pragma once
+
+#include "yb/util/math_util.h"
+#include "yb/util/memory/arena.h"
+#include "yb/util/status.h"
 
 #include "yb/yql/cql/ql/ptree/tree_node.h"
+#include "yb/yql/cql/ql/util/errcodes.h"
 
 namespace yb {
 namespace ql {
@@ -33,7 +37,7 @@ template<typename ContextType, typename NodeType = TreeNode>
 using TreeNodePtrOperator = std::function<Status(NodeType*, ContextType*)>;
 
 // TreeNode base class.
-template<typename NodeType = TreeNode, TreeNodeOpcode op = TreeNodeOpcode::kPTListNode>
+template<typename NodeType>
 class TreeListNode : public TreeNode {
  public:
   //------------------------------------------------------------------------------------------------
@@ -44,7 +48,7 @@ class TreeListNode : public TreeNode {
   //------------------------------------------------------------------------------------------------
   // Public functions.
   explicit TreeListNode(MemoryContext *memory_context,
-                        YBLocation::SharedPtr loc,
+                        YBLocationPtr loc,
                         const MCSharedPtr<NodeType>& tnode = nullptr)
       : TreeNode(memory_context, loc),
         node_list_(memory_context) {
@@ -55,7 +59,7 @@ class TreeListNode : public TreeNode {
 
   // Node type.
   virtual TreeNodeOpcode opcode() const override {
-    return op;
+    return TreeNodeOpcode::kPTListNode;
   }
 
   // Add a tree node at the end.
@@ -87,14 +91,14 @@ class TreeListNode : public TreeNode {
   }
 
   // Run semantics analysis on this node.
-  CHECKED_STATUS Analyze(SemContext *sem_context) override {
+  Status Analyze(SemContext *sem_context) override {
     for (auto tnode : node_list_) {
       RETURN_NOT_OK(tnode->Analyze(sem_context));
     }
     return Status::OK();
   }
 
-  virtual CHECKED_STATUS Analyze(SemContext *sem_context,
+  virtual Status Analyze(SemContext *sem_context,
                                  TreeNodePtrOperator<SemContext, NodeType> node_op) {
     for (auto tnode : node_list_) {
       RETURN_NOT_OK(node_op(tnode.get(), sem_context));
@@ -104,11 +108,11 @@ class TreeListNode : public TreeNode {
 
   // Apply an operator on each node in the list.
   template<typename ContextType, typename DerivedType = NodeType>
-  CHECKED_STATUS Apply(ContextType *context,
-                       TreeNodePtrOperator<ContextType, DerivedType> node_op,
-                       int max_nested_level = 0,
-                       int max_nested_count = 0,
-                       TreeNodePtrOperator<ContextType, DerivedType> nested_node_op = nullptr) {
+  Status Apply(ContextType *context,
+               TreeNodePtrOperator<ContextType, DerivedType> node_op,
+               int max_nested_level = 0,
+               int max_nested_count = 0,
+               TreeNodePtrOperator<ContextType, DerivedType> nested_node_op = nullptr) {
 
     int nested_level = 0;
     int nested_count = 0;
@@ -146,7 +150,7 @@ class TreeListNode : public TreeNode {
   }
 
   // List count.
-  int size() const {
+  size_t size() const {
     return node_list_.size();
   }
 
@@ -160,15 +164,13 @@ class TreeListNode : public TreeNode {
   }
 
   // Returns the nth element.
-  MCSharedPtr<NodeType> element(int n) const {
-    DCHECK_GE(n, 0);
-    for (const MCSharedPtr<NodeType>& tnode : node_list_) {
-      if (n == 0) {
-        return tnode;
-      }
-      n--;
+  MCSharedPtr<NodeType> element(size_t n) const {
+    if (node_list_.size() <= n) {
+      return nullptr;
     }
-    return nullptr;
+    auto it = node_list_.begin();
+    std::advance(it, n);
+    return *it;
   }
 
  private:
@@ -178,10 +180,8 @@ class TreeListNode : public TreeNode {
 class PTListNode : public TreeListNode<> {
  public:
   // Run semantics analysis on a statement block.
-  CHECKED_STATUS AnalyzeStatementBlock(SemContext *sem_context);
+  Status AnalyzeStatementBlock(SemContext *sem_context);
 };
 
 }  // namespace ql
 }  // namespace yb
-
-#endif  // YB_YQL_CQL_QL_PTREE_LIST_NODE_H_

@@ -32,14 +32,18 @@
 
 #include "yb/util/monotime.h"
 
-#include <limits>
 #include <glog/logging.h>
 
-#include "yb/gutil/mathlimits.h"
+#include "yb/gutil/casts.h"
 #include "yb/gutil/stringprintf.h"
 #include "yb/gutil/sysinfo.h"
-#include "yb/gutil/walltime.h"
+
+#include "yb/util/result.h"
 #include "yb/util/thread_restrictions.h"
+
+#if defined(__APPLE__)
+#include "yb/gutil/walltime.h"
+#endif
 
 using namespace std::literals;
 
@@ -77,6 +81,14 @@ MonoDelta MonoDeltaByMultiplication(V value, int64_t mul) {
   CHECK_LE(value, std::numeric_limits<int64_t>::max() / mul);
   int64_t delta = value * mul;
   return MonoDelta::FromNanoseconds(delta);
+}
+
+MonoDelta MonoDelta::FromDays(double days) {
+  return MonoDeltaByMultiplication(days, MonoTime::kNanosecondsPerDay);
+}
+
+MonoDelta MonoDelta::FromHours(double hours) {
+  return MonoDeltaByMultiplication(hours, MonoTime::kNanosecondsPerHour);
 }
 
 MonoDelta MonoDelta::FromMinutes(double minutes) {
@@ -149,6 +161,16 @@ double MonoDelta::ToMinutes() const {
   return seconds / MonoTime::kSecondsPerMinute;
 }
 
+double MonoDelta::ToHours() const {
+  auto minutes = ToMinutes();
+  return minutes / MonoTime::kMinutesPerHour;
+}
+
+double MonoDelta::ToDays() const {
+  auto hours = ToHours();
+  return hours / MonoTime::kHoursPerDay;
+}
+
 int64_t MonoDelta::ToNanoseconds() const {
   DCHECK(Initialized());
   return nano_delta_;
@@ -205,14 +227,15 @@ MonoDelta& MonoDelta::operator/=(int64_t divisor) {
 void MonoDelta::ToTimeVal(struct timeval *tv) const {
   DCHECK(Initialized());
   tv->tv_sec = nano_delta_ / MonoTime::kNanosecondsPerSecond;
-  tv->tv_usec = (nano_delta_ - (tv->tv_sec * MonoTime::kNanosecondsPerSecond))
-      / MonoTime::kNanosecondsPerMicrosecond;
+  tv->tv_usec = narrow_cast<int32_t>(
+      (nano_delta_ - tv->tv_sec * MonoTime::kNanosecondsPerSecond)
+      / MonoTime::kNanosecondsPerMicrosecond);
 
   // tv_usec must be between 0 and 999999.
   // There is little use for negative timevals so wrap it in PREDICT_FALSE.
   if (PREDICT_FALSE(tv->tv_usec < 0)) {
     --(tv->tv_sec);
-    tv->tv_usec += 1000000;
+    tv->tv_usec += MonoTime::kMicrosecondsPerSecond;
   }
 
   // Catch positive corner case where we "round down" and could potentially set a timeout of 0.
@@ -346,9 +369,20 @@ void SleepFor(const MonoDelta& delta) {
   base::SleepForNanoseconds(delta.ToNanoseconds());
 }
 
+void SleepUntil(const MonoTime& deadline) {
+  while (true) {
+    const auto sleep_for = deadline - MonoTime::Now();
+    if (sleep_for.IsNegative()) {
+      break;
+    }
+    SleepFor(sleep_for);
+  }
+}
+
 CoarseMonoClock::time_point CoarseMonoClock::now() {
 #if defined(__APPLE__)
-  int64_t nanos = walltime_internal::GetMonoTimeNanos();
+  int64_t nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
 # else
   struct timespec ts;
   PCHECK(clock_gettime(CLOCK_MONOTONIC_COARSE, &ts) == 0);
@@ -356,6 +390,21 @@ CoarseMonoClock::time_point CoarseMonoClock::now() {
   int64_t nanos = static_cast<int64_t>(ts.tv_sec) * MonoTime::kNanosecondsPerSecond + ts.tv_nsec;
 #endif // defined(__APPLE__)
   return time_point(duration(nanos));
+}
+
+template <>
+CoarseMonoClock::Duration ClockResolution<CoarseMonoClock>() {
+#if defined(__APPLE__)
+  return std::chrono::duration_cast<CoarseMonoClock::Duration>(
+      std::chrono::steady_clock::duration(1));
+#else
+  struct timespec res;
+  if (clock_getres(CLOCK_MONOTONIC_COARSE, &res) == 0) {
+    auto resolution = std::chrono::seconds(res.tv_sec) + std::chrono::nanoseconds(res.tv_nsec);
+    return std::chrono::duration_cast<CoarseMonoClock::Duration>(resolution);
+  }
+  return CoarseMonoClock::Duration(1);
+#endif // defined(__APPLE__)
 }
 
 std::string ToString(CoarseMonoClock::TimePoint time_point) {
@@ -368,6 +417,10 @@ CoarseTimePoint ToCoarse(MonoTime monotime) {
 
 std::chrono::steady_clock::time_point ToSteady(CoarseTimePoint time_point) {
   return std::chrono::steady_clock::time_point(time_point.time_since_epoch());
+}
+
+bool IsInitialized(CoarseTimePoint time_point) {
+  return MonoDelta(time_point.time_since_epoch()).Initialized();
 }
 
 } // namespace yb

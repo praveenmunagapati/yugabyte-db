@@ -1,5 +1,11 @@
+// Copyright (c) YugaByte, Inc.
+
 package com.yugabyte.yw.common;
 
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
+import static org.hamcrest.Matchers.not;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
@@ -9,6 +15,7 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 
 import com.google.common.collect.ImmutableMap;
+import com.yugabyte.yw.common.utils.FileUtils;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.Cluster;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams.ClusterType;
@@ -19,11 +26,13 @@ import com.yugabyte.yw.models.helpers.NodeDetails;
 import com.yugabyte.yw.models.helpers.NodeDetails.NodeState;
 import java.io.File;
 import java.text.SimpleDateFormat;
+import java.time.Duration;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import junitparams.JUnitParamsRunner;
 import junitparams.Parameters;
 import junitparams.converters.Nullable;
@@ -287,7 +296,7 @@ public class UtilTest extends FakeDBApplication {
   })
   // @formatter:on
   public void testGetFileName(@Nullable String fullName, @Nullable String fileName) {
-    assertEquals(fileName, Util.getFileName(fullName));
+    assertEquals(fileName, FileUtils.getFileName(fullName));
   }
 
   // TODO: Add tests for other functions
@@ -339,7 +348,7 @@ public class UtilTest extends FakeDBApplication {
     folder.mkdir();
     new File("certificates/ca.cert");
     new File("certificates/cb.cert");
-    Util.deleteDirectory(folder);
+    FileUtils.deleteDirectory(folder);
     assertFalse(folder.exists());
   }
 
@@ -361,5 +370,64 @@ public class UtilTest extends FakeDBApplication {
     } catch (Exception e) {
       assertNull(e);
     }
+  }
+
+  @Test
+  public void testHashStringNoConflict() {
+    Set<String> hashes = new HashSet<>();
+    for (int i = 0; i < 50; i++) {
+      String name = "MyTestUniverse-" + i;
+      String hash = Util.hashString(name);
+      assertThat(hashes, not(hasItem(hash)));
+      hashes.add(hash);
+      hash = Util.hashString(name.toLowerCase());
+      assertThat(hashes, not(hasItem(hash)));
+      hashes.add(hash);
+    }
+  }
+
+  @Test
+  @Parameters({
+    "MyTestUniverse1, mytestuniverse1-07f44fae",
+    "mytestuniverse1, mytestuniverse1",
+    "MyTestUniverseMyTestUniverseMyTestUniverseMyTestUniverseMyTestUniverse1,"
+        + "mytestuniversemytestuniversemytestuniversemytestuniver-6d67fa22"
+  })
+  public void testSanitizeKubernetesNamespace(String univName, String expectedNamespace) {
+    String namespace = Util.sanitizeKubernetesNamespace(univName, 0);
+    assertEquals(expectedNamespace, namespace);
+    assertThat("Max namespace length", namespace.length(), lessThanOrEqualTo(63));
+  }
+
+  @Parameters({
+    "CREATE USER FOO PASSWORD REDACTED; CREATE USER BAR PASSWORD REDACTED;,"
+        + "CREATE USER FOO PASSWORD 'fooBar'; CREATE USER BAR PASSWORD 'fooBar';",
+    "\"ALTER USER \"yugabyte\" WITH PASSWORD REDACTED; "
+        + "SELECT pg_stat_statements_reset();\"',"
+        + "\"ALTER USER \"yugabyte\" WITH PASSWORD '\"'\"'FO@BAR'\"'\"'; "
+        + "SELECT pg_stat_statements_reset();\"'"
+  })
+  @Test
+  public void testYsqlRedaction(String output, String input) {
+    assertEquals(output, Util.redactYsqlQuery(input));
+  }
+
+  @Test
+  @Parameters({
+    "3ns, 3",
+    "2us, 2000",
+    "5\u00b5s, 5000",
+    "1ms, 1000000",
+    "5s, 5000000000",
+    "1m, 60000000000",
+    "2h, 7200000000000",
+    "1d, 86400000000000",
+    "1h2m3s, 3723000000000",
+    "1ms2us3ns, 1002003"
+  })
+  public void testGoDurationConversion(String goDuration, long expectedNanos) {
+    Duration duration = Util.goDurationToJava(goDuration);
+    long nanos = TimeUnit.SECONDS.toNanos(duration.getSeconds()) + duration.getNano();
+    assertEquals(expectedNanos, nanos);
   }
 }

@@ -20,8 +20,7 @@
  *--------------------------------------------------------------------------------------------------
  */
 
-#ifndef YBCCMDS_H
-#define YBCCMDS_H
+#pragma once
 
 #include "access/htup.h"
 #include "catalog/dependency.h"
@@ -45,7 +44,7 @@ extern void YBCReserveOids(Oid dboid, Oid next_oid, uint32 count, Oid *begin_oid
 
 /*  Tablegroup Functions ------------------------------------------------------------------------ */
 
-extern void YBCCreateTablegroup(Oid grpoid);
+extern void YBCCreateTablegroup(Oid grpoid, Oid tablespace_oid);
 
 extern void YBCDropTablegroup(Oid grpoid);
 
@@ -57,11 +56,13 @@ extern void YBCCreateTable(CreateStmt *stmt,
 						   Oid relationId,
 						   Oid namespaceId,
 						   Oid tablegroupId,
-						   Oid tablespaceId);
+						   Oid colocationId,
+						   Oid tablespaceId,
+						   Oid matviewPgTableId);
 
-extern void YBCDropTable(Oid relationId);
+extern void YBCDropTable(Relation rel);
 
-extern void YBCTruncateTable(Relation rel);
+extern void YbTruncate(Relation rel);
 
 extern void YBCCreateIndex(const char *indexName,
 						   IndexInfo *indexInfo,
@@ -73,23 +74,26 @@ extern void YBCCreateIndex(const char *indexName,
 						   OptSplit *split_options,
 						   const bool skip_index_backfill,
 						   Oid tablegroupId,
+						   Oid colocationId,
 						   Oid tablespaceId);
 
-extern void YBCDropIndex(Oid relationId);
+extern void YBCDropIndex(Relation index);
 
-extern YBCPgStatement YBCPrepareAlterTable(List** subcmds,
+extern List* YBCPrepareAlterTable(List** subcmds,
 										   int subcmds_size,
 										   Oid relationId,
-										   YBCPgStatement *rollbackHandle);
+										   YBCPgStatement *rollbackHandle,
+										   bool isPartitionOfAlteredTable);
 
 extern void YBCExecAlterTable(YBCPgStatement handle, Oid relationId);
 
 extern void YBCRename(RenameStmt* stmt, Oid relationId);
 
-extern bool YBCIsTableColocated(Oid dboid, Oid relationId);
-
 extern void YbBackfillIndex(BackfillIndexStmt *stmt, DestReceiver *dest);
 
 extern TupleDesc YbBackfillIndexResultDesc(BackfillIndexStmt *stmt);
 
-#endif
+extern void YbDropAndRecreateIndex(Oid indexOid, Oid relId, Relation oldRel, AttrNumber *newToOldAttmap);
+
+/*  System Validation -------------------------------------------------------------------------- */
+extern void YBCValidatePlacement(const char *placement_info);

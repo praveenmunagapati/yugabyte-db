@@ -8,11 +8,10 @@ menu:
     identifier: yb-master
     parent: configuration
     weight: 2450
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
-Use the `yb-master` binary and its flags to configure the [YB-Master](../../../architecture/concepts/yb-master) server. The `yb-master` executable file is located in the `bin` directory of YugabyteDB home.
+Use the `yb-master` binary and its flags to configure the [YB-Master](../../../architecture/concepts/yb-master/) server. The `yb-master` executable file is located in the `bin` directory of YugabyteDB home.
 
 ## Syntax
 
@@ -20,7 +19,7 @@ Use the `yb-master` binary and its flags to configure the [YB-Master](../../../a
 yb-master [ flag  ] | [ flag ]
 ```
 
-### Example 
+### Example
 
 ```sh
 $ ./bin/yb-master \
@@ -83,6 +82,8 @@ Specifies a comma-separated list of mount directories, where `yb-master` will ad
 
 Required.
 
+Changing the value of this flag after the cluster has already been created is not supported.
+
 ##### --fs_wal_dirs
 
 Specifies a comma-separated list of directories, where `yb-master` will store write-ahead (WAL) logs. This can be the same as one of the directories listed in `--fs_data_dirs`, but not a subdirectory of a data directory.
@@ -113,7 +114,7 @@ Default: `""`
 
 ##### --dns_cache_expiration_ms
 
-Specifies the duration, in milliseconds, until a cached DNS resolution expires. When hostnames are used instead of IP addresses, a DNS resolver must be queried to match hostnames to IP addresses. By using a local DNS cache to temporarily store DNS lookups, DNS queries can be resolved quicker and additional queries can be avoided, thereby reducing latency, improving load times, and reducing bandwidth and CPU consumption.
+Specifies the duration, in milliseconds, until a cached DNS resolution expires. When hostnames are used instead of IP addresses, a DNS resolver must be queried to match hostnames to IP addresses. By using a local DNS cache to temporarily store DNS lookups, DNS queries can be resolved quicker and additional queries can be avoided. This reduces latency, improves load times, and reduces bandwidth and CPU consumption.
 
 Default: `60000` (1 minute)
 
@@ -130,7 +131,7 @@ Specifies the policy that determines when to use private IP addresses for inter-
 Valid values for the policy are:
 
 - `never` — Always use the [`--server_broadcast_addresses`](#server-broadcast-addresses).
-- `zone` — Use the private IP inside a zone; use the [`--server_broadcast_addresses`](#server-broadcast-addresses) outside the zone. 
+- `zone` — Use the private IP inside a zone; use the [`--server_broadcast_addresses`](#server-broadcast-addresses) outside the zone.
 - `region` — Use the private IP address across all zone in a region; use [`--server_broadcast_addresses`](#server-broadcast-addresses) outside the region.
 
 Default: `never`
@@ -153,25 +154,43 @@ Monitoring web server home.
 
 Default: The `www` directory in the YugabyteDB home directory.
 
+##### --webserver_certificate_file
+
+Location of the SSL certificate file (in .pem format) to use for the web server. If empty, SSL is not enabled for the web server.
+
+Default: `""`
+
+##### --webserver_authentication_domain
+
+Domain used for .htpasswd authentication. This should be used in conjunction with [`--webserver_password_file`](#webserver-password-file).
+
+Default: `""`
+
+##### --webserver_password_file
+
+Location of .htpasswd file containing usernames and hashed passwords, for authentication to the web server.
+
+Default: `""`
+
 ---
 
 ### YSQL flags
 
 ##### --enable_ysql
 
-Enables the YSQL API when value is `true`. Replaces the deprecated `--start_pgsql_proxy` flag.
+{{< note title="Note" >}}
+
+Ensure that `enable_ysql` values in `yb-master` configurations match the values in `yb-tserver` configurations.
+
+{{< /note >}}
+
+Enables the YSQL API when value is `true`.
 
 Default: `true`
 
 ---
 
 ### Logging flags
-
-##### --alsologtoemail
-
-Sends log messages to these email addresses in addition to logfiles.
-
-Default: `""`
 
 ##### --colorlogtostderr
 
@@ -192,20 +211,6 @@ Default: `0`
 Buffer log messages for at most this many seconds.
 
 Default: `30`
-
-##### --logemaillevel
-
-Email log messages logged at this level, or higher. 
-
-Values: `0` (all); `1` (WARN), `2` (ERROR), `3` (FATAL), `999` (none)
-
-Default: `999`
-
-##### --logmailer
-
-The mailer used to send logging email messages.
-
-Default: `"/bin/mail"
 
 ##### --logtostderr
 
@@ -253,15 +258,11 @@ Default: `2`
 
 ### Raft flags
 
-{{< note title="Note" >}}
-
-Ensure that values used for Raft and the write ahead log (WAL) in `yb-master` configurations match the values in `yb-tserver` configurations.
-
-{{< /note >}}
+For a typical deployment, values used for Raft and the write ahead log (WAL) flags in `yb-master` configurations should match the values in [yb-tserver](../yb-tserver/#raft-flags) configurations.
 
 ##### --follower_unavailable_considered_failed_sec
 
-The duration, in seconds, after which a follower is considered to be failed because the leader has not received a heartbeat. The follower is then evicted from the configuration and the data is rereplicated elsewhere.
+The duration, in seconds, after which a follower is considered to be failed because the leader has not received a heartbeat. The follower is then evicted from the configuration and the data is re-replicated elsewhere.
 
 Default: `900` (15 minutes)
 
@@ -275,9 +276,19 @@ The `--follower_unavailable_considered_failed_sec` value should match the value 
 
 The maximum heartbeat periods that the leader can fail to heartbeat in before the leader is considered to be failed. The total failure timeout, in milliseconds, is [`--raft_heartbeat_interval_ms`](#raft-heartbeat-interval-ms) multiplied by `--leader_failure_max_missed_heartbeat_periods`.
 
-For read replica clusters, set the value to `10` in all `yb-tserver` and `yb-master` configurations.  Because the the data is globally replicated, RPC latencies are higher. Use this flag to increase the failure detection interval in such a higher RPC latency deployment.
+For read replica clusters, set the value to `10` in all `yb-tserver` and `yb-master` configurations.  Because the data is globally replicated, RPC latencies are higher. Use this flag to increase the failure detection interval in such a higher RPC latency deployment.
 
 Default: `6`
+
+##### --leader_lease_duration_ms
+
+The leader lease duration, in milliseconds. A leader keeps establishing a new lease or extending the existing one with every consensus update. A new server is not allowed to serve as a leader (that is, serve up-to-date read requests or acknowledge write requests) until a lease of this duration has definitely expired on the old leader's side, or the old leader has explicitly acknowledged the new leader's lease.
+
+This lease allows the leader to safely serve reads for the duration of its lease, even during a network partition. For more information, refer to [Leader leases](../../../architecture/transactions/single-row-transactions/#leader-leases-reading-the-latest-data-in-case-of-a-network-partition).
+
+Leader lease duration should be longer than the heartbeat interval, and less than the multiple of `--leader_failure_max_missed_heartbeat_periods` multiplied by `--raft_heartbeat_interval_ms`.
+
+Default: `2000`
 
 ##### --raft_heartbeat_interval_ms
 
@@ -319,7 +330,7 @@ Default: `1`
 
 ##### --log_min_seconds_to_retain
 
-The minimum duration, in seconds, to retain WAL segments, regardless of durability requirements. WAL segments can be retained for a longer amount of time, if they are necessary for correct restart. This value should be set long enough such that a tablet server which has temporarily failed can be restarted within the given time period.
+The minimum duration, in seconds, to retain WAL segments, regardless of durability requirements. WAL segments can be retained for a longer amount of time, if they are necessary for correct restart. This value should be set long enough such that a tablet server which has temporarily failed can be restarted in the given time period.
 
 Default: `900` (15 minutes)
 
@@ -339,7 +350,7 @@ Default: `64`
 
 ### Load balancing flags
 
-For information on YB-Master load balancing, see [Data placement and load balancing](../../../architecture/concepts/yb-master/#data-placement-and-load-balancing)
+For information on YB-Master load balancing, see [Data placement and load balancing](../../../architecture/concepts/yb-master/#data-placement-and-load-balancing).
 
 For load balancing commands in `yb-admin`, see [Rebalancing commands (yb-admin)](../../../admin/yb-admin/#rebalancing-commands).
 
@@ -411,7 +422,7 @@ Default: `5`
 
 ##### --load_balancer_skip_leader_as_remove_victim
 
-Should the LB skip a leader as a possible remove candidate. 
+Should the LB skip a leader as a possible remove candidate.
 
 Default: `false`
 
@@ -449,6 +460,12 @@ On a per-table basis, the [`CREATE TABLE ... WITH TABLETS = <num>`](../../../api
 
 {{< /note >}}
 
+{{< note title="Note" >}}
+
+If `enable_automatic_tablet_splitting` is `true`, this value will be overridden and tables will begin with 1 tablet per node.
+
+{{< /note >}}
+
 ##### --ysql_num_shards_per_tserver
 
 The number of shards per YB-TServer for each YSQL table when a user table is created.
@@ -461,14 +478,126 @@ On a per-table basis, the [`CREATE TABLE ...SPLIT INTO`](../../../api/ysql/the-s
 
 {{< /note >}}
 
-#### --tablet_split_size_threshold_bytes
+{{< note title="Note" >}}
 
-Enables tablets to automatically split tablets while online, based on the specified tablet threshold size.
+If `enable_automatic_tablet_splitting` is `true`, this value will be overridden and tables will begin with 1 tablet per node.
+
+{{< /note >}}
+
+### Tablet splitting flags
+
+##### --enable_automatic_tablet_splitting
+
+Enables YugabyteDB to [automatically split tablets](../../../architecture/docdb-sharding/tablet-splitting/#automatic-tablet-splitting), based on the specified tablet threshold sizes configured below.
+
+Default: `false`
+
+##### --tablet_split_low_phase_shard_count_per_node
+
+The threshold number of shards (per cluster node) in a table below which automatic tablet splitting will use [`--tablet_split_low_phase_size_threshold_bytes`](./#tablet-split-low-phase-size-threshold-bytes) to determine which tablets to split.
+
+Default: `8`
+
+##### --tablet_split_low_phase_size_threshold_bytes
+
+The size threshold used to determine if a tablet should be split when the tablet's table is in the "low" phase of automatic tablet splitting. See [`--tablet_split_low_phase_shard_count_per_node`](./#tablet-split-low-phase-shard-count-per-node).
+
+Default: `512_MB`
+
+##### --tablet_split_high_phase_shard_count_per_node
+
+The threshold number of shards (per cluster node) in a table below which automatic tablet splitting will use [`--tablet_split_high_phase_size_threshold_bytes`](./#tablet-split-low-phase-size-threshold-bytes) to determine which tablets to split.
+
+Default: `24`
+
+##### --tablet_split_high_phase_size_threshold_bytes
+
+The size threshold used to determine if a tablet should be split when the tablet's table is in the "high" phase of automatic tablet splitting. See [`--tablet_split_high_phase_shard_count_per_node`](./#tablet-split-low-phase-shard-count-per-node).
+
+Default: `10_GB`
+
+##### --tablet_force_split_threshold_bytes
+
+The size threshold used to determine if a tablet should be split even if the table's number of shards puts it past the "high phase".
+
+Default: `100_GB`
+
+##### --tablet_split_limit_per_table
+
+The maximum number of tablets per table for tablet splitting. Limitation is disabled if this value is set to 0.
+
+Default: `256`
+
+##### --index_backfill_tablet_split_completion_timeout_sec
+
+Total time to wait for tablet splitting to complete on a table on which a backfill is running before aborting the backfill and marking it as failed.
+
+Default: `30`
+
+##### --index_backfill_tablet_split_completion_poll_freq_ms
+
+Delay before retrying to see if tablet splitting has completed on the table on which a backfill is running.
+
+Default: `2000`
+
+##### --process_split_tablet_candidates_interval_msec
+
+The minimum time between automatic splitting attempts. The actual splitting time between runs is also affected by `catalog_manager_bg_task_wait_ms`, which controls how long the background tasks thread sleeps at the end of each loop.
+
+Default: `0`
+
+##### --outstanding_tablet_split_limit
+
+Limits the number of total outstanding tablet splits. Limitation is disabled if value is set to `0`. Limit includes tablets that are performing post-split compactions.
+
+Default: `1`
+
+##### --outstanding_tablet_split_limit_per_tserver
+
+Limits the number of outstanding tablet splits per node. Limitation is disabled if value is set to `0`. Limit includes tablets that are performing post-split compactions.
+
+Default: `1`
+
+##### --enable_tablet_split_of_pitr_tables
+
+Enables automatic tablet splitting of tables covered by Point In Time Recovery schedules.
+
+Default: `true`
+
+##### --enable_tablet_split_of_xcluster_replicated_tables
+
+Enables automatic tablet splitting for tables that are part of an xCluster replication setup.
+
+Default: `false`
+
+{{< note title="Note" >}}
+
+To enable tablet splitting on cross cluster replicated tables, this flag should be set to `true` on both the producer and consumer clusters, as they will perform splits independently of each other. Both the producer and consumer clusters must be running v2.14.0+ to enable the feature (relevant in case of cluster upgrades).
+
+{{< /note >}}
+
+##### --prevent_split_for_ttl_tables_for_seconds
+
+Number of seconds between checks for whether to split a tablet with a default TTL. Checks are disabled if this value is set to 0.
+
+Default: `86400`
+
+##### --prevent_split_for_small_key_range_tablets_for_seconds
+
+Number of seconds between checks for whether to split a tablet whose key range is too small to be split. Checks are disabled if this value is set to 0.
+
+Default: `300`
+
+##### --sort_automatic_tablet_splitting_candidates
+
+Determines whether to sort automatic split candidates from largest to smallest (prioritizing larger tablets for split).
+
+Default: `true`
 
 **Syntax**
 
 ```sh
-yb-admin --master_addresses <master-addresses> --tablet_split_size_threshold_bytes <bytes>
+yb-admin --master_addresses <master-addresses> --tablet_force_split_size_threshold_bytes <bytes>
 ```
 
 - *master-addresses*: Comma-separated list of YB-Master hosts and ports. Default value is `localhost:7100`.
@@ -515,11 +644,17 @@ Determines when to use private IP addresses. Possible values are `never` (defaul
 
 Default: `never`
 
+##### --auto_create_local_transaction_tables
+
+If true, transaction tables will be automatically created for any YSQL tablespace which has a placement and at least one other table in it.
+
+Default: `true`
+
 ---
 
 ### Security flags
 
-For details on enabling server-to-server encryption, see [Server-server encryption](../../../secure/tls-encryption/server-to-server).
+For details on enabling server-to-server encryption, see [Server-server encryption](../../../secure/tls-encryption/server-to-server/).
 
 ##### --certs_dir
 
@@ -541,9 +676,43 @@ Default: `false`
 
 ##### --use_node_to_node_encryption
 
-Enable server-server, or node-to-node, encryption between YugabyteDB YB-Master and YB-TServer servers in a cluster or universe. To work properly, all YB-Master servers must also have their [`--use_node_to_node_encryption`](../yb-master/#use-node-to-node-encryption) flag enabled. When enabled, then [`--allow_insecure_connections`](#allow-insecure-connections) flag must be disabled.
+Enables server-server or node-to-node encryption between YB-Master and YB-TServer servers in a cluster or universe. To work properly, all YB-Master servers must also have their [`--use_node_to_node_encryption`](../yb-master/#use-node-to-node-encryption) flag enabled. When enabled, then [`--allow_insecure_connections`](#allow-insecure-connections) flag must be disabled.
 
 Default: `false`
+
+##### --cipher_list
+
+Specify cipher lists for TLS 1.2 and below. (For TLS 1.3, use [--ciphersuite](#ciphersuite).) Use a colon (":") separated list of TLSv1.2 cipher names in order of preference. Use an exclamation mark ("!") to exclude ciphers. For example:
+
+```sh
+--cipher_list DEFAULTS:!DES:!IDEA:!3DES:!RC2
+```
+
+This allows all ciphers for TLS 1.2 to be accepted, except those matching the category of ciphers omitted.
+
+This flag requires a restart or rolling restart.
+
+Default: `DEFAULTS`
+
+For more information, refer to [SSL_CTX_set_cipher_list](https://www.openssl.org/docs/man1.1.1/man3/SSL_CTX_set_cipher_list.html) in the OpenSSL documentation.
+
+##### --ciphersuite
+
+Specify cipher lists for TLS 1.3. (For TLS 1.2 and below, use [--cipher_list](#cipher-list).)
+
+Use a colon (":") separated list of TLSv1.3 ciphersuite names in order of preference. Use an exclamation mark ("!") to exclude ciphers. For example:
+
+```sh
+--ciphersuite DEFAULTS:!CHACHA20
+```
+
+This allows all ciphersuites for TLS 1.3 to be accepted, except CHACHA20 ciphers.
+
+This flag requires a restart or rolling restart.
+
+Default: `DEFAULTS`
+
+For more information, refer to [SSL_CTX_set_cipher_list](https://www.openssl.org/docs/man1.1.1/man3/SSL_CTX_set_cipher_list.html) in the OpenSSL documentation.
 
 ---
 
@@ -555,19 +724,19 @@ For other CDC configuration flags, see [YB-TServer's CDC flags](../yb-tserver/#c
 
 ##### --cdc_state_table_num_tablets
 
-The number of tablets to use when creating the CDC state table.
+The number of tablets to use when creating the CDC state table. Used in both xCluster and CDCSDK.
 
 Default: `0` (Use the same default number of tablets as for regular tables.)
 
 ##### --cdc_wal_retention_time_secs
 
-WAL retention time, in seconds, to be used for tables for which a CDC stream was created. If you change the value, make sure that the [`yb-tserver --cdc_wal_retention_time_secs`](../yb-tserver/#cdc-wal-retention-time-secs) flag is also updated with the same value.
+WAL retention time, in seconds, to be used for tables for which a CDC stream was created. Used in both xCluster and CDCSDK.
 
 Default: `14400` (4 hours)
 
 ## Admin UI
 
-The Admin UI for yb-master is available at http://localhost:7000.
+The Admin UI for yb-master is available at <http://localhost:7000>.
 
 ### Home
 

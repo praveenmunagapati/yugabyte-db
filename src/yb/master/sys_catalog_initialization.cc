@@ -13,50 +13,38 @@
 
 #include "yb/master/sys_catalog_initialization.h"
 
-#include "yb/util/countdown_latch.h"
-#include "yb/util/pb_util.h"
-#include "yb/util/env_util.h"
-#include "yb/util/path_util.h"
-#include "yb/util/flag_tags.h"
+#include "yb/common/wire_protocol.h"
 
-#include "yb/master/sys_catalog_constants.h"
 #include "yb/master/catalog_entity_info.h"
 #include "yb/master/sys_catalog.h"
 
+#include "yb/tablet/operations/change_metadata_operation.h"
+#include "yb/tablet/operations/snapshot_operation.h"
 #include "yb/tablet/tablet.h"
+#include "yb/tablet/tablet_metadata.h"
 #include "yb/tablet/tablet_peer.h"
 #include "yb/tablet/tablet_snapshots.h"
-#include "yb/tablet/operations/operation.h"
-#include "yb/tablet/operations/snapshot_operation.h"
-#include "yb/tablet/operations/change_metadata_operation.h"
 
-DEFINE_string(initial_sys_catalog_snapshot_path, "",
+#include "yb/util/countdown_latch.h"
+#include "yb/util/env_util.h"
+#include "yb/util/flags.h"
+
+using std::string;
+
+DEFINE_UNKNOWN_string(initial_sys_catalog_snapshot_path, "",
     "If this is specified, system catalog RocksDB is checkpointed at this location after initdb "
     "is done.");
 
-DEFINE_bool(use_initial_sys_catalog_snapshot, false,
-    "DEPRECATED: use --enable_ysql instead. "
-    "Initialize sys catalog tablet from a pre-existing snapshot instead of running initdb. "
-    "Only takes effect if --initial_sys_catalog_snapshot_path is specified or can be "
-    "auto-detected.");
+DEPRECATE_FLAG(bool, use_initial_sys_catalog_snapshot, "11_2022");
 
-DEFINE_bool(enable_ysql, true,
-    "Enable YSQL on cluster. This will initialize sys catalog tablet from a pre-existing snapshot "
-    "and start YSQL proxy. "
-    "Only takes effect if --initial_sys_catalog_snapshot_path is specified or can be auto-detected."
-    );
-
-DEFINE_bool(create_initial_sys_catalog_snapshot, false,
+DEFINE_UNKNOWN_bool(create_initial_sys_catalog_snapshot, false,
     "Run initdb and create an initial sys catalog data snapshot");
-
-DEFINE_bool(
-    // TODO: switch the default to true after updating all external callers (yb-ctl, YugaWare)
-    // and unit tests.
-    master_auto_run_initdb, false,
-    "Automatically run initdb on master leader initialization");
 
 TAG_FLAG(create_initial_sys_catalog_snapshot, advanced);
 TAG_FLAG(create_initial_sys_catalog_snapshot, hidden);
+
+DEFINE_test_flag(bool, fail_initdb_after_snapshot_restore, false,
+                 "Kill the master process after successfully restoring the sys catalog snapshot.");
 
 using yb::CountDownLatch;
 using yb::tserver::TabletSnapshotOpRequestPB;
@@ -80,8 +68,11 @@ const char* kUseInitialSysCatalogSnapshotEnvVar = "YB_USE_INITIAL_SYS_CATALOG_SN
 // InitialSysCatalogSnapshotWriter
 // ------------------------------------------------------------------------------------------------
 
+InitialSysCatalogSnapshotWriter::InitialSysCatalogSnapshotWriter() = default;
+InitialSysCatalogSnapshotWriter::~InitialSysCatalogSnapshotWriter() = default;
+
 void InitialSysCatalogSnapshotWriter::AddMetadataChange(
-    tserver::ChangeMetadataRequestPB metadata_change) {
+    tablet::ChangeMetadataRequestPB metadata_change) {
   initdb_metadata_changes_.push_back(std::move(metadata_change));
 }
 
@@ -94,7 +85,7 @@ Status InitialSysCatalogSnapshotWriter::WriteSnapshot(
       JoinPathSegments(dest_path, kSysCatalogSnapshotRocksDbSubDir)));
 
   tserver::ExportedTabletMetadataChanges exported_tablet_metadata_changes;
-  for (int i = 0; i < initdb_metadata_changes_.size(); ++i) {
+  for (size_t i = 0; i < initdb_metadata_changes_.size(); ++i) {
     *exported_tablet_metadata_changes.add_metadata_changes() = std::move(
         initdb_metadata_changes_[i]);
   }
@@ -123,15 +114,16 @@ Status RestoreInitialSysCatalogSnapshot(
     const std::string& initial_snapshot_path,
     tablet::TabletPeer* sys_catalog_tablet_peer,
     int64_t term) {
-  TabletSnapshotOpRequestPB tablet_snapshot_req;
+  auto operation = std::make_unique<SnapshotOperation>(
+      VERIFY_RESULT(sys_catalog_tablet_peer->shared_tablet_safe()));
+
+  auto& tablet_snapshot_req = *operation->AllocateRequest();
   tablet_snapshot_req.set_operation(yb::tserver::TabletSnapshotOpRequestPB::RESTORE_ON_TABLET);
-  tablet_snapshot_req.add_tablet_id(kSysCatalogTabletId);
-  tablet_snapshot_req.set_snapshot_dir_override(
+  tablet_snapshot_req.mutable_tablet_id()->push_back(kSysCatalogTabletId);
+  tablet_snapshot_req.dup_snapshot_dir_override(
       JoinPathSegments(initial_snapshot_path, kSysCatalogSnapshotRocksDbSubDir));
 
   TabletSnapshotOpResponsePB tablet_snapshot_resp;
-  auto operation = std::make_unique<SnapshotOperation>(
-      sys_catalog_tablet_peer->tablet(), &tablet_snapshot_req);
 
   CountDownLatch latch(1);
   operation->set_completion_callback(
@@ -139,14 +131,19 @@ Status RestoreInitialSysCatalogSnapshot(
 
   sys_catalog_tablet_peer->Submit(std::move(operation), term);
 
+  if (FLAGS_TEST_fail_initdb_after_snapshot_restore && term == 1) {
+    // Only on term 1 (the first master leader), wait until the snapshot operation is complete
+    // before killing the process.
+    latch.Wait();
+    LOG(FATAL) << "Simulate failover during initdb";
+  }
   // Now restore tablet metadata.
   tserver::ExportedTabletMetadataChanges tablet_metadata_changes;
   RETURN_NOT_OK(ReadPBContainerFromPath(
       Env::Default(),
       JoinPathSegments(initial_snapshot_path, kSysCatalogSnapshotTabletMetadataChangesFile),
       &tablet_metadata_changes));
-  for (const tserver::ChangeMetadataRequestPB& change_metadata_req :
-          tablet_metadata_changes.metadata_changes()) {
+  for (const auto& change_metadata_req : tablet_metadata_changes.metadata_changes()) {
     RETURN_NOT_OK(tablet::SyncReplicateChangeMetadataOperation(
         &change_metadata_req,
         sys_catalog_tablet_peer,
@@ -166,13 +163,12 @@ void SetDefaultInitialSysCatalogSnapshotFlags() {
   if (env_var_value && strcmp(env_var_value, "0") == 0) {
     LOG(INFO) << "Disabling the use of initial sys catalog snapshot: env var "
               << kUseInitialSysCatalogSnapshotEnvVar << " is set to 0";
-    FLAGS_use_initial_sys_catalog_snapshot = 0;
     FLAGS_enable_ysql = 0;
   }
 
   if (FLAGS_initial_sys_catalog_snapshot_path.empty() &&
       !FLAGS_create_initial_sys_catalog_snapshot &&
-      (FLAGS_use_initial_sys_catalog_snapshot || FLAGS_enable_ysql)) {
+      FLAGS_enable_ysql) {
     const char* kStaticDataParentDir = "share";
     const std::string search_for_dir = JoinPathSegments(
         kStaticDataParentDir, kDefaultInitialSysCatalogSnapshotDir,
@@ -193,7 +189,7 @@ void SetDefaultInitialSysCatalogSnapshotFlags() {
 
     if (Env::Default()->FileExists(candidate_metadata_changes_path)) {
       VLOG(1) << "Found initial sys catalog snapshot directory: " << candidate_dir;
-      FLAGS_initial_sys_catalog_snapshot_path = candidate_dir;
+      CHECK_OK(SET_FLAG_DEFAULT_AND_CURRENT(initial_sys_catalog_snapshot_path, candidate_dir));
       return;
     } else {
       VLOG(1) << "File " << candidate_metadata_changes_path << " does not exist";
@@ -205,34 +201,9 @@ void SetDefaultInitialSysCatalogSnapshotFlags() {
         << FLAGS_initial_sys_catalog_snapshot_path << ", "
         << "FLAGS_create_initial_sys_catalog_snapshot="
         << FLAGS_create_initial_sys_catalog_snapshot << ", "
-        << "FLAGS_use_initial_sys_catalog_snapshot="
-        << FLAGS_use_initial_sys_catalog_snapshot << ", "
         << "FLAGS_enable_ysql="
         << FLAGS_enable_ysql;
   }
-}
-
-bool ShouldAutoRunInitDb(SysConfigInfo* ysql_catalog_config, bool pg_proc_exists) {
-  if (pg_proc_exists) {
-    LOG(INFO) << "Table pg_proc exists, assuming initdb has already been run";
-    return false;
-  }
-
-  if (!FLAGS_master_auto_run_initdb) {
-    LOG(INFO) << "--master_auto_run_initdb is set to false, not running initdb";
-    return false;
-  }
-
-  {
-    auto l = ysql_catalog_config->LockForRead();
-    if (l->pb.ysql_catalog_config().initdb_done()) {
-      LOG(INFO) << "Cluster configuration indicates that initdb has already completed";
-      return false;
-    }
-  }
-
-  LOG(INFO) << "initdb has never been run on this cluster, running it";
-  return true;
 }
 
 Status MakeYsqlSysCatalogTablesTransactional(
@@ -286,7 +257,7 @@ Status MakeYsqlSysCatalogTablesTransactional(
     LOG(INFO) << "Making YSQL system catalog table transactional: " << table_info.ToString();
 
     // Change table properties in tablet metadata.
-    tserver::ChangeMetadataRequestPB change_req;
+    tablet::ChangeMetadataRequestPB change_req;
     change_req.set_tablet_id(kSysCatalogTabletId);
     auto& add_table = *change_req.mutable_add_table();
     VERIFY_RESULT(sys_catalog->tablet_peer()->tablet_metadata()->GetTableInfo(table_id))->ToPB(

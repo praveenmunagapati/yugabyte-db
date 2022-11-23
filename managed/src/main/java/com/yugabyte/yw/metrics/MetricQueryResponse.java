@@ -1,15 +1,23 @@
 // Copyright (c) YugaByte, Inc.
 package com.yugabyte.yw.metrics;
 
+import static com.yugabyte.yw.metrics.MetricQueryHelper.EXPORTED_INSTANCE;
+import static com.yugabyte.yw.metrics.MetricQueryHelper.NAMESPACE_NAME;
+import static com.yugabyte.yw.metrics.MetricQueryHelper.TABLE_ID;
+import static com.yugabyte.yw.metrics.MetricQueryHelper.TABLE_NAME;
+
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.yugabyte.yw.models.MetricConfig;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.yugabyte.yw.models.MetricConfigDefinition;
+import com.yugabyte.yw.models.MetricConfigDefinition.Layout;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,16 +53,29 @@ public class MetricQueryResponse {
   /**
    * Format MetricQueryResponse object as a json for graph(plot.ly) consumption.
    *
-   * @param layout, MetricConfig.Layout object
+   * @param metricName, metric name
+   * @param config, metric definition
+   * @param metricSettings, metric query settings
    * @return JsonNode, Json data that plot.ly can understand
    */
-  public ArrayList<MetricGraphData> getGraphData(String metricName, MetricConfig.Layout layout) {
+  public ArrayList<MetricGraphData> getGraphData(
+      String metricName, MetricConfigDefinition config, MetricSettings metricSettings) {
     ArrayList<MetricGraphData> metricGraphDataList = new ArrayList<>();
 
+    Layout layout = config.getLayout();
+    // We should use instance name for aggregated graph in case it's grouped by instance.
+    boolean useInstanceName =
+        config.getGroupBy() != null
+            && config.getGroupBy().equals(EXPORTED_INSTANCE)
+            && metricSettings.getSplitMode() == SplitMode.NONE;
     for (final JsonNode objNode : data.result) {
       MetricGraphData metricGraphData = new MetricGraphData();
-      JsonNode metricInfo = objNode.get("metric");
+      ObjectNode metricInfo = (ObjectNode) objNode.get("metric");
 
+      metricGraphData.instanceName = getAndRemoveLabelValue(metricInfo, EXPORTED_INSTANCE);
+      metricGraphData.tableId = getAndRemoveLabelValue(metricInfo, TABLE_ID);
+      metricGraphData.tableName = getAndRemoveLabelValue(metricInfo, TABLE_NAME);
+      metricGraphData.namespaceName = getAndRemoveLabelValue(metricInfo, NAMESPACE_NAME);
       if (metricInfo.has("node_prefix")) {
         metricGraphData.name = metricInfo.get("node_prefix").asText();
       } else if (metricInfo.size() == 1) {
@@ -63,39 +84,31 @@ public class MetricQueryResponse {
         String key = metricInfo.fieldNames().next();
         metricGraphData.name = metricInfo.get(key).asText();
       } else if (metricInfo.size() == 0) {
-        // TODO: This is 0 for the special metrics where we would like to grou by __name__ but
-        // PromQL seems to not allow for that. As such, we default the metric name to the one
-        // passed in.
-        //
-        // https://www.robustperception.io/whats-in-a-__name__
-        metricGraphData.name = metricName;
+        if (useInstanceName && StringUtils.isNotBlank(metricGraphData.instanceName)) {
+          // In case of aggregated metric query need to set name == instanceName for graphs,
+          // which are grouped by instance name by default
+          metricGraphData.name = metricGraphData.instanceName;
+        } else {
+          metricGraphData.name = metricName;
+        }
       }
 
       if (metricInfo.size() <= 1) {
-        if (layout.yaxis != null && layout.yaxis.alias.containsKey(metricGraphData.name)) {
-          metricGraphData.name = layout.yaxis.alias.get(metricGraphData.name);
+        if (layout.getYaxis() != null
+            && layout.getYaxis().getAlias().containsKey(metricGraphData.name)) {
+          metricGraphData.name = layout.getYaxis().getAlias().get(metricGraphData.name);
         }
       } else {
-        if (layout.yaxis != null) {
-          metricGraphData.labels = new HashMap<String, String>();
-          for (Map.Entry<String, String> entry : layout.yaxis.alias.entrySet()) {
+        metricGraphData.labels = new HashMap<>();
+        // In case we want to use instance name - it's already set above
+        // Otherwise - replace metric name with alias.
+        if (layout.getYaxis() != null && !useInstanceName) {
+          for (Map.Entry<String, String> entry : layout.getYaxis().getAlias().entrySet()) {
             boolean validLabels = false;
             for (String key : entry.getKey().split(",")) {
               validLabels = false;
               // Java conversion from Iterator to Iterable...
-              for (JsonNode metricEntry : (Iterable<JsonNode>) () -> metricInfo.elements()) {
-                // In case we want to graph per server, we want to display the node name.
-                if (layout.yaxis.alias.containsKey("useInstanceName")) {
-                  metricGraphData.name = metricInfo.get("exported_instance").asText();
-                  // If the alias contains more entries, we want to highlight it via the
-                  // saved name of the metric.
-                  if (layout.yaxis.alias.entrySet().size() > 1) {
-                    metricGraphData.name =
-                        metricGraphData.name + "-" + metricInfo.get("saved_name").asText();
-                  }
-                  validLabels = false;
-                  break;
-                }
+              for (JsonNode metricEntry : (Iterable<JsonNode>) metricInfo::elements) {
                 if (metricEntry.asText().equals(key)) {
                   validLabels = true;
                   break;
@@ -110,7 +123,6 @@ public class MetricQueryResponse {
             }
           }
         } else {
-          metricGraphData.labels = new HashMap<String, String>();
           metricInfo
               .fields()
               .forEachRemaining(
@@ -119,7 +131,6 @@ public class MetricQueryResponse {
                   });
         }
       }
-
       if (objNode.has("values")) {
         for (final JsonNode valueNode : objNode.get("values")) {
           metricGraphData.x.add(valueNode.get(0).asLong() * 1000);
@@ -143,6 +154,15 @@ public class MetricQueryResponse {
       metricGraphDataList.add(metricGraphData);
     }
     return metricGraphDataList;
+  }
+
+  private String getAndRemoveLabelValue(ObjectNode metricInfo, String labelName) {
+    String value = null;
+    if (metricInfo.has(labelName)) {
+      value = metricInfo.get(labelName).asText();
+      metricInfo.remove(labelName);
+    }
+    return value;
   }
 
   /**

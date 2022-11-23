@@ -23,9 +23,10 @@
 
 #include <set>
 
+#include <gtest/gtest.h>
+
 #include "yb/rocksdb/db/inlineskiplist.h"
 #include "yb/rocksdb/db/skiplist.h"
-
 #include "yb/rocksdb/env.h"
 #include "yb/rocksdb/util/concurrent_arena.h"
 #include "yb/rocksdb/util/hash.h"
@@ -34,6 +35,7 @@
 
 #include "yb/util/countdown_latch.h"
 #include "yb/util/random_util.h"
+#include "yb/rocksdb/util/testutil.h"
 #include "yb/util/tsan_util.h"
 
 namespace rocksdb {
@@ -63,7 +65,7 @@ struct TestComparator {
   }
 };
 
-class InlineSkipTest : public testing::Test {};
+class InlineSkipTest : public RocksDBTest {};
 
 TEST_F(InlineSkipTest, Empty) {
   Arena arena;
@@ -416,11 +418,9 @@ class TestState {
 static void ConcurrentReader(void* arg) {
   TestState* state = reinterpret_cast<TestState*>(arg);
   Random rnd(state->seed_);
-  int64_t reads = 0;
   state->Change(TestState::RUNNING);
   while (!state->quit_flag_.load(std::memory_order_acquire)) {
     state->t_.ReadStep(&rnd);
-    ++reads;
   }
   state->Change(TestState::DONE);
 }

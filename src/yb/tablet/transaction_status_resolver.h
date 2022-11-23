@@ -11,17 +11,18 @@
 // under the License.
 //
 
-#ifndef YB_TABLET_TRANSACTION_STATUS_RESOLVER_H
-#define YB_TABLET_TRANSACTION_STATUS_RESOLVER_H
+#pragma once
+
+#include <stdint.h>
 
 #include <memory>
+#include <type_traits>
 
-#include "yb/common/common.pb.h"
 #include "yb/rpc/rpc_fwd.h"
 
 #include "yb/tablet/transaction_participant.h"
 
-#include "yb/util/status.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 namespace tablet {
@@ -49,7 +50,7 @@ class TransactionStatusResolver {
   // If max_transactions_per_request is zero then resolution is skipped.
   TransactionStatusResolver(
       TransactionParticipantContext* participant_context, rpc::Rpcs* rpcs,
-      size_t max_transactions_per_request,
+      int max_transactions_per_request,
       TransactionStatusResolverCallback callback);
   ~TransactionStatusResolver();
 
@@ -76,5 +77,3 @@ class TransactionStatusResolver {
 
 } // namespace tablet
 } // namespace yb
-
-#endif // YB_TABLET_TRANSACTION_STATUS_RESOLVER_H

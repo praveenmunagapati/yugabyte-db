@@ -11,10 +11,8 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_CROSS_THREAD_MUTEX_H_
-#define YB_UTIL_CROSS_THREAD_MUTEX_H_
+#pragma once
 
-#include <mutex>
 #include <condition_variable>
 
 namespace yb {
@@ -63,5 +61,3 @@ bool CrossThreadMutex::try_lock_until(const std::chrono::time_point<Clock, Durat
 }
 
 }  // namespace yb
-
-#endif  // YB_UTIL_CROSS_THREAD_MUTEX_H_

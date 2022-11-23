@@ -30,7 +30,6 @@ import org.junit.AfterClass;
 import org.junit.Before;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import org.yb.BaseYBTest;
 import org.yb.client.TestUtils;
 import org.yb.util.BuildTypeUtil;
@@ -125,6 +124,11 @@ public class BaseMiniClusterTest extends BaseYBTest {
     // failover.
     flagMap.put("load_balancer_initial_delay_secs", "0");
 
+    flagMap.put("durable_wal_write", "false");
+
+    // Limit number of transaction table tablets to help avoid timeouts.
+    flagMap.put("transaction_table_num_tablets", Integer.toString(NUM_TABLET_SERVERS));
+
     // For sanitizer builds, it is easy to overload the master, leading to quorum changes.
     // This could end up breaking ever trivial DDLs like creating an initial table in the cluster.
     if (BuildTypeUtil.isSanitizerBuild()) {
@@ -204,6 +208,19 @@ public class BaseMiniClusterTest extends BaseYBTest {
     createMiniCluster(-1, -1, additionalMasterFlags, additionalTserverFlags);
   }
 
+  /**
+   * Creates a new cluster with additional flags and environment vars.
+   * <p>
+   * Flags will override initial ones on name clash.
+   */
+  protected final void createMiniCluster(
+      Map<String, String> additionalMasterFlags,
+      Map<String, String> additionalTserverFlags,
+      Map<String, String> additionalEnvironmentVars) throws Exception {
+    createMiniCluster(-1, -1, additionalMasterFlags, additionalTserverFlags, null,
+        additionalEnvironmentVars);
+  }
+
   protected final void createMiniCluster(
       Consumer<MiniYBClusterBuilder> customize) throws Exception {
     createMiniCluster(-1, -1, customize);
@@ -225,7 +242,8 @@ public class BaseMiniClusterTest extends BaseYBTest {
       int numTservers,
       Map<String, String> additionalMasterFlags,
       Map<String, String> additionalTserverFlags) throws Exception {
-    createMiniCluster(numMasters, numTservers, additionalMasterFlags, additionalTserverFlags, null);
+    createMiniCluster(numMasters, numTservers, additionalMasterFlags, additionalTserverFlags, null,
+        Collections.emptyMap());
   }
 
   protected final void createMiniCluster(
@@ -233,7 +251,7 @@ public class BaseMiniClusterTest extends BaseYBTest {
       int numTservers,
       Consumer<MiniYBClusterBuilder> customize) throws Exception {
     createMiniCluster(numMasters, numTservers, Collections.emptyMap(), Collections.emptyMap(),
-        customize);
+        customize, Collections.emptyMap());
   }
 
   protected void createMiniCluster(
@@ -241,7 +259,9 @@ public class BaseMiniClusterTest extends BaseYBTest {
       int numTservers,
       Map<String, String> additionalMasterFlags,
       Map<String, String> additionalTserverFlags,
-      Consumer<MiniYBClusterBuilder> customize) throws Exception {
+      Consumer<MiniYBClusterBuilder> customize,
+      Map<String, String> additionalEnvironmentVars
+      ) throws Exception {
     if (!isMiniClusterEnabled()) {
       return;
     }
@@ -277,6 +297,8 @@ public class BaseMiniClusterTest extends BaseYBTest {
     if (customize != null) {
       customize.accept(clusterBuilder);
     }
+
+    clusterBuilder.addEnvironmentVariables(additionalEnvironmentVars);
 
     miniCluster = clusterBuilder.build();
     masterAddresses = miniCluster.getMasterAddresses();

@@ -11,12 +11,24 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_MEMORY_TRACKED_SHARED_PTR_H_
-#define YB_UTIL_MEMORY_TRACKED_SHARED_PTR_H_
+#pragma once
 
+#include <stdint.h>
+
+#include <atomic>
+#include <functional>
 #include <memory>
+#include <type_traits>
 
+#include "yb/util/flags.h"
+
+#include "yb/gutil/integral_types.h"
+
+#include "yb/util/debug-util.h"
 #include "yb/util/locks.h"
+#include "yb/util/math_util.h"
+#include "yb/util/shared_lock.h"
+#include "yb/util/thread.h"
 
 namespace yb {
 
@@ -106,5 +118,3 @@ class TrackedSharedPtr : public std::shared_ptr<T> {
 };
 
 }  // namespace yb
-
-#endif // YB_UTIL_MEMORY_TRACKED_SHARED_PTR_H_

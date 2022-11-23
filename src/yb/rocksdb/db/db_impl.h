@@ -20,8 +20,6 @@
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
-#ifndef YB_ROCKSDB_DB_DB_IMPL_H
-#define YB_ROCKSDB_DB_DB_IMPL_H
 
 #pragma once
 
@@ -35,10 +33,12 @@
 #include <utility>
 #include <vector>
 
+#include "yb/gutil/thread_annotations.h"
+
+#include "yb/rocksdb/db.h"
 #include "yb/rocksdb/db/column_family.h"
-#include "yb/rocksdb/db/compaction_job.h"
+#include "yb/rocksdb/db/compaction.h"
 #include "yb/rocksdb/db/dbformat.h"
-#include "yb/rocksdb/db/flush_job.h"
 #include "yb/rocksdb/db/flush_scheduler.h"
 #include "yb/rocksdb/db/internal_stats.h"
 #include "yb/rocksdb/db/log_writer.h"
@@ -49,15 +49,12 @@
 #include "yb/rocksdb/db/write_controller.h"
 #include "yb/rocksdb/db/write_thread.h"
 #include "yb/rocksdb/db/writebuffer.h"
-#include "yb/rocksdb/port/port.h"
-#include "yb/rocksdb/db.h"
 #include "yb/rocksdb/env.h"
 #include "yb/rocksdb/memtablerep.h"
+#include "yb/rocksdb/port/port.h"
 #include "yb/rocksdb/transaction_log.h"
-#include "yb/rocksdb/table/scoped_arena_iterator.h"
 #include "yb/rocksdb/util/autovector.h"
 #include "yb/rocksdb/util/event_logger.h"
-#include "yb/rocksdb/util/hash.h"
 #include "yb/rocksdb/util/instrumented_mutex.h"
 #include "yb/rocksdb/util/stop_watch.h"
 #include "yb/rocksdb/util/thread_local.h"
@@ -74,6 +71,7 @@ class WriteCallback;
 class FileNumbersProvider;
 struct JobContext;
 struct ExternalSstFileInfo;
+struct RocksDBPriorityThreadPoolMetrics;
 
 class DBImpl : public DB {
  public:
@@ -200,7 +198,6 @@ class DBImpl : public DB {
 
   virtual SequenceNumber GetLatestSequenceNumber() const override;
 
-#ifndef ROCKSDB_LITE
   virtual Status DisableFileDeletions() override;
   virtual Status EnableFileDeletions(bool force) override;
   virtual int IsFileDeletionsEnabled() const;
@@ -211,7 +208,7 @@ class DBImpl : public DB {
   virtual Status GetSortedWalFiles(VectorLogPtr* files) override;
 
   virtual Status GetUpdatesSince(
-      SequenceNumber seq_number, unique_ptr<TransactionLogIterator>* iter,
+      SequenceNumber seq_number, std::unique_ptr<TransactionLogIterator>* iter,
       const TransactionLogIterator::ReadOptions&
           read_options = TransactionLogIterator::ReadOptions()) override;
   virtual Status DeleteFile(std::string name) override;
@@ -222,13 +219,16 @@ class DBImpl : public DB {
 
   UserFrontierPtr GetFlushedFrontier() override;
 
-  CHECKED_STATUS ModifyFlushedFrontier(
+  Status ModifyFlushedFrontier(
       UserFrontierPtr frontier,
       FrontierModificationMode mode) override;
 
   FlushAbility GetFlushAbility() override;
 
   UserFrontierPtr GetMutableMemTableFrontier(UpdateUserValueType type) override;
+
+  // Calculates specified frontier_type for all mem tables (active and immutable).
+  UserFrontierPtr CalcMemTableFrontier(UpdateUserValueType frontier_type) override;
 
   // Obtains the meta data of the specified column family of the DB.
   // STATUS(NotFound, "") will be returned if the current DB does not have
@@ -237,6 +237,12 @@ class DBImpl : public DB {
   virtual void GetColumnFamilyMetaData(
       ColumnFamilyHandle* column_family,
       ColumnFamilyMetaData* metadata) override;
+
+  // Obtains all column family options and corresponding names,
+  // dropped columns are not included into the resulting collections.
+  virtual void GetColumnFamiliesOptions(
+      std::vector<std::string>* column_family_names,
+      std::vector<ColumnFamilyOptions>* column_family_options) override;
 
   // experimental API
   Status SuggestCompactRange(ColumnFamilyHandle* column_family,
@@ -296,7 +302,6 @@ class DBImpl : public DB {
   virtual Status AddFile(ColumnFamilyHandle* column_family,
                          const std::string& file_path, bool move_file) override;
 
-#endif  // ROCKSDB_LITE
 
   // Similar to GetSnapshot(), but also lets the db know that this snapshot
   // will be used for transaction write-conflict checking.  The DB can then
@@ -471,12 +476,15 @@ class DBImpl : public DB {
   // Checks that source database has appropriate seqno.
   // I.e. seqno ranges of imported database does not overlap with seqno ranges of destination db.
   // And max seqno of imported database is less that active seqno of destination db.
-  CHECKED_STATUS Import(const std::string& source_dir) override;
+  Status Import(const std::string& source_dir) override;
 
   bool AreWritesStopped();
   bool NeedsDelay() override;
 
   Result<std::string> GetMiddleKey() override;
+
+  // Returns a table reader for the largest SST file.
+  Result<TableReader*> TEST_GetLargestSstTableReader() override;
 
   // Used in testing to make the old memtable immutable and start writing to a new one.
   void TEST_SwitchMemtable() override;
@@ -485,10 +493,9 @@ class DBImpl : public DB {
   Env* const env_;
   Env* const checkpoint_env_;
   const std::string dbname_;
-  unique_ptr<VersionSet> versions_;
+  std::unique_ptr<VersionSet> versions_;
   const DBOptions db_options_;
-  Statistics* stats_;
-
+  std::shared_ptr<Statistics> stats_;
   InternalIterator* NewInternalIterator(const ReadOptions&,
                                         ColumnFamilyData* cfd,
                                         SuperVersion* super_version,
@@ -520,9 +527,7 @@ class DBImpl : public DB {
  private:
   friend class DB;
   friend class InternalStats;
-#ifndef ROCKSDB_LITE
   friend class ForwardIterator;
-#endif
   friend struct SuperVersion;
   friend class CompactedDBImpl;
 #ifndef NDEBUG
@@ -592,16 +597,11 @@ class DBImpl : public DB {
   // Wait for memtable flushed
   Status WaitForFlushMemTable(ColumnFamilyData* cfd);
 
-  void RecordFlushIOStats();
-  void RecordCompactionIOStats();
-
-#ifndef ROCKSDB_LITE
   Status CompactFilesImpl(
       const CompactionOptions& compact_options, ColumnFamilyData* cfd,
       Version* version, const std::vector<std::string>& input_file_names,
       const int output_level, int output_path_id, JobContext* job_context,
       LogBuffer* log_buffer);
-#endif  // ROCKSDB_LITE
 
   ColumnFamilyData* GetColumnFamilyDataByName(const std::string& cf_name);
 
@@ -665,7 +665,7 @@ class DBImpl : public DB {
 
   const Snapshot* GetSnapshotImpl(bool is_write_conflict_boundary);
 
-  CHECKED_STATUS ApplyVersionEdit(VersionEdit* edit);
+  Status ApplyVersionEdit(VersionEdit* edit);
 
   void SubmitCompactionOrFlushTask(std::unique_ptr<ThreadPoolTask> task);
 
@@ -716,7 +716,7 @@ class DBImpl : public DB {
   bool log_empty_;
   ColumnFamilyHandleImpl* default_cf_handle_;
   InternalStats* default_cf_internal_stats_;
-  unique_ptr<ColumnFamilyMemTablesImpl> column_family_memtables_;
+  std::unique_ptr<ColumnFamilyMemTablesImpl> column_family_memtables_;
   struct LogFileNumberSize {
     explicit LogFileNumberSize(uint64_t _number)
         : number(_number) {}
@@ -898,6 +898,10 @@ class DBImpl : public DB {
   // stores the number of flushes are currently running
   int num_running_flushes_;
 
+  // Tracks state changes for priority thread pool tasks.
+  // Metrics are updated within the PriorityThreadPoolTask.
+  std::shared_ptr<RocksDBPriorityThreadPoolMetrics> priority_thread_pool_metrics_;
+
   // Information for a manual compaction
   struct ManualCompaction {
     ColumnFamilyData* cfd;
@@ -959,9 +963,7 @@ class DBImpl : public DB {
   // The options to access storage files
   const EnvOptions env_options_;
 
-#ifndef ROCKSDB_LITE
   WalManager wal_manager_;
-#endif  // ROCKSDB_LITE
 
   // Unified interface for logging events
   EventLogger event_logger_;
@@ -1007,7 +1009,6 @@ class DBImpl : public DB {
       ColumnFamilyData* cfd, SuperVersion* new_sv,
       const MutableCFOptions& mutable_cf_options);
 
-#ifndef ROCKSDB_LITE
   using DB::GetPropertiesOfAllTables;
   virtual Status GetPropertiesOfAllTables(ColumnFamilyHandle* column_family,
                                           TablePropertiesCollection* props)
@@ -1016,7 +1017,12 @@ class DBImpl : public DB {
       ColumnFamilyHandle* column_family, const Range* range, std::size_t n,
       TablePropertiesCollection* props) override;
 
-#endif  // ROCKSDB_LITE
+  // Obtains all column family options and corresponding names,
+  // dropped columns are not included into the resulting collections.
+  // REQUIREMENT: mutex_ must be held when calling this function.
+  void GetColumnFamiliesOptionsUnlocked(
+      std::vector<std::string>* column_family_names,
+      std::vector<ColumnFamilyOptions>* column_family_options);
 
   // Function that Get and KeyMayExist call with no_io true or false
   // Note: 'value_found' from KeyMayExist propagates here
@@ -1052,5 +1058,3 @@ static void ClipToRange(T* ptr, V minvalue, V maxvalue) {
 }
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_DB_DB_IMPL_H

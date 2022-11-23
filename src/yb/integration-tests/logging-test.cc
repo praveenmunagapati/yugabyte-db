@@ -36,9 +36,12 @@
 #include <glog/logging.h>
 #include <gmock/gmock.h>
 
+#include "yb/util/flags.h"
 #include "yb/util/logging_test_util.h"
 #include "yb/util/logging.h"
 #include "yb/util/monotime.h"
+#include "yb/util/test_macros.h"
+#include "yb/util/test_util.h"
 
 DECLARE_string(vmodule);
 
@@ -69,12 +72,16 @@ TEST(LoggingTest, TestThrottledLogging) {
   EXPECT_THAT(msgs[0], testing::ContainsRegex("test$"));
   // The second one should have suppressed at least three digits worth of log messages.
   EXPECT_THAT(msgs[1], testing::ContainsRegex("\\[suppressed [0-9]{3,} similar messages\\]"));
+
+  // Just compilation check.
+  YB_LOG_EVERY_N_SECS(INFO, 1) << "test" << THROTTLE_MSG;
+  YB_LOG_EVERY_N_SECS(INFO, 1) << "test" << THROTTLE_MSG;
 }
 
 TEST(LoggingTest, VModule) {
   google::FlagSaver flag_saver;
 
-  FLAGS_vmodule = "logging-test=1";
+  ASSERT_OK(EnableVerboseLoggingForModule("logging-test", 1));
 
   ASSERT_TRUE(VLOG_IS_ON(1));
 

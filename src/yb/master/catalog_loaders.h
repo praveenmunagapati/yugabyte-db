@@ -30,14 +30,16 @@
 // under the License.
 //
 
-#ifndef YB_MASTER_CATALOG_LOADERS_H
-#define YB_MASTER_CATALOG_LOADERS_H
+#pragma once
 
-#include "yb/master/catalog_entity_info.h"
-#include "yb/master/permissions_manager.h"
-#include "yb/master/sys_catalog-internal.h"
+#include <type_traits>
 
 #include <boost/preprocessor/cat.hpp>
+
+#include "yb/master/master_fwd.h"
+#include "yb/master/catalog_manager.h"
+#include "yb/master/permissions_manager.h"
+#include "yb/master/sys_catalog.h"
 
 namespace yb {
 namespace master {
@@ -51,7 +53,7 @@ namespace master {
         : catalog_manager_(catalog_manager), term_(term) {} \
     \
   private: \
-    CHECKED_STATUS Visit( \
+    Status Visit( \
         const key_type& key, \
         const entry_pb_name& metadata) override REQUIRES(mutex); \
     \
@@ -93,6 +95,7 @@ DECLARE_LOADER_CLASS(Role,       RoleName,    SysRoleEntryPB,
     catalog_manager_->permissions_manager()->mutex());
 DECLARE_LOADER_CLASS(SysConfig,     std::string, SysConfigEntryPB,
     catalog_manager_->permissions_manager()->mutex());
+DECLARE_LOADER_CLASS(XClusterSafeTime, std::string, XClusterSafeTimePB, catalog_manager_->mutex_);
 
 #undef DECLARE_LOADER_CLASS
 
@@ -102,5 +105,3 @@ bool ShouldLoadObject(const SysTabletsEntryPB& pb);
 
 }  // namespace master
 }  // namespace yb
-
-#endif  // YB_MASTER_CATALOG_LOADERS_H

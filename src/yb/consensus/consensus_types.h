@@ -11,16 +11,11 @@
 // under the License.
 //
 
-#ifndef YB_CONSENSUS_CONSENSUS_TYPES_H
-#define YB_CONSENSUS_CONSENSUS_TYPES_H
+#pragma once
 
-#include "yb/common/constants.h"
-#include "yb/common/entity_ids.h"
 #include "yb/common/hybrid_time.h"
 
 #include "yb/consensus/consensus_fwd.h"
-
-#include "yb/util/opid.h"
 
 namespace yb {
 
@@ -32,5 +27,3 @@ struct ConsensusOptions {
 
 } // namespace consensus
 } // namespace yb
-
-#endif // YB_CONSENSUS_CONSENSUS_TYPES_H

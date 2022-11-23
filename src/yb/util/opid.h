@@ -12,14 +12,11 @@
 // under the License.
 //
 //
-#ifndef YB_UTIL_OPID_H
-#define YB_UTIL_OPID_H
+#pragma once
 
-#include <cstdint>
 #include <iosfwd>
 #include <vector>
 
-#include "yb/util/result.h"
 #include "yb/util/slice.h"
 
 namespace yb {
@@ -30,7 +27,9 @@ struct OpId {
   int64_t term;
   int64_t index;
 
+  // Creates an "empty" OpId.
   OpId() noexcept : term(0), index(0) {}
+
   OpId(int64_t term_, int64_t index_) noexcept : term(term_), index(index_) {}
 
   static OpId Invalid() {
@@ -51,6 +50,10 @@ struct OpId {
 
   bool empty() const {
     return term == 0 && index == 0;
+  }
+
+  bool is_valid_not_empty() const {
+    return term > 0 && index > 0;
   }
 
   bool operator!() const {
@@ -122,5 +125,3 @@ struct OpIdHash {
 typedef std::vector<OpId> OpIds;
 
 } // namespace yb
-
-#endif // YB_UTIL_OPID_H

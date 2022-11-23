@@ -182,12 +182,13 @@ CreateEventTrigger(CreateEventTrigStmt *stmt)
 	 * this, but there are obvious privilege escalation risks which would have
 	 * to somehow be plugged first.
 	 */
-	if (!superuser())
+	if (!superuser() && !IsYbDbAdminUser(evtowner))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("permission denied to create event trigger \"%s\"",
 						stmt->trigname),
-				 errhint("Must be superuser to create an event trigger.")));
+				 errhint("Must be superuser or a member of the yb_db_admin "
+				 		 "role to create an event trigger.")));
 
 	/* Validate event name. */
 	if (strcmp(stmt->eventname, "ddl_command_start") != 0 &&
@@ -614,13 +615,14 @@ AlterEventTriggerOwner_internal(Relation rel, HeapTuple tup, Oid newOwnerId)
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_EVENT_TRIGGER,
 					   NameStr(form->evtname));
 
-	/* New owner must be a superuser */
-	if (!superuser_arg(newOwnerId))
+	/* New owner must be a superuser or yb_db_admin */
+	if (!superuser_arg(newOwnerId) && !IsYbDbAdminUser(newOwnerId))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("permission denied to change owner of event trigger \"%s\"",
 						NameStr(form->evtname)),
-				 errhint("The owner of an event trigger must be a superuser.")));
+				 errhint("The owner of an event trigger must be a superuser "
+				 		 "or a member of the yb_db_admin role.")));
 
 	form->evtowner = newOwnerId;
 	CatalogTupleUpdate(rel, &tup->t_self, tup);
@@ -1118,7 +1120,7 @@ EventTriggerSupportsObjectType(ObjectType obtype)
 		case OBJECT_EVENT_TRIGGER:
 			/* no support for event triggers on event triggers */
 			return false;
-		case OBJECT_TABLEGROUP:
+		case OBJECT_YBTABLEGROUP:
 			/* no support for event triggers on tablegroups */
 			return false;
 		case OBJECT_ACCESS_METHOD:
@@ -2264,7 +2266,7 @@ stringify_grant_objtype(ObjectType objtype)
 			return "PROCEDURE";
 		case OBJECT_ROUTINE:
 			return "ROUTINE";
-		case OBJECT_TABLEGROUP:
+		case OBJECT_YBTABLEGROUP:
 			return "TABLEGROUP";
 		case OBJECT_TABLESPACE:
 			return "TABLESPACE";
@@ -2348,7 +2350,7 @@ stringify_adefprivs_objtype(ObjectType objtype)
 			return "PROCEDURES";
 		case OBJECT_ROUTINE:
 			return "ROUTINES";
-		case OBJECT_TABLEGROUP:
+		case OBJECT_YBTABLEGROUP:
 			return "TABLEGROUPS";
 		case OBJECT_TABLESPACE:
 			return "TABLESPACES";

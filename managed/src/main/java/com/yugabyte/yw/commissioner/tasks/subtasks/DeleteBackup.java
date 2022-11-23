@@ -44,7 +44,8 @@ public class DeleteBackup extends AbstractTaskBase {
   @Override
   public void run() {
     Backup backup = Backup.get(params().customerUUID, params().backupUUID);
-    if (backup.state != Backup.BackupState.Completed && backup.state != Backup.BackupState.Failed) {
+    if ((backup.state != Backup.BackupState.Completed)
+        && (backup.state != Backup.BackupState.Failed)) {
       // TODO: Allow deletion of InProgress backups. But not sure if backend supports it
       //  and may not be worth the effort.
       log.error("Cannot delete backup in any other state other than completed or failed");
@@ -57,7 +58,7 @@ public class DeleteBackup extends AbstractTaskBase {
               ? ImmutableList.of(backupParams)
               : backupParams.backupList;
       if (deleteAllBackups(backupList)) {
-        transitionState(backup, Backup.BackupState.Deleted);
+        backup.delete();
         return;
       }
     } catch (Exception ex) {
@@ -88,8 +89,18 @@ public class DeleteBackup extends AbstractTaskBase {
 
   private boolean deleteBackup(BackupTableParams backupTableParams) {
     backupTableParams.actionType = BackupTableParams.ActionType.DELETE;
-    ShellResponse response = tableManager.deleteBackup(backupTableParams);
-    JsonNode jsonNode = Json.parse(response.message);
+    ShellResponse response = tableManager.deleteBackup(backupTableParams).processErrors();
+    JsonNode jsonNode = null;
+    try {
+      jsonNode = Json.parse(response.message);
+    } catch (Exception e) {
+      log.error(
+          "Delete Backup failed for {}. Response code={}, Output={}.",
+          backupTableParams.storageLocation,
+          response.code,
+          response.message);
+      return false;
+    }
     if (response.code != 0 || jsonNode.has("error")) {
       log.error(
           "Delete Backup failed for {}. Response code={}, hasError={}.",

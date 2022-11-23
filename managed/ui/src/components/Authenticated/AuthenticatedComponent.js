@@ -33,6 +33,7 @@ class AuthenticatedComponent extends Component {
     this.props.fetchCustomerCertificates();
     this.props.fetchCustomerConfigs();
     this.props.fetchInsecureLogin();
+    this.props.fetchUser();
   }
 
   componentWillUnmount() {
@@ -86,6 +87,7 @@ class AuthenticatedComponent extends Component {
         });
       }
     }
+
     queryTasks();
     this.setState({ fetchScheduled: true });
   };

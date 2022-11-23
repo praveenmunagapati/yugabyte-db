@@ -29,15 +29,11 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_RPC_REMOTE_METHOD_H_
-#define YB_RPC_REMOTE_METHOD_H_
+#pragma once
 
 #include <string>
 
-#include <boost/functional/hash.hpp>
-
-#include "yb/rpc/rpc_header.pb.h"
-#include "yb/util/memory/memory_usage.h"
+#include "yb/util/slice.h"
 
 namespace yb {
 namespace rpc {
@@ -50,26 +46,27 @@ class RemoteMethod {
  public:
   RemoteMethod() {}
   RemoteMethod(std::string service_name, std::string method_name);
-  RemoteMethod(const RemoteMethod& rhs);
-  RemoteMethod(RemoteMethod&& rhs);
+  RemoteMethod(const RemoteMethod& rhs) = default;
+  RemoteMethod(RemoteMethod&& rhs) = default;
 
-  RemoteMethod& operator=(const RemoteMethod& rhs);
-  RemoteMethod& operator=(const RemoteMethodPB& rhs);
-  RemoteMethod& operator=(RemoteMethod&& rhs);
+  RemoteMethod& operator=(const RemoteMethod& rhs) = default;
+  RemoteMethod& operator=(RemoteMethod&& rhs) = default;
 
-  const std::string& service_name() const { return remote_method_pb_.service_name(); }
-  const std::string& method_name() const { return remote_method_pb_.method_name(); }
-  const RemoteMethodPB& remote_method_pb() const { return remote_method_pb_; }
+  void ToPB(RemoteMethodPB* pb) const;
+  const std::string& service_name() const { return service_name_; }
+  const std::string& method_name() const { return method_name_; }
+  Slice serialized() const { return serialized_; }
+  Slice serialized_body() const { return Slice(serialized_).WithoutPrefix(2); }
 
   std::string ToString() const;
 
-  size_t DynamicMemoryUsage() const { return DynamicMemoryUsageOf(remote_method_pb_); }
+  size_t DynamicMemoryUsage() const;
 
  private:
-  RemoteMethodPB remote_method_pb_;
+  std::string service_name_;
+  std::string method_name_;
+  std::string serialized_;
 };
 
 } // namespace rpc
 } // namespace yb
-
-#endif // YB_RPC_REMOTE_METHOD_H_

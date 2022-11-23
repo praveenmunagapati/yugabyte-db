@@ -11,19 +11,34 @@
 // under the License.
 //
 
-#ifndef YB_MASTER_MASTER_FWD_H
-#define YB_MASTER_MASTER_FWD_H
+#pragma once
 
+#include <map>
 #include <memory>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
+
+#include <boost/optional/optional.hpp>
 
 #include "yb/common/entity_ids_types.h"
 
 #include "yb/gutil/ref_counted.h"
+
+#include "yb/master/master_backup.fwd.h"
+#include "yb/master/master_replication.pb.h"
+#include "yb/master/tablet_split_fwd.h"
+
 #include "yb/util/enums.h"
+#include "yb/util/math_util.h"
+#include "yb/util/monotime.h"
 #include "yb/util/strongly_typed_bool.h"
 
 namespace yb {
+
+class HostPort;
+struct HostPortHash;
+
 namespace master {
 
 class TSDescriptor;
@@ -32,35 +47,49 @@ typedef std::vector<TSDescriptorPtr> TSDescriptorVector;
 
 class EncryptionManager;
 
-class AddUniverseKeysRequestPB;
-class AddUniverseKeysResponsePB;
-class ChangeEncryptionInfoRequestPB;
-class ChangeEncryptionInfoResponsePB;
-class CreateSnapshotScheduleRequestPB;
-class EncryptionInfoPB;
-class GetUniverseKeyRegistryRequestPB;
-class GetUniverseKeyRegistryResponsePB;
-class HasUniverseKeyInMemoryRequestPB;
-class HasUniverseKeyInMemoryResponsePB;
-class IsEncryptionEnabledRequestPB;
-class IsEncryptionEnabledResponsePB;
-class ListSnapshotRestorationsResponsePB;
-class ListSnapshotSchedulesResponsePB;
-class ListSnapshotsResponsePB;
+class CatalogManager;
+class CatalogManagerIf;
+class CatalogManagerBgTasks;
+class CDCConsumerSplitDriverIf;
+class CDCRpcTasks;
+class CDCSplitDriverIf;
+class ClusterConfigInfo;
+class ClusterLoadBalancer;
+class FlushManager;
+class Master;
+class MasterBackupProxy;
+class MasterOptions;
+class MasterPathHandlers;
+class MasterAdminProxy;
+class MasterClientProxy;
+class MasterClusterProxy;
+class MasterDclProxy;
+class MasterDdlProxy;
+class MasterEncryptionProxy;
+class MasterHeartbeatProxy;
+class MasterReplicationProxy;
+class NamespaceInfo;
 class PermissionsManager;
-class ReportedTabletPB;
+class RetryingTSRpcTask;
 class SnapshotCoordinatorContext;
-class SnapshotScheduleFilterPB;
 class SnapshotState;
+class SysCatalogTable;
+class SysConfigInfo;
 class SysRowEntries;
-class SysSnapshotEntryPB;
-class SysTablesEntryPB;
-class SysTabletsEntryPB;
-class TabletReportPB;
-class TSHeartbeatRequestPB;
-class TSHeartbeatResponsePB;
-class TSRegistrationPB;
-class TSSnapshotSchedulesInfoPB;
+class TSDescriptor;
+class TSManager;
+class UDTypeInfo;
+class XClusterSafeTimeService;
+class YQLPartitionsVTable;
+class YQLVirtualTable;
+class YsqlTablegroupManager;
+class YsqlTablespaceManager;
+class YsqlTransactionDdl;
+
+struct CDCConsumerStreamInfo;
+struct TableDescription;
+struct TabletReplica;
+struct TabletReplicaDriveInfo;
 
 class AsyncTabletSnapshotOp;
 using AsyncTabletSnapshotOpPtr = std::shared_ptr<AsyncTabletSnapshotOp>;
@@ -78,11 +107,37 @@ using SnapshotScheduleRestorationPtr = std::shared_ptr<SnapshotScheduleRestorati
 
 YB_STRONGLY_TYPED_BOOL(RegisteredThroughHeartbeat);
 
+YB_STRONGLY_TYPED_BOOL(IncludeInactive);
+YB_STRONGLY_TYPED_BOOL(IncludeDeleted);
+
 YB_DEFINE_ENUM(
-    CollectFlag, (kAddIndexes)(kIncludeParentColocatedTable)(kSucceedIfCreateInProgress));
+    CollectFlag,
+    (kAddIndexes)(kIncludeParentColocatedTable)(kSucceedIfCreateInProgress)(kAddUDTypes));
 using CollectFlags = EnumBitSet<CollectFlag>;
+
+using TableToTablespaceIdMap = std::unordered_map<TableId, boost::optional<TablespaceId>>;
+using TablespaceIdToReplicationInfoMap = std::unordered_map<
+    TablespaceId, boost::optional<ReplicationInfoPB>>;
+
+using LeaderStepDownFailureTimes = std::unordered_map<TabletServerId, MonoTime>;
+using TabletReplicaMap = std::unordered_map<std::string, TabletReplica>;
+using TabletToTabletServerMap = std::unordered_map<TabletId, TabletServerId>;
+using TabletInfoMap = std::map<TabletId, scoped_refptr<TabletInfo>>;
+struct cloud_hash;
+struct cloud_equal_to;
+using AffinitizedZonesSet = std::unordered_set<CloudInfoPB, cloud_hash, cloud_equal_to>;
+using BlacklistSet = std::unordered_set<HostPort, HostPortHash>;
+using RetryingTSRpcTaskPtr = std::shared_ptr<RetryingTSRpcTask>;
+
+// Use ordered map to make computing fingerprint of the map easier.
+using DbOidToCatalogVersionMap = std::map<uint32_t, std::pair<uint64_t, uint64_t>>;
+using RelIdToAttributesMap = std::unordered_map<uint32_t, std::vector<PgAttributePB>>;
+using RelTypeOIDMap = std::unordered_map<uint32_t, uint32_t>;
+namespace enterprise {
+
+class CatalogManager;
+
+} // namespace enterprise
 
 } // namespace master
 } // namespace yb
-
-#endif // YB_MASTER_MASTER_FWD_H

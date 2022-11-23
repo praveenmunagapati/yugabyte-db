@@ -11,30 +11,39 @@
 // under the License.
 //
 
-#ifndef YB_CONSENSUS_LOG_FWD_H
-#define YB_CONSENSUS_LOG_FWD_H
+#pragma once
+
+#include <vector>
 
 #include "yb/gutil/ref_counted.h"
+
+#include "yb/util/numbered_deque.h"
 
 namespace yb {
 namespace log {
 
 class Log;
+class LogAnchorRegistry;
 using LogPtr = scoped_refptr<Log>;
-class LogEntryBatch;
+class LogEntryBatchPB;
+class LogEntryPB;
 class LogIndex;
 class LogReader;
+class LogSegmentFooterPB;
+class LogSegmentHeaderPB;
 class ReadableLogSegment;
-using ReadableLogSegmentPtr = scoped_refptr<ReadableLogSegment>;
+class WritableLogSegment;
 
 struct LogAnchor;
+struct LogEntryMetadata;
+struct LogIndexBlock;
 struct LogIndexEntry;
 struct LogMetrics;
+struct LogOptions;
 
-class LogAnchorRegistry;
 using LogAnchorRegistryPtr = scoped_refptr<LogAnchorRegistry>;
+using ReadableLogSegmentPtr = scoped_refptr<ReadableLogSegment>;
+using SegmentSequence = NumberedDeque<int64_t, ReadableLogSegmentPtr>;
 
 }  // namespace log
 }  // namespace yb
-
-#endif  // YB_CONSENSUS_LOG_FWD_H

@@ -151,6 +151,50 @@ const char *YBGetCurrentZone()
 	return getenv("FLAGS_placement_zone");
 }
 
+const char *YBGetCurrentUUID()
+{
+	return getenv("FLAGS_placement_uuid");
+}
+
+const char *YBGetCurrentMetricNodeName()
+{
+	return getenv("FLAGS_metric_node_name");
+}
+
+int YBGetMaxClockSkewUsec() {
+	const int kDefaultClockSkewUsec = 500 * 1000;  // from physical_time.cc
+	const char *clock_skew_str = getenv("FLAGS_max_clock_skew_usec");
+	if (clock_skew_str) {
+		return atoi(clock_skew_str);
+	}
+	return kDefaultClockSkewUsec;
+}
+
+int YBGetYsqlOutputBufferSize() {
+	const char *output_buffer_size_str = getenv("FLAGS_ysql_output_buffer_size");
+	if (output_buffer_size_str) {
+		return atoi(output_buffer_size_str);
+	}
+
+	// Shouldn't reach here. But even if we do, instead of failing in a release build, we return
+	// 256KB as a default.
+	return 256 * 1024;
+
+}
+
+bool
+YBIsRefreshMatviewFailureInjected()
+{
+	static int cached_value = -1;
+	if (cached_value == -1)
+	{
+		cached_value = YBCIsEnvVarTrueWithDefault(
+			"FLAGS_TEST_yb_test_fail_matview_refresh_after_creation",
+			false /* default_value */);
+	}
+	return cached_value;
+}
+
 bool
 YBIsCollationEnabled()
 {
@@ -162,10 +206,22 @@ YBIsCollationEnabled()
 		 * The default value must be in sync with that of FLAGS_TEST_pg_collation_enabled.
 		 */
 		cached_value = YBCIsEnvVarTrueWithDefault("FLAGS_TEST_pg_collation_enabled",
-												  false /* default_value */);
+												  true /* default_value */);
 	}
 	return cached_value;
 #else
 	return false;
 #endif
+}
+
+bool
+YBColocateDatabaseByDefault()
+{
+	static int cached_value = -1;
+	if (cached_value == -1)
+	{
+		cached_value = YBCIsEnvVarTrueWithDefault("FLAGS_ysql_colocate_database_by_default",
+												  false /* default_value */);
+	}
+	return cached_value;
 }

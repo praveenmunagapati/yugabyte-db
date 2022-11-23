@@ -4,6 +4,7 @@ logs
 target
 .idea
 .idea_modules
+jacoco.exec
 /.classpath
 /.project
 /.settings
@@ -31,9 +32,13 @@ react/.idea/
 npm-debug.log
 react/npm-debug.log
 
+# TODO: Investigate why following file gets generated even when evolutions is disabled
 conf/*
+/swagger/conf/*
+
 src/main/public/*
 src/main/resources/version_metadata.json
+src/universal/ybc/*
 *.pyc
 docker/yugaware/*.yml
 
@@ -47,3 +52,4 @@ ui/junit.xml
 src/public/*
 
 client/*/generated
+lib

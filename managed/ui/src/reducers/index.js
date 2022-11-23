@@ -10,7 +10,7 @@ import TasksReducer from './reducer_tasks';
 import TablesReducer from './reducer_tables';
 import { FeatureFlag } from './feature';
 import { reducer as formReducer } from 'redux-form';
-
+import {SupportBundle} from "./support_bundle";
 const rootReducer = combineReducers({
   customer: CustomerReducer,
   cloud: CloudReducer,
@@ -20,7 +20,8 @@ const rootReducer = combineReducers({
   graph: GraphReducer,
   tasks: TasksReducer,
   tables: TablesReducer,
-  featureFlags: FeatureFlag
+  featureFlags: FeatureFlag,
+  supportBundle: SupportBundle,
 });
 
 export default rootReducer;

@@ -6,7 +6,6 @@ import static io.swagger.annotations.ApiModelProperty.AccessMode.READ_ONLY;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.yugabyte.yw.common.alerts.SmtpData;
-import com.yugabyte.yw.forms.AlertingFormData.AlertingData;
 import io.swagger.annotations.ApiModel;
 import io.swagger.annotations.ApiModelProperty;
 import java.util.Date;
@@ -40,7 +39,8 @@ public class CustomerDetailsData {
   @ApiModelProperty(
       value = "Associated universe IDs",
       accessMode = READ_ONLY,
-      example = "[c3595ca7-68a3-47f0-b1b2-1725886d5ed5, 9e0bb733-556c-4935-83dd-6b742a2c32e6]")
+      example =
+          "[\"c3595ca7-68a3-47f0-b1b2-1725886d5ed5\", \"9e0bb733-556c-4935-83dd-6b742a2c32e6\"]")
   public List<UUID> universeUUIDs;
 
   @ApiModelProperty(value = "Customer ID", accessMode = READ_ONLY)

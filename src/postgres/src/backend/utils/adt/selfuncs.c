@@ -110,6 +110,7 @@
 #include "catalog/pg_collation.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_opfamily.h"
+#include "catalog/pg_proc.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_type.h"
@@ -4952,9 +4953,13 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 								 * For simplicity, we insist on the whole
 								 * table being selectable, rather than trying
 								 * to identify which column(s) the index
-								 * depends on.
+								 * depends on.  Also require all rows to be
+								 * selectable --- there must be no
+								 * securityQuals from security barrier views
+								 * or RLS policies.
 								 */
 								vardata->acl_ok =
+									rte->securityQuals == NIL &&
 									(pg_class_aclcheck(rte->relid, GetUserId(),
 													   ACL_SELECT) == ACLCHECK_OK);
 							}
@@ -5018,12 +5023,17 @@ examine_simple_variable(PlannerInfo *root, Var *var,
 
 		if (HeapTupleIsValid(vardata->statsTuple))
 		{
-			/* check if user has permission to read this column */
+			/*
+			 * Check if user has permission to read this column.  We require
+			 * all rows to be accessible, so there must be no securityQuals
+			 * from security barrier views or RLS policies.
+			 */
 			vardata->acl_ok =
-				(pg_class_aclcheck(rte->relid, GetUserId(),
-								   ACL_SELECT) == ACLCHECK_OK) ||
-				(pg_attribute_aclcheck(rte->relid, var->varattno, GetUserId(),
-									   ACL_SELECT) == ACLCHECK_OK);
+				rte->securityQuals == NIL &&
+				((pg_class_aclcheck(rte->relid, GetUserId(),
+									ACL_SELECT) == ACLCHECK_OK) ||
+				 (pg_attribute_aclcheck(rte->relid, var->varattno, GetUserId(),
+										ACL_SELECT) == ACLCHECK_OK));
 		}
 		else
 		{
@@ -5465,6 +5475,13 @@ get_actual_variable_range(PlannerInfo *root, VariableStatData *vardata,
 	/* If it has indexes it must be a plain relation */
 	rte = root->simple_rte_array[rel->relid];
 	Assert(rte->rtekind == RTE_RELATION);
+
+	/*
+	 * In case of a YB relation attempt to peek at an index means RPC request,
+	 * that is unaffordable at planning time.
+	 */
+	if (IsYBRelationById(rte->relid))
+		return false;
 
 	/* Search through the indexes to see if any match our problem */
 	foreach(lc, rel->indexlist)
@@ -6582,6 +6599,7 @@ deconstruct_indexquals(IndexPath *path)
 		qinfo = (IndexQualInfo *) palloc(sizeof(IndexQualInfo));
 		qinfo->rinfo = rinfo;
 		qinfo->indexcol = indexcol;
+		qinfo->is_hashed = false;
 
 		if (IsA(clause, OpExpr))
 		{
@@ -6592,12 +6610,57 @@ deconstruct_indexquals(IndexPath *path)
 			{
 				qinfo->varonleft = true;
 				qinfo->other_operand = rightop;
+
+				if (IsA(leftop, FuncExpr))
+				{
+					qinfo->is_hashed =
+						(((FuncExpr*) leftop)->funcid == YB_HASH_CODE_OID);
+					ListCell   *ls;
+					if (qinfo->is_hashed)
+					{
+						/*
+						 * YB: We aren't going to push down a yb_hash_code call
+						 * if we matched the call against an expression
+						 */
+						foreach(ls, index->indexprs)
+						{
+							Node *indexpr = (Node*) lfirst(ls);
+							if (indexpr && IsA(indexpr, RelabelType))
+								indexpr = (Node *) ((RelabelType *) indexpr)->arg;
+							if (equal(indexpr, leftop)) {
+								qinfo->is_hashed = false;
+								break;
+							}
+						}
+					}
+				}
 			}
 			else
 			{
 				Assert(match_index_to_operand(rightop, indexcol, index));
 				qinfo->varonleft = false;
 				qinfo->other_operand = leftop;
+				if (IsA(rightop, FuncExpr))
+				{
+					qinfo->is_hashed =
+						(((FuncExpr*) rightop)->funcid == YB_HASH_CODE_OID);
+					ListCell   *ls;
+					if (qinfo->is_hashed)
+					{
+						/* YB: We aren't going to push down a yb_hash_code call
+						 * if we matched the call against an expression */
+						foreach(ls, index->indexprs)
+						{
+							Node *indexpr = (Node*) lfirst(ls);
+							if (indexpr && IsA(indexpr, RelabelType))
+								indexpr = (Node *) ((RelabelType *) indexpr)->arg;
+							if (equal(indexpr, rightop)) {
+								qinfo->is_hashed = false;
+								break;
+							}
+						}
+					}
+				}
 			}
 		}
 		else if (IsA(clause, RowCompareExpr))
@@ -7745,7 +7808,7 @@ gincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	 * Obtain statistical information from the meta page, if possible.  Else
 	 * set ginStats to zeroes, and we'll cope below.
 	 */
-	if (!index->hypothetical)
+	if (!index->hypothetical && !IsYBRelationById(index->indexoid))
 	{
 		indexRel = index_open(index->indexoid, AccessShareLock);
 		ginGetStats(indexRel, &ginStats);

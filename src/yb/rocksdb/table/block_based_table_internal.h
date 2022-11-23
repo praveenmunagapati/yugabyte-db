@@ -11,11 +11,12 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSDB_TABLE_BLOCK_BASED_TABLE_INTERNAL_H
-#define YB_ROCKSDB_TABLE_BLOCK_BASED_TABLE_INTERNAL_H
+#pragma once
 
 #include "yb/rocksdb/table/block.h"
 #include "yb/rocksdb/table/format.h"
+
+#include "yb/util/file_system.h"
 #include "yb/util/logging.h"
 
 namespace rocksdb {
@@ -30,7 +31,7 @@ constexpr char kFixedSizeFilterBlockPrefix[] = "fixedsizefilter.";
 // The only relevant option is options.verify_checksums for now.
 // On failure return non-OK.
 // On success fill *result and return OK - caller owns *result
-inline CHECKED_STATUS ReadBlockFromFile(
+inline Status ReadBlockFromFile(
     RandomAccessFileReader* file, const Footer& footer, const ReadOptions& options,
     const BlockHandle& handle, std::unique_ptr<Block>* result, Env* env,
     const std::shared_ptr<yb::MemTracker>& mem_tracker,
@@ -84,5 +85,3 @@ inline void GenerateCachePrefix(
 } // namespace block_based_table
 
 } // namespace rocksdb
-
-#endif // YB_ROCKSDB_TABLE_BLOCK_BASED_TABLE_INTERNAL_H

@@ -29,14 +29,12 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_COMMON_COLUMNBLOCK_H
-#define YB_COMMON_COLUMNBLOCK_H
+#pragma once
 
 #include "yb/common/types.h"
-#include "yb/common/row.h"
 #include "yb/util/bitmap.h"
 #include "yb/util/memory/arena.h"
-#include "yb/util/status.h"
+#include "yb/util/status_fwd.h"
 
 namespace yb {
 
@@ -252,5 +250,3 @@ class ScopedColumnBlock : public ColumnBlock {
 };
 
 } // namespace yb
-
-#endif // YB_COMMON_COLUMNBLOCK_H

@@ -21,8 +21,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#ifndef YB_ROCKSDB_DB_COMPACTION_PICKER_H
-#define YB_ROCKSDB_DB_COMPACTION_PICKER_H
 
 #pragma once
 
@@ -33,7 +31,6 @@
 #include <vector>
 
 #include "yb/rocksdb/db/compaction.h"
-#include "yb/rocksdb/db/version_set.h"
 #include "yb/rocksdb/env.h"
 #include "yb/rocksdb/options.h"
 #include "yb/rocksdb/status.h"
@@ -93,12 +90,10 @@ class CompactionPicker {
   // files.  If it's not possible to conver an invalid input_files
   // into a valid one by adding more files, the function will return a
   // non-ok status with specific reason.
-#ifndef ROCKSDB_LITE
   Status SanitizeCompactionInputFiles(
       std::unordered_set<uint64_t>* input_files,
       const ColumnFamilyMetaData& cf_meta,
       const int output_level) const;
-#endif  // ROCKSDB_LITE
 
   // Free up the files that participated in a compaction
   //
@@ -193,12 +188,10 @@ class CompactionPicker {
 
   // A helper function to SanitizeCompactionInputFiles() that
   // sanitizes "input_files" by adding necessary files.
-#ifndef ROCKSDB_LITE
   virtual Status SanitizeCompactionInputFilesForAllLevels(
       std::unordered_set<uint64_t>* input_files,
       const ColumnFamilyMetaData& cf_meta,
       const int output_level) const;
-#endif  // ROCKSDB_LITE
 
   // Keeps track of all compactions that are running on Level0.
   // It is protected by DB mutex
@@ -246,7 +239,6 @@ class LevelCompactionPicker : public CompactionPicker {
                                                 int* level, int* output_level);
 };
 
-#ifndef ROCKSDB_LITE
 class UniversalCompactionPicker : public CompactionPicker {
  public:
   UniversalCompactionPicker(const ImmutableCFOptions& ioptions,
@@ -283,6 +275,12 @@ class UniversalCompactionPicker : public CompactionPicker {
 
   // Pick Universal compaction to limit space amplification.
   std::unique_ptr<Compaction> PickCompactionUniversalSizeAmp(
+      const std::string& cf_name, const MutableCFOptions& mutable_cf_options,
+      VersionStorageInfo* vstorage, double score,
+      const std::vector<SortedRun>& sorted_runs, LogBuffer* log_buffer);
+
+  // Pick Universal compaction to directly delete files that are no longer needed.
+  std::unique_ptr<Compaction> PickCompactionUniversalDeletion(
       const std::string& cf_name, const MutableCFOptions& mutable_cf_options,
       VersionStorageInfo* vstorage, double score,
       const std::vector<SortedRun>& sorted_runs, LogBuffer* log_buffer);
@@ -365,7 +363,6 @@ class NullCompactionPicker : public CompactionPicker {
     return false;
   }
 };
-#endif  // !ROCKSDB_LITE
 
 // Test whether two files have overlapping key-ranges.
 bool HaveOverlappingKeyRanges(const Comparator* c,
@@ -377,5 +374,3 @@ CompressionType GetCompressionType(const ImmutableCFOptions& ioptions,
                                    const bool enable_compression = true);
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_DB_COMPACTION_PICKER_H

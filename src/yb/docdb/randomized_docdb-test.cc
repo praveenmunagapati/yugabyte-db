@@ -15,13 +15,12 @@
 #include <utility>
 #include <vector>
 
-#include <gflags/gflags.h>
 
-#include "yb/docdb/doc_reader.h"
 #include "yb/docdb/docdb.h"
 #include "yb/docdb/docdb_test_base.h"
 #include "yb/docdb/docdb_test_util.h"
 #include "yb/util/scope_exit.h"
+#include "yb/util/flags.h"
 
 // Use a lower default number of tests when running on ASAN/TSAN so as not to exceed the test time
 // limit.
@@ -33,10 +32,10 @@ static constexpr int kDefaultTestNumIter = 20000;
 static constexpr int kDefaultSnapshotVerificationTestNumIter = 15000;
 #endif
 
-DEFINE_int32(snapshot_verification_test_num_iter, kDefaultSnapshotVerificationTestNumIter,
+DEFINE_UNKNOWN_int32(snapshot_verification_test_num_iter, kDefaultSnapshotVerificationTestNumIter,
              "Number iterations for randomized history cleanup DocDB tests.");
 
-DEFINE_int32(test_num_iter, kDefaultTestNumIter,
+DEFINE_UNKNOWN_int32(test_num_iter, kDefaultTestNumIter,
              "Number iterations for randomized DocDB tests, except those involving logical DocDB "
              "snapshots.");
 
@@ -229,7 +228,7 @@ void RandomizedDocDBTest::RunWorkloadWithSnaphots(bool enable_history_cleanup) {
   // case we did fewer than 15000 iterations.
   RemoveEntriesWithSecondComponentHigherThan(
       &expected_cleanup_ht_and_iteration,
-      load_gen_->last_operation_ht().value());
+      narrow_cast<int>(load_gen_->last_operation_ht().value()));
 
   ASSERT_FALSE(expected_cleanup_ht_and_iteration.empty());
   ASSERT_EQ(expected_cleanup_ht_and_iteration, cleanup_ht_and_iteration);
@@ -257,7 +256,7 @@ void RandomizedDocDBTest::RunWorkloadWithSnaphots(bool enable_history_cleanup) {
   // Remove entries that don't apply to us because we did not get to do a cleanup at that
   // hybrid_time.
   RemoveEntriesWithSecondComponentHigherThan(&expected_divergent_snapshot_and_cleanup_ht,
-                                             max_history_cleanup_ht.value());
+                                             narrow_cast<int>(max_history_cleanup_ht.value()));
 
   ASSERT_EQ(expected_divergent_snapshot_and_cleanup_ht,
             load_gen_->divergent_snapshot_ht_and_cleanup_ht());

@@ -11,10 +11,11 @@
 // under the License.
 //
 
-#ifndef YB_RPC_COMPRESSED_STREAM_H
-#define YB_RPC_COMPRESSED_STREAM_H
+#pragma once
 
-#include "yb/rpc/stream.h"
+#include <boost/version.hpp>
+
+#include "yb/rpc/rpc_fwd.h"
 
 #include "yb/util/mem_tracker.h"
 
@@ -27,5 +28,3 @@ StreamFactoryPtr CompressedStreamFactory(
 
 }  // namespace rpc
 }  // namespace yb
-
-#endif  // YB_RPC_COMPRESSED_STREAM_H

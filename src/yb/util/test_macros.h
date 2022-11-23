@@ -29,19 +29,18 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_TEST_MACROS_H
-#define YB_UTIL_TEST_MACROS_H
+#pragma once
 
-#include <string>
-#include <sstream>
 #include <set>
+#include <sstream>
+#include <string>
 
 #include <boost/preprocessor/cat.hpp>
 
-#include "yb/util/string_trim.h"
-#include "yb/util/debug-util.h"
+#include <gtest/gtest.h> // For SUCCEED/FAIL
+
 #include "yb/util/tostring.h"
-#include "yb/util/tsan_util.h"
+#include "yb/gutil/stl_util.h"  // For VectorToSet
 
 namespace yb {
 namespace util {
@@ -183,6 +182,24 @@ std::string TEST_SetDifferenceStr(const std::set<T>& expected, const std::set<T>
   } \
   } while (0)
 
+inline std::string FindFirstDiff(const std::string& lhs, const std::string& rhs) {
+  size_t min_len = std::min(lhs.size(), rhs.size());
+  size_t i = 0;
+  for (; i != min_len; ++i) {
+    if (lhs[i] != rhs[i]) {
+      break;
+    }
+  }
+  return lhs.substr(i, std::min<size_t>(lhs.size() - i, 32)) + " vs " +
+         rhs.substr(i, std::min<size_t>(rhs.size() - i, 32));
+}
+
+#define ASSERT_STR_EQ(lhs, rhs) do { \
+    std::string _lhs = (lhs); \
+    std::string _rhs = (rhs); \
+    ASSERT_EQ(lhs, rhs) << "First diff: " << FindFirstDiff(lhs, rhs); \
+  } while (0)
+
 #define ASSERT_FILE_EXISTS(env, path) do { \
   std::string _s = (path); \
   ASSERT_TRUE(env->FileExists(_s)) \
@@ -243,10 +260,10 @@ std::string TEST_SetDifferenceStr(const std::set<T>& expected, const std::set<T>
   do { \
     auto&& expected_vector_computed = (expected_vector); \
     auto&& actual_vector_computed = (actual_vector); \
-    auto expected_set = VectorToSet(expected_vector_computed); \
-    auto actual_set = VectorToSet(actual_vector_computed); \
+    auto expected_set = ::yb::VectorToSet(expected_vector_computed); \
+    auto actual_set = ::yb::VectorToSet(actual_vector_computed); \
     GTEST_ASSERT_( \
-        ::testing::internal::EqHelper<GTEST_IS_NULL_LITERAL_(expected_vector)>::Compare( \
+        ::testing::internal::EqHelper::Compare( \
             BOOST_PP_STRINGIZE(expected_vector), \
             BOOST_PP_STRINGIZE(actual_vector), \
             expected_vector_computed, \
@@ -312,6 +329,10 @@ std::string TEST_SetDifferenceStr(const std::set<T>& expected, const std::set<T>
 #define CURRENT_TEST_CASE_AND_TEST_NAME_STR() \
   (std::string(CURRENT_TEST_CASE_NAME()) + '.' + CURRENT_TEST_NAME())
 
+// Macros to disable tests in certain build types. Cannot be used in a parameterized test with
+// TEST_P or extended test fixtures with TEST_F_EX. For these, please use GTEST_SKIP or
+// YB_SKIP_TEST_IN_TSAN macros.
+
 #define YB_DISABLE_TEST(test_name) BOOST_PP_CAT(DISABLED_, test_name)
 
 #ifdef __APPLE__
@@ -338,12 +359,10 @@ std::string TEST_SetDifferenceStr(const std::set<T>& expected, const std::set<T>
 #define YB_DISABLE_TEST_IN_SANITIZERS_OR_MAC(test_name) test_name
 #endif
 
-// TODO: use GTEST_SKIP() here when we upgrade gtest.
-#define YB_SKIP_TEST_IN_TSAN() do { \
+// Can be used in individual test cases or in the SetUp() method to skip all tests for a fixture.
+#define YB_SKIP_TEST_IN_TSAN() \
+  do { \
     if (::yb::IsTsan()) { \
-      LOG(INFO) << "This test is skipped in TSAN"; \
-      return; \
+      GTEST_SKIP() << "Skipping test in TSAN"; \
     } \
   } while (false)
-
-#endif  // YB_UTIL_TEST_MACROS_H

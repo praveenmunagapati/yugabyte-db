@@ -11,8 +11,9 @@
 // under the License.
 //
 
-#ifndef YB_CONSENSUS_TEST_CONSENSUS_CONTEXT_H
-#define YB_CONSENSUS_TEST_CONSENSUS_CONTEXT_H
+#pragma once
+
+#include <unordered_set>
 
 #include "yb/consensus/consensus_context.h"
 
@@ -35,7 +36,7 @@ class TestConsensusContext : public ConsensusContext {
 
   void ListenNumSSTFilesChanged(std::function<void()> listener) override {}
 
-  CHECKED_STATUS CheckOperationAllowed(
+  Status CheckOperationAllowed(
       const OpId& op_id, consensus::OperationType op_type) override {
     return Status::OK();
   }
@@ -43,5 +44,3 @@ class TestConsensusContext : public ConsensusContext {
 
 } // namespace consensus
 } // namespace yb
-
-#endif // YB_CONSENSUS_TEST_CONSENSUS_CONTEXT_H

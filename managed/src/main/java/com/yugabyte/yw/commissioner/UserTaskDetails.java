@@ -1,5 +1,6 @@
 package com.yugabyte.yw.commissioner;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.yugabyte.yw.models.TaskInfo;
 import java.util.ArrayList;
 import java.util.List;
@@ -12,6 +13,10 @@ public class UserTaskDetails {
 
   // The various groupings of user facing subtasks.
   public enum SubTaskGroupType {
+    // Used for parent tasks which could have own details/errors. Only for UI/API
+    // purposes, not stored in DB.
+    Preparation,
+
     // Ignore this subtask and do not display it to the user.
     Invalid,
 
@@ -57,8 +62,17 @@ public class UserTaskDetails {
     // Bootstrapping Region
     BootstrappingRegion,
 
+    // Checkpointing a table on the source universe to set up xCluster replication.
+    BootstrappingProducer,
+
     // Creating Access Key
     CreateAccessKey,
+
+    // Deleting all the xCluster replications and cleaning up their states on the universes.
+    DeleteXClusterReplication,
+
+    // Rotate access key to all nodes of a universe
+    RotateAccessKey,
 
     // Initializing Cloud Metadata
     InitializeCloudMetadata,
@@ -68,6 +82,9 @@ public class UserTaskDetails {
 
     // Creating Table
     CreatingTable,
+
+    // Creating Tablespaces
+    CreatingTablespaces,
 
     // Importing Data
     ImportingData,
@@ -87,10 +104,10 @@ public class UserTaskDetails {
     // Resuming universe
     ResumeUniverse,
 
-    // Start master and tserver processes on a node
+    // Start master, tserver and yb-controller processes on a node
     StartingNodeProcesses,
 
-    // Stop master and tserver processes on a node
+    // Stop master, tserver and yb-controller processes on a node
     StoppingNodeProcesses,
 
     // Adding a node.
@@ -108,11 +125,17 @@ public class UserTaskDetails {
     // Deleting Backup
     DeletingBackup,
 
+    // Creating a backup
+    CreatingBackup,
+
     // Creating Table Backup
     CreatingTableBackup,
 
     // Restoring Table Backup
     RestoringTableBackup,
+
+    // Restoring Backup
+    RestoringBackup,
 
     // Create Namespace for Kubectl.
     CreateNamespace,
@@ -166,7 +189,31 @@ public class UserTaskDetails {
     SystemdUpgrade,
 
     // Add certificates and toggle TLS gflags
-    ToggleTls;
+    ToggleTls,
+
+    // Rebooting the node.
+    RebootingNode,
+
+    // Hard rebooting (stop/start) the node.
+    HardRebootingNode,
+
+    // Running custom hooks
+    RunningHooks,
+
+    // Updating Packages
+    UpdatePackage,
+
+    // Upgrading Yb-Controller
+    UpgradingYbc,
+
+    // Updating kubernetes overrides.
+    UpdatingKubernetesOverrides,
+
+    // Fetch PVC and StorageClass information
+    KubernetesVolumeInfo,
+
+    // Install Third Party Packages
+    InstallingThirdPartySoftware
   }
 
   public List<SubTaskDetails> taskDetails;
@@ -176,6 +223,10 @@ public class UserTaskDetails {
     String title;
     String description;
     switch (subTaskGroupType) {
+      case Preparation:
+        title = "Action preparation";
+        description = "Preparing to execute a selected action.";
+        break;
       case PreflightChecks:
         title = "Preflight Checks";
         description =
@@ -236,6 +287,10 @@ public class UserTaskDetails {
         title = "Updating gflags";
         description = "Updating GFlags on provisioned nodes.";
         break;
+      case UpdatingKubernetesOverrides:
+        title = "Updating kubernetes overrides";
+        description = "Updating kubernetes overrides on kubernetes pods.";
+        break;
       case BootstrappingCloud:
         title = "Bootstrapping Cloud";
         description = "Set up AccessKey, Region, and Provider for a given cloud Provider.";
@@ -244,9 +299,19 @@ public class UserTaskDetails {
         title = "Bootstrapping Region";
         description = "Set up AccessKey, Region, and Provider for a given cloud Provider.";
         break;
+      case BootstrappingProducer:
+        title = "Bootstrapping Source Universe";
+        description = "Creating a checkpoint on the source universe.";
+        break;
       case CreateAccessKey:
         title = "Creating AccessKey";
         description = "Set up AccessKey in the given Provider Vault";
+        break;
+      case DeleteXClusterReplication:
+        title = "Deleting XCluster Replication";
+        description =
+            "Deleting xCluster replications and cleaning up their corresponding states "
+                + "on the participating universes.";
         break;
       case InitializeCloudMetadata:
         title = "Initializing Cloud Metadata";
@@ -259,6 +324,10 @@ public class UserTaskDetails {
       case CreatingTable:
         title = "Creating Table";
         description = "Create a table.";
+        break;
+      case CreatingTablespaces:
+        title = "Creating Tablespaces";
+        description = "Create tablespaces.";
         break;
       case ImportingData:
         title = "Importing Data";
@@ -304,12 +373,20 @@ public class UserTaskDetails {
         title = "Deleting Backup";
         description = "Delete an existing backup of a universe.";
         break;
+      case CreatingBackup:
+        title = "Creating Backup";
+        description = "Creating backup for either a keyspace or a set of tables.";
+        break;
       case CreatingTableBackup:
         title = "Creating Table Backup";
         description = "Creating backup for a table.";
         break;
       case RestoringTableBackup:
         title = "Restoring Table Backup";
+        description = "Restoring from a backup.";
+        break;
+      case RestoringBackup:
+        title = "Restoring Backup";
         description = "Restoring from a backup.";
         break;
       case HelmInit:
@@ -388,6 +465,38 @@ public class UserTaskDetails {
         title = "Toggle TLS";
         description = "Add certificates and toggle TLS gflags";
         break;
+      case RotateAccessKey:
+        title = "Rotate Access Key";
+        description = "Rotate the access key for a universe";
+        break;
+      case RebootingNode:
+        title = "Rebooting Node";
+        description = "Rebooting node";
+        break;
+      case HardRebootingNode:
+        title = "Hard Rebooting Node";
+        description = "Hard rebooting node";
+        break;
+      case RunningHooks:
+        title = "Running Hooks";
+        description = "Run custom hooks";
+        break;
+      case UpdatePackage:
+        title = "Update Packages";
+        description = "Updating packages installed on the nodes";
+        break;
+      case UpgradingYbc:
+        title = "Upgrading Yb-controller";
+        description = "Upgrading yb-controller on each node";
+        break;
+      case KubernetesVolumeInfo:
+        title = "Fetching Kubernetes Volume information";
+        description = "Fetching Volume and storage information";
+        break;
+      case InstallingThirdPartySoftware:
+        title = "Install Third Party Software Packages";
+        description = "Installing Third party Software packages";
+        break;
       default:
         LOG.warn("UserTaskDetails: Missing SubTaskDetails for : {}", subTaskGroupType);
         return null;
@@ -413,10 +522,14 @@ public class UserTaskDetails {
     // The state of the task.
     private TaskInfo.State state;
 
+    // Extra task details about a subtask like progress in tablet movement.
+    public List<JsonNode> extraDetails;
+
     private SubTaskDetails(String title, String description) {
       this.title = title;
       this.description = description;
       this.state = TaskInfo.State.Unknown;
+      this.extraDetails = new ArrayList<>();
     }
 
     public void setState(TaskInfo.State state) {
@@ -431,8 +544,14 @@ public class UserTaskDetails {
       return description;
     }
 
-    public String getState() {
-      return state.toString();
+    public TaskInfo.State getState() {
+      return state;
+    }
+
+    public void populateDetails(JsonNode data) {
+      if (data != null) {
+        this.extraDetails.add(data);
+      }
     }
   }
 }

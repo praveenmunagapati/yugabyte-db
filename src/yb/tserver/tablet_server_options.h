@@ -29,19 +29,16 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_TSERVER_TABLET_SERVER_OPTIONS_H
-#define YB_TSERVER_TABLET_SERVER_OPTIONS_H
+#pragma once
 
 #include <vector>
 
+#include "yb/encryption/encryption_fwd.h"
 #include "yb/server/server_base_options.h"
 #include "yb/rocksdb/env.h"
 #include "yb/rocksdb/listener.h"
 
 namespace yb {
-
-class UniverseKeyManager;
-
 namespace tserver {
 
 // Options for constructing a tablet server.
@@ -59,7 +56,7 @@ class TabletServerOptions : public yb::server::ServerBaseOptions {
   std::vector<std::shared_ptr<rocksdb::EventListener>> listeners;
 
   rocksdb::Env* rocksdb_env;
-  yb::UniverseKeyManager* universe_key_manager = nullptr;
+  encryption::UniverseKeyManager* universe_key_manager = nullptr;
 
  private:
   explicit TabletServerOptions(server::MasterAddressesPtr master_addresses);
@@ -69,4 +66,3 @@ class TabletServerOptions : public yb::server::ServerBaseOptions {
 
 } // namespace tserver
 } // namespace yb
-#endif /* YB_TSERVER_TABLET_SERVER_OPTIONS_H */

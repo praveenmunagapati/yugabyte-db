@@ -14,8 +14,11 @@
 #include "yb/common/wire_protocol-test-util.h"
 
 #include "yb/rpc/messenger.h"
+#include "yb/rpc/rpc_controller.h"
 
 #include "yb/tablet/tablet.h"
+#include "yb/tablet/tablet_metadata.h"
+#include "yb/tablet/tablet_peer.h"
 #include "yb/tablet/tablet_snapshots.h"
 
 #include "yb/tserver/backup.proxy.h"
@@ -23,6 +26,8 @@
 #include "yb/tserver/tablet_server.h"
 #include "yb/tserver/tablet_server-test-base.h"
 #include "yb/tserver/ts_tablet_manager.h"
+#include "yb/tserver/tserver.pb.h"
+#include "yb/tserver/tserver_service.proxy.h"
 
 namespace yb {
 namespace tserver {
@@ -52,8 +57,7 @@ class BackupServiceTest : public TabletServerTestBase {
 
 TEST_F(BackupServiceTest, TestCreateTabletSnapshot) {
   // Verify that the tablet exists.
-  std::shared_ptr<TabletPeer> tablet;
-  ASSERT_TRUE(mini_server_->server()->tablet_manager()->LookupTablet(kTabletId, &tablet));
+  auto tablet = ASSERT_RESULT(mini_server_->server()->tablet_manager()->GetTablet(kTabletId));
   FsManager* const fs = tablet->tablet_metadata()->fs_manager();
 
   const string snapshot_id = "00000000000000000000000000000000";
@@ -101,9 +105,7 @@ TEST_F(BackupServiceTest, TestCreateTabletSnapshot) {
 
 TEST_F(BackupServiceTest, TestSnapshotData) {
   // Verify that the tablet exists.
-  std::shared_ptr<TabletPeer> tablet;
-  ASSERT_TRUE(mini_server_->server()->tablet_manager()->LookupTablet(kTabletId, &tablet));
-  tablet.reset();
+  ASSERT_OK(mini_server_->server()->tablet_manager()->GetTablet(kTabletId));
 
   WriteRequestPB write_req;
   WriteResponsePB write_resp;

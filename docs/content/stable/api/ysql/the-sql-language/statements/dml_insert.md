@@ -7,8 +7,7 @@ menu:
   stable:
     identifier: dml_insert
     parent: statements
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 ## Synopsis
@@ -20,13 +19,13 @@ Use the `INSERT` statement to add one or more rows to the specified table.
 <ul class="nav nav-tabs nav-tabs-yb">
   <li >
     <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
+      <i class="fa-solid fa-file-lines" aria-hidden="true"></i>
       Grammar
     </a>
   </li>
   <li>
     <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
+      <i class="fa-solid fa-diagram-project" aria-hidden="true"></i>
       Diagram
     </a>
   </li>
@@ -34,10 +33,10 @@ Use the `INSERT` statement to add one or more rows to the specified table.
 
 <div class="tab-content">
   <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/insert,returning_clause,column_values,conflict_target,conflict_action.grammar.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/insert,returning_clause,column_values,conflict_target,conflict_action.grammar.md" %}}
   </div>
   <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/insert,returning_clause,column_values,conflict_target,conflict_action.diagram.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/insert,returning_clause,column_values,conflict_target,conflict_action.diagram.md" %}}
   </div>
 </div>
 
@@ -45,7 +44,7 @@ See the section [The WITH clause and common table expressions](../../with-clause
 
 ## Semantics
 
-Constraints must be satisfied.  
+Constraints must be satisfied.
 
 ### *insert*
 
@@ -236,7 +235,7 @@ yugabyte=# SELECT id, c1, c2 FROM sample ORDER BY id;
 ```
 
 ```
- id |   c1   |    c2     
+ id |   c1   |    c2
 ----+--------+-----------
   1 | cat    | sparrow
   2 | dog    | blackbird
@@ -332,4 +331,4 @@ yugabyte=# SELECT id, c1, c2 FROM sample ORDER BY c1;
 
 - [`COPY`](../cmd_copy)
 - [`CREATE TABLE`](../ddl_create_table)
-- [`SELECT`](../dml_select)
+- [`SELECT`](../dml_select/)

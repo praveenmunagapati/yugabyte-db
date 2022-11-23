@@ -47,8 +47,11 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
+#include "yb/common/ybc_util.h"
 
 #include "plpgsql.h"
+
+#include "pg_yb_utils.h"
 
 
 typedef struct
@@ -1874,6 +1877,26 @@ exec_stmts(PLpgSQL_execstate *estate, List *stmts)
 	foreach(s, stmts)
 	{
 		PLpgSQL_stmt *stmt = (PLpgSQL_stmt *) lfirst(s);
+
+		/*
+		 * Flush buffered operations before executing a new statement since it might
+		 * have non-transactional side-effects that won't be reverted in case the
+		 * buffered operations (i.e., from previous statements) lead to an
+		 * exception.
+		 */
+		if (stmt->cmd_type != PLPGSQL_STMT_EXECSQL)
+		{
+			/*
+			 * PLPGSQL_STMT_EXECSQL commands require flushing for everything except
+			 * UPDATE, INSERT and DELETE. So the handling for that is present in
+			 * exec_stmt_execsql().
+			 *
+			 * The reason for not flushing in case of UPDATE, INSERT and DELETE is
+			 * mentioned in exec_stmt_execsql() which handles PLPGSQL_STMT_EXECSQL.
+			 */
+			YBFlushBufferedOperations();
+		}
+
 		int			rc = exec_stmt(estate, stmt);
 
 		if (rc != PLPGSQL_RC_OK)
@@ -2158,8 +2181,8 @@ exec_stmt_call(PLpgSQL_execstate *estate, PLpgSQL_stmt_call *stmt)
 			int			i;
 			ListCell   *lc;
 
-			/* Use eval_mcontext for any cruft accumulated here */
-			oldcontext = MemoryContextSwitchTo(get_eval_mcontext(estate));
+			/* Use stmt_mcontext for any cruft accumulated here */
+			oldcontext = MemoryContextSwitchTo(get_stmt_mcontext(estate));
 
 			/*
 			 * Get the parsed CallStmt, and look up the called procedure
@@ -2795,7 +2818,9 @@ exec_stmt_fors(PLpgSQL_execstate *estate, PLpgSQL_stmt_fors *stmt)
 	/*
 	 * Execute the loop
 	 */
-	rc = exec_for_query(estate, (PLpgSQL_stmt_forq *) stmt, portal, true);
+	rc = exec_for_query(
+			estate, (PLpgSQL_stmt_forq *) stmt, portal,
+			!yb_plpgsql_disable_prefetch_in_for_query);
 
 	/*
 	 * Close the implicit cursor
@@ -4116,6 +4141,12 @@ exec_stmt_execsql(PLpgSQL_execstate *estate,
 	long		tcount;
 	int			rc;
 	PLpgSQL_expr *expr = stmt->sqlstmt;
+	int			too_many_rows_level = 0;
+
+	if (plpgsql_extra_errors & PLPGSQL_XCHECK_TOOMANYROWS)
+		too_many_rows_level = ERROR;
+	else if (plpgsql_extra_warnings & PLPGSQL_XCHECK_TOOMANYROWS)
+		too_many_rows_level = WARNING;
 
 	/*
 	 * On the first call for this statement generate the plan, and detect
@@ -4152,15 +4183,30 @@ exec_stmt_execsql(PLpgSQL_execstate *estate,
 	}
 
 	/*
+	 * Flush buffered operations before executing a new statement since it might
+	 * have non-transactional side-effects that won't be reverted in case the
+	 * buffered operations (i.e., from previous statements) lead to an exception.
+	 *
+	 * If we know that the new statement is an INSERT, UPDATE or DELETE, we
+	 * can skip flushing since these statements have only transactional
+	 * effects. And an exception that occurs later due to previously buffered
+	 * operations (i.e., from previous statements) will lead to reverting
+	 * of the transactional effects of the new statement too.
+	 */
+	if (!stmt->mod_stmt)
+		YBFlushBufferedOperations();
+
+	/*
 	 * Set up ParamListInfo to pass to executor
 	 */
 	paramLI = setup_param_list(estate, expr);
 
 	/*
 	 * If we have INTO, then we only need one row back ... but if we have INTO
-	 * STRICT, ask for two rows, so that we can verify the statement returns
-	 * only one.  INSERT/UPDATE/DELETE are always treated strictly. Without
-	 * INTO, just run the statement to completion (tcount = 0).
+	 * STRICT or extra check too_many_rows, ask for two rows, so that we can
+	 * verify the statement returns only one.  INSERT/UPDATE/DELETE are always
+	 * treated strictly. Without INTO, just run the statement to completion
+	 * (tcount = 0).
 	 *
 	 * We could just ask for two rows always when using INTO, but there are
 	 * some cases where demanding the extra row costs significant time, eg by
@@ -4169,7 +4215,7 @@ exec_stmt_execsql(PLpgSQL_execstate *estate,
 	 */
 	if (stmt->into)
 	{
-		if (stmt->strict || stmt->mod_stmt)
+		if (stmt->strict || stmt->mod_stmt || too_many_rows_level)
 			tcount = 2;
 		else
 			tcount = 1;
@@ -4286,19 +4332,23 @@ exec_stmt_execsql(PLpgSQL_execstate *estate,
 		}
 		else
 		{
-			if (n > 1 && (stmt->strict || stmt->mod_stmt))
+			if (n > 1 && (stmt->strict || stmt->mod_stmt || too_many_rows_level))
 			{
 				char	   *errdetail;
+				int			errlevel;
 
 				if (estate->func->print_strict_params)
 					errdetail = format_expr_params(estate, expr);
 				else
 					errdetail = NULL;
 
-				ereport(ERROR,
+				errlevel = (stmt->strict || stmt->mod_stmt) ? ERROR : too_many_rows_level;
+
+				ereport(errlevel,
 						(errcode(ERRCODE_TOO_MANY_ROWS),
 						 errmsg("query returned more than one row"),
-						 errdetail ? errdetail_internal("parameters: %s", errdetail) : 0));
+						 errdetail ? errdetail_internal("parameters: %s", errdetail) : 0,
+						 errhint("Make sure the query returns a single row, or use LIMIT 1.")));
 			}
 			/* Put the first result row into the target */
 			exec_move_row(estate, target, tuptab->vals[0], tuptab->tupdesc);
@@ -6949,6 +6999,19 @@ exec_move_row_from_fields(PLpgSQL_execstate *estate,
 	int			td_natts = tupdesc ? tupdesc->natts : 0;
 	int			fnum;
 	int			anum;
+	int			strict_multiassignment_level = 0;
+
+	/*
+	 * The extra check strict strict_multi_assignment can be active,
+	 * only when input tupdesc is specified.
+	 */
+	if (tupdesc != NULL)
+	{
+		if (plpgsql_extra_errors & PLPGSQL_XCHECK_STRICTMULTIASSIGNMENT)
+			strict_multiassignment_level = ERROR;
+		else if (plpgsql_extra_warnings & PLPGSQL_XCHECK_STRICTMULTIASSIGNMENT)
+			strict_multiassignment_level = WARNING;
+	}
 
 	/* Handle RECORD-target case */
 	if (target->dtype == PLPGSQL_DTYPE_REC)
@@ -7027,10 +7090,23 @@ exec_move_row_from_fields(PLpgSQL_execstate *estate,
 				}
 				else
 				{
+					/* no source for destination column */
 					value = (Datum) 0;
 					isnull = true;
 					valtype = UNKNOWNOID;
 					valtypmod = -1;
+
+					/* When source value is missing */
+					if (strict_multiassignment_level)
+							ereport(strict_multiassignment_level,
+									(errcode(ERRCODE_DATATYPE_MISMATCH),
+									 errmsg("number of source and target fields in assignment do not match"),
+									 /* translator: %s represents a name of an extra check */
+									 errdetail("%s check of %s is active.",
+											   "strict_multi_assignment",
+													  strict_multiassignment_level == ERROR ? "extra_errors" :
+																	  "extra_warnings"),
+									 errhint("Make sure the query returns the exact list of columns.")));
 				}
 
 				/* Cast the new value to the right type, if needed. */
@@ -7042,6 +7118,29 @@ exec_move_row_from_fields(PLpgSQL_execstate *estate,
 												  attr->atttypid,
 												  attr->atttypmod);
 				newnulls[fnum] = isnull;
+			}
+
+			/*
+			 * When strict_multiassignment extra check is active, then ensure
+			 * there are no unassigned source attributes.
+			 */
+			if (strict_multiassignment_level && anum < td_natts)
+			{
+				/* skip dropped columns in the source descriptor */
+				while (anum < td_natts &&
+					   TupleDescAttr(tupdesc, anum)->attisdropped)
+					anum++;
+
+				if (anum < td_natts)
+					ereport(strict_multiassignment_level,
+							(errcode(ERRCODE_DATATYPE_MISMATCH),
+							 errmsg("number of source and target fields in assignment do not match"),
+							 /* translator: %s represents a name of an extra check */
+							 errdetail("%s check of %s is active.",
+									   "strict_multi_assignment",
+										  strict_multiassignment_level == ERROR ? "extra_errors" :
+																	  "extra_warnings"),
+							 errhint("Make sure the query returns the exact list of columns.")));
 			}
 
 			values = newvalues;
@@ -7100,14 +7199,48 @@ exec_move_row_from_fields(PLpgSQL_execstate *estate,
 			}
 			else
 			{
+				/* no source for destination column */
 				value = (Datum) 0;
 				isnull = true;
 				valtype = UNKNOWNOID;
 				valtypmod = -1;
+
+				if (strict_multiassignment_level)
+						ereport(strict_multiassignment_level,
+								(errcode(ERRCODE_DATATYPE_MISMATCH),
+								 errmsg("number of source and target fields in assignment do not match"),
+						 /* translator: %s represents a name of an extra check */
+						 errdetail("%s check of %s is active.",
+								  "strict_multi_assignment",
+								  strict_multiassignment_level == ERROR ? "extra_errors" :
+																	  "extra_warnings"),
+								 errhint("Make sure the query returns the exact list of columns.")));
 			}
 
 			exec_assign_value(estate, (PLpgSQL_datum *) var,
 							  value, isnull, valtype, valtypmod);
+		}
+
+		/*
+		 * When strict_multiassignment extra check is active, ensure there
+		 * are no unassigned source attributes.
+		 */
+		if (strict_multiassignment_level && anum < td_natts)
+		{
+			while (anum < td_natts &&
+				   TupleDescAttr(tupdesc, anum)->attisdropped)
+				anum++;			/* skip dropped column in tuple */
+
+			if (anum < td_natts)
+				ereport(strict_multiassignment_level,
+						(errcode(ERRCODE_DATATYPE_MISMATCH),
+						 errmsg("number of source and target fields in assignment do not match"),
+						 /* translator: %s represents a name of an extra check */
+						 errdetail("%s check of %s is active.",
+								  "strict_multi_assignment",
+								  strict_multiassignment_level == ERROR ? "extra_errors" :
+																	  "extra_warnings"),
+						 errhint("Make sure the query returns the exact list of columns.")));
 		}
 
 		return;

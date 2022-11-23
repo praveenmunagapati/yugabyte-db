@@ -7,8 +7,7 @@ menu:
   stable:
     identifier: ddl_drop_trigger
     parent: statements
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 ## Synopsis
@@ -20,13 +19,13 @@ Use the `DROP TRIGGER` statement to remove a trigger from the database.
 <ul class="nav nav-tabs nav-tabs-yb">
   <li >
     <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
+      <i class="fa-solid fa-file-lines" aria-hidden="true"></i>
       Grammar
     </a>
   </li>
   <li>
     <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
+      <i class="fa-solid fa-diagram-project" aria-hidden="true"></i>
       Diagram
     </a>
   </li>
@@ -34,10 +33,10 @@ Use the `DROP TRIGGER` statement to remove a trigger from the database.
 
 <div class="tab-content">
   <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/drop_trigger.grammar.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/drop_trigger.grammar.md" %}}
   </div>
   <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/drop_trigger.diagram.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/drop_trigger.diagram.md" %}}
   </div>
 </div>
 
@@ -57,5 +56,5 @@ DROP TRIGGER update_moddatetime ON posts;
 
 - [`CREATE TRIGGER`](../ddl_create_trigger)
 - [`INSERT`](../dml_insert)
-- [`UPDATE`](../dml_update)
-- [`DELETE`](../dml_delete)
+- [`UPDATE`](../dml_update/)
+- [`DELETE`](../dml_delete/)

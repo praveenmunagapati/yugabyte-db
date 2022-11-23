@@ -36,15 +36,16 @@
  * @author Deon Nicholas (dnicholas@fb.com)
  */
 
-#ifndef ROCKSDB_LITE
+
 #include "yb/rocksdb/utilities/redis/redis_lists.h"
 
 #include <iostream>
 #include <memory>
-#include <cmath>
+
+#include "yb/rocksdb/util/coding.h"
 
 #include "yb/util/slice.h"
-#include "yb/rocksdb/util/coding.h"
+#include "yb/util/status_log.h"
 
 namespace rocksdb {
 
@@ -559,4 +560,3 @@ int RedisLists::Insert(const std::string& key, const std::string& pivot,
 }
 
 }  // namespace rocksdb
-#endif  // ROCKSDB_LITE

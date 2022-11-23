@@ -11,24 +11,27 @@
 // under the License.
 //
 
-#ifndef YB_COMMON_SNAPSHOT_H
-#define YB_COMMON_SNAPSHOT_H
+#pragma once
 
 #include <unordered_map>
 
-#include "yb/common/entity_ids.h"
+#include <boost/functional/hash/hash.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "yb/common/hybrid_time.h"
 
 #include "yb/util/strongly_typed_uuid.h"
 
 namespace yb {
 
-YB_STRONGLY_TYPED_UUID(TxnSnapshotId);
-YB_STRONGLY_TYPED_UUID(TxnSnapshotRestorationId);
-YB_STRONGLY_TYPED_UUID(SnapshotScheduleId);
+YB_STRONGLY_TYPED_UUID_DECL(TxnSnapshotId);
+YB_STRONGLY_TYPED_UUID_DECL(TxnSnapshotRestorationId);
+YB_STRONGLY_TYPED_UUID_DECL(SnapshotScheduleId);
 
 using SnapshotSchedulesToObjectIdsMap =
     std::unordered_map<SnapshotScheduleId, std::vector<std::string>, SnapshotScheduleIdHash>;
 
-} // namespace yb
+using RestorationCompleteTimeMap = std::unordered_map<
+    TxnSnapshotRestorationId, HybridTime, TxnSnapshotRestorationIdHash>;
 
-#endif // YB_COMMON_SNAPSHOT_H
+} // namespace yb

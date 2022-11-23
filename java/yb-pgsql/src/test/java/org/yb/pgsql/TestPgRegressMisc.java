@@ -24,12 +24,24 @@ import java.util.Map;
 @RunWith(value=YBTestRunnerNonTsanOnly.class)
 public class TestPgRegressMisc extends BasePgSQLTest {
   @Override
+  protected Map<String, String> getMasterFlags() {
+    Map<String, String> flagMap = super.getMasterFlags();
+    flagMap.put("TEST_sequential_colocation_ids", "true");
+    return flagMap;
+  }
+
+  @Override
   public int getTestMethodTimeoutSec() {
     return 1800;
   }
 
   @Test
-  public void testPgRegressMisc() throws Exception {
+  public void testPgRegressMiscIndependent() throws Exception {
+    runPgRegressTest("yb_misc_independent_schedule");
+  }
+
+  @Test
+  public void testPgRegressMiscSerial() throws Exception {
     runPgRegressTest("yb_misc_serial_schedule");
   }
 }

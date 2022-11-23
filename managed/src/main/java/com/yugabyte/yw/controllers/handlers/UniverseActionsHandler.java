@@ -10,14 +10,18 @@
 
 package com.yugabyte.yw.controllers.handlers;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.google.inject.Inject;
 import com.yugabyte.yw.commissioner.Commissioner;
 import com.yugabyte.yw.commissioner.Common;
 import com.yugabyte.yw.commissioner.tasks.PauseUniverse;
 import com.yugabyte.yw.commissioner.tasks.ResumeUniverse;
-import com.yugabyte.yw.common.CertificateHelper;
-import com.yugabyte.yw.common.Util;
 import com.yugabyte.yw.common.PlatformServiceException;
+import com.yugabyte.yw.common.Util;
+import com.yugabyte.yw.common.certmgmt.CertConfigType;
+import com.yugabyte.yw.common.certmgmt.CertificateHelper;
 import com.yugabyte.yw.common.config.RuntimeConfigFactory;
 import com.yugabyte.yw.forms.AlertConfigFormData;
 import com.yugabyte.yw.forms.EncryptionAtRestKeyParams;
@@ -25,19 +29,20 @@ import com.yugabyte.yw.forms.ToggleTlsParams;
 import com.yugabyte.yw.forms.UniverseDefinitionTaskParams;
 import com.yugabyte.yw.forms.UpgradeParams;
 import com.yugabyte.yw.forms.UpgradeTaskParams.UpgradeTaskType;
-import com.yugabyte.yw.forms.PlatformResults.YBPError;
 import com.yugabyte.yw.models.CertificateInfo;
 import com.yugabyte.yw.models.Customer;
 import com.yugabyte.yw.models.CustomerTask;
 import com.yugabyte.yw.models.Universe;
 import com.yugabyte.yw.models.helpers.NodeDetails;
 import com.yugabyte.yw.models.helpers.TaskType;
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import play.data.Form;
+import play.libs.Json;
 import play.mvc.Http;
 
 public class UniverseActionsHandler {
@@ -57,6 +62,7 @@ public class UniverseActionsHandler {
     Map<String, String> config = new HashMap<>();
     config.put(Universe.TAKE_BACKUPS, value.toString());
     universe.updateConfig(config);
+    universe.save();
   }
 
   public UUID setUniverseKey(
@@ -125,12 +131,7 @@ public class UniverseActionsHandler {
         universe.universeUUID,
         customer.uuid);
 
-    YBPError error = requestParams.verifyParams(universeDetails);
-    if (error != null) {
-      throw new PlatformServiceException(
-          Http.Status.BAD_REQUEST, error.error + " - for universe: " + universe.universeUUID);
-    }
-
+    requestParams.verifyParams(universeDetails);
     if (!universeDetails.isUniverseEditable()) {
       throw new PlatformServiceException(
           Http.Status.BAD_REQUEST, "Universe UUID " + universe.universeUUID + " cannot be edited.");
@@ -155,16 +156,14 @@ public class UniverseActionsHandler {
     }
 
     if (requestParams.rootCA != null
-        && CertificateInfo.get(requestParams.rootCA).certType
-            == CertificateInfo.Type.CustomServerCert) {
+        && CertificateInfo.get(requestParams.rootCA).certType == CertConfigType.CustomServerCert) {
       throw new PlatformServiceException(
           Http.Status.BAD_REQUEST,
           "CustomServerCert are only supported for Client to Server Communication.");
     }
 
     if (requestParams.rootCA != null
-        && CertificateInfo.get(requestParams.rootCA).certType
-            == CertificateInfo.Type.CustomCertHostPath
+        && CertificateInfo.get(requestParams.rootCA).certType == CertConfigType.CustomCertHostPath
         && !userIntent.providerType.equals(Common.CloudType.onprem)) {
       throw new PlatformServiceException(
           Http.Status.BAD_REQUEST,
@@ -173,7 +172,7 @@ public class UniverseActionsHandler {
 
     if (requestParams.clientRootCA != null
         && CertificateInfo.get(requestParams.clientRootCA).certType
-            == CertificateInfo.Type.CustomCertHostPath
+            == CertConfigType.CustomCertHostPath
         && !userIntent.providerType.equals(Common.CloudType.onprem)) {
       throw new PlatformServiceException(
           Http.Status.BAD_REQUEST,
@@ -219,13 +218,14 @@ public class UniverseActionsHandler {
       taskParams.rootCA = universeDetails.rootCA;
       if (taskParams.rootCA == null) {
         // create self signed rootCA in case it is not provided by the user
+        LOG.info("creating selfsigned CA for {}", universeDetails.universeUUID.toString());
         taskParams.rootCA =
             requestParams.rootCA != null
                 ? requestParams.rootCA
                 : CertificateHelper.createRootCA(
+                    runtimeConfigFactory.staticApplicationConf(),
                     universeDetails.nodePrefix,
-                    customer.uuid,
-                    runtimeConfigFactory.staticApplicationConf().getString("yb.storage.path"));
+                    customer.uuid);
       }
     }
 
@@ -244,9 +244,9 @@ public class UniverseActionsHandler {
             // and rootCA and clientRootCA needs to be different
             taskParams.clientRootCA =
                 CertificateHelper.createClientRootCA(
+                    runtimeConfigFactory.staticApplicationConf(),
                     universeDetails.nodePrefix,
-                    customer.uuid,
-                    runtimeConfigFactory.staticApplicationConf().getString("yb.storage.path"));
+                    customer.uuid);
           }
         } else {
           // Set the ClientRootCA to the user provided ClientRootCA if it exists
@@ -263,17 +263,12 @@ public class UniverseActionsHandler {
 
       // If client encryption is enabled, generate the client cert file for each node.
       CertificateInfo cert = CertificateInfo.get(taskParams.rootCA);
-      if (taskParams.rootAndClientRootCASame && cert.certType == CertificateInfo.Type.SelfSigned) {
-        CertificateHelper.createClientCertificate(
-            taskParams.clientRootCA,
-            String.format(
-                CertificateHelper.CERT_PATH,
-                runtimeConfigFactory.staticApplicationConf().getString("yb.storage.path"),
-                customer.uuid.toString(),
-                taskParams.clientRootCA.toString()),
-            CertificateHelper.DEFAULT_CLIENT,
-            null,
-            null);
+      if (taskParams.rootAndClientRootCASame) {
+        if (cert.certType == CertConfigType.SelfSigned
+            || cert.certType == CertConfigType.HashicorpVault) {
+          CertificateHelper.createClientCertificate(
+              runtimeConfigFactory.staticApplicationConf(), customer.uuid, taskParams.clientRootCA);
+        }
       }
     }
 
@@ -317,6 +312,7 @@ public class UniverseActionsHandler {
     Map<String, String> config = new HashMap<>();
     config.put(Universe.HELM2_LEGACY, Universe.HelmLegacy.V2TO3.toString());
     universe.updateConfig(config);
+    universe.save();
   }
 
   public void configureAlerts(Universe universe, Form<AlertConfigFormData> formData) {
@@ -342,6 +338,7 @@ public class UniverseActionsHandler {
     }
     config.put(Universe.DISABLE_ALERTS_UNTIL, Long.toString(disabledUntilSecs));
     universe.updateConfig(config);
+    universe.save();
   }
 
   public UUID pause(Customer customer, Universe universe) {
@@ -376,7 +373,7 @@ public class UniverseActionsHandler {
     return taskUUID;
   }
 
-  public UUID resume(Customer customer, Universe universe) {
+  public UUID resume(Customer customer, Universe universe) throws IOException {
     LOG.info(
         "Resume universe, customer uuid: {}, universe: {} [ {} ] ",
         customer.uuid,
@@ -384,11 +381,18 @@ public class UniverseActionsHandler {
         universe.universeUUID);
 
     // Create the Commissioner task to resume the universe.
-    ResumeUniverse.Params taskParams = new ResumeUniverse.Params();
-    taskParams.universeUUID = universe.universeUUID;
+    // TODO: this is better done using copy constructors
+    ObjectMapper mapper =
+        Json.mapper()
+            .copy()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+            .configure(SerializationFeature.FAIL_ON_EMPTY_BEANS, false);
+    ResumeUniverse.Params taskParams =
+        mapper.readValue(
+            mapper.writeValueAsString(universe.getUniverseDetails()), ResumeUniverse.Params.class);
     // There is no staleness of a resume request. Perform it even if the universe has changed.
     taskParams.expectedUniverseVersion = -1;
-    taskParams.customerUUID = customer.uuid;
+
     // Submit the task to resume the universe.
     TaskType taskType = TaskType.ResumeUniverse;
 

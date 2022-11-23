@@ -54,6 +54,7 @@
 #include "catalog/pg_subscription_rel.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
+#include "catalog/pg_yb_tablegroup.h"
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
 #include "commands/tablecmds.h"
@@ -258,6 +259,7 @@ Relation
 heap_create(const char *relname,
 			Oid relnamespace,
 			Oid reltablespace,
+			Oid reltablegroup,
 			Oid relid,
 			Oid relfilenode,
 			TupleDesc tupDesc,
@@ -301,7 +303,6 @@ heap_create(const char *relname,
 		case RELKIND_VIEW:
 		case RELKIND_COMPOSITE_TYPE:
 		case RELKIND_FOREIGN_TABLE:
-		case RELKIND_PARTITIONED_TABLE:
 			create_storage = false;
 
 			/*
@@ -311,10 +312,11 @@ heap_create(const char *relname,
 			reltablespace = InvalidOid;
 			break;
 
+		case RELKIND_PARTITIONED_TABLE:
 		case RELKIND_PARTITIONED_INDEX:
 			/*
-			 * Preserve tablespace so that it's used as tablespace for indexes
-			 * on future partitions.
+			 * For partitioned tables and indexes, preserve tablespace so that
+			 * it's used as the tablespace for future partitions.
 			 */
 			create_storage = false;
 			break;
@@ -395,6 +397,29 @@ heap_create(const char *relname,
 	{
 		RelationOpenSmgr(rel);
 		RelationCreateStorage(rel->rd_node, relpersistence);
+	}
+
+	/*
+	 * If a tablespace is specified, removal of that tablespace is normally
+	 * protected by the existence of a physical file; but for Yugabyte relations
+	 * and relations with no files, add a pg_shdepend entry to account for that.
+	 */
+	if ((IsYBRelation(rel) || !create_storage) && reltablespace != InvalidOid)
+		recordDependencyOnTablespace(RelationRelationId, relid,
+									 reltablespace);
+
+	if (IsYBRelation(rel) && reltablegroup != InvalidOid)
+	{
+		ObjectAddress myself, tablegroup;
+		myself.classId = RelationRelationId;
+		myself.objectId = relid;
+		myself.objectSubId = 0;
+
+		tablegroup.classId = YbTablegroupRelationId;
+		tablegroup.objectId = reltablegroup;
+		tablegroup.objectSubId = 0;
+
+		recordDependencyOn(&myself, &tablegroup, DEPENDENCY_NORMAL);
 	}
 
 	return rel;
@@ -1142,6 +1167,7 @@ Oid
 heap_create_with_catalog(const char *relname,
 						 Oid relnamespace,
 						 Oid reltablespace,
+						 Oid reltablegroup,
 						 Oid relid,
 						 Oid reltypeid,
 						 Oid reloftypeid,
@@ -1242,7 +1268,7 @@ heap_create_with_catalog(const char *relname,
 	if (!OidIsValid(relid))
 	{
 		/* Use binary-upgrade override for pg_class.oid/relfilenode? */
-		if (IsBinaryUpgrade &&
+		if (IsBinaryUpgrade && !yb_binary_restore &&
 			(relkind == RELKIND_RELATION || relkind == RELKIND_SEQUENCE ||
 			 relkind == RELKIND_VIEW || relkind == RELKIND_MATVIEW ||
 			 relkind == RELKIND_COMPOSITE_TYPE || relkind == RELKIND_FOREIGN_TABLE ||
@@ -1257,7 +1283,7 @@ heap_create_with_catalog(const char *relname,
 			binary_upgrade_next_heap_pg_class_oid = InvalidOid;
 		}
 		/* There might be no TOAST table, so we have to test for it. */
-		else if (IsBinaryUpgrade &&
+		else if (IsBinaryUpgrade && !yb_binary_restore &&
 				 OidIsValid(binary_upgrade_next_toast_pg_class_oid) &&
 				 relkind == RELKIND_TOASTVALUE)
 		{
@@ -1335,6 +1361,7 @@ heap_create_with_catalog(const char *relname,
 	new_rel_desc = heap_create(relname,
 							   relnamespace,
 							   reltablespace,
+							   reltablegroup,
 							   relid,
 							   InvalidOid,
 							   tupdesc,
@@ -1502,8 +1529,6 @@ heap_create_with_catalog(const char *relname,
 			recordDependencyOnNewAcl(RelationRelationId, relid, 0, ownerid, relacl);
 
 			recordDependencyOnCurrentExtension(&myself, false);
-
-			recordDependencyOnTablespace(RelationRelationId, relid, reltablespace);
 
 			if (reloftypeid)
 			{

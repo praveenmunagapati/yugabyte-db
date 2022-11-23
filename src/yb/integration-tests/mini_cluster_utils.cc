@@ -15,13 +15,17 @@
 
 #include "yb/integration-tests/mini_cluster.h"
 
+#include "yb/tablet/tablet.h"
 #include "yb/tablet/tablet_peer.h"
+#include "yb/tablet/transaction_participant.h"
 
 #include "yb/tserver/mini_tablet_server.h"
 #include "yb/tserver/tablet_server.h"
 #include "yb/tserver/ts_tablet_manager.h"
 
+#include "yb/util/backoff_waiter.h"
 #include "yb/util/test_util.h"
+#include "yb/util/tsan_util.h"
 
 using namespace std::literals;
 
@@ -31,7 +35,10 @@ size_t CountRunningTransactions(MiniCluster* cluster) {
   size_t result = 0;
   auto peers = ListTabletPeers(cluster, ListPeersFilter::kAll);
   for (const auto &peer : peers) {
-    auto participant = peer->tablet()->transaction_participant();
+    auto tablet = peer->shared_tablet();
+    if (!tablet)
+      continue;
+    auto participant = tablet->transaction_participant();
     result += participant ? participant->TEST_GetNumRunningTransactions() : 0;
   }
   return result;
@@ -41,13 +48,13 @@ void AssertRunningTransactionsCountLessOrEqualTo(MiniCluster* cluster,
                                                  size_t max_remaining_txns_per_tablet) {
   MonoTime deadline = MonoTime::Now() + 15s * kTimeMultiplier;
   bool has_bad = false;
-  for (int i = 0; i != cluster->num_tablet_servers(); ++i) {
+  for (size_t i = 0; i != cluster->num_tablet_servers(); ++i) {
     auto server = cluster->mini_tablet_server(i)->server();
     std::vector<std::shared_ptr<tablet::TabletPeer>> tablets;
     auto status = Wait([server, &tablets] {
           tablets = server->tablet_manager()->GetTabletPeers();
           for (const auto& peer : tablets) {
-            if (peer->tablet() == nullptr) {
+            if (peer->shared_tablet() == nullptr) {
               return false;
             }
           }
@@ -56,7 +63,7 @@ void AssertRunningTransactionsCountLessOrEqualTo(MiniCluster* cluster,
     if (!status.ok()) {
       has_bad = true;
       for (const auto& peer : tablets) {
-        if (peer->tablet() == nullptr) {
+        if (peer->shared_tablet() == nullptr) {
           LOG(ERROR) << Format(
               "T $1 P $0: Tablet object is not created",
               server->permanent_uuid(), peer->tablet_id());
@@ -65,7 +72,10 @@ void AssertRunningTransactionsCountLessOrEqualTo(MiniCluster* cluster,
       continue;
     }
     for (const auto& peer : tablets) {
-      auto participant = peer->tablet()->transaction_participant();
+      // Keep a ref to guard against Shutdown races.
+      auto tablet = peer->shared_tablet();
+      if (!tablet) continue;
+      auto participant = tablet->transaction_participant();
       if (participant) {
         auto status = Wait([participant, max_remaining_txns_per_tablet] {
               return participant->TEST_GetNumRunningTransactions() <= max_remaining_txns_per_tablet;

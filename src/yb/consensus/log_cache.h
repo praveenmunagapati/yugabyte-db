@@ -29,31 +29,47 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_CONSENSUS_LOG_CACHE_H
-#define YB_CONSENSUS_LOG_CACHE_H
+#pragma once
 
+#include <pthread.h>
+#include <sys/types.h>
+
+#include <atomic>
+#include <condition_variable>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
+#include <boost/container/small_vector.hpp>
+
+#include <glog/logging.h>
+#include <gtest/gtest_prod.h>
+
 #include "yb/consensus/consensus_fwd.h"
 #include "yb/consensus/log_fwd.h"
+#include "yb/consensus/log_util.h"
 #include "yb/consensus/consensus.pb.h"
-#include "yb/consensus/opid_util.h"
+#include "yb/consensus/consensus_types.pb.h"
+
 #include "yb/gutil/macros.h"
 
-#include "yb/util/async_util.h"
+#include "yb/util/metrics_fwd.h"
 #include "yb/util/locks.h"
-#include "yb/util/metrics.h"
+#include "yb/util/monotime.h"
+#include "yb/util/mutex.h"
 #include "yb/util/opid.h"
 #include "yb/util/restart_safe_clock.h"
-#include "yb/util/result.h"
+#include "yb/util/status_callback.h"
+
+YB_STRONGLY_TYPED_BOOL(HaveMoreMessages);
 
 namespace yb {
 
 class MetricEntity;
 class MemTracker;
+class OpIdPB;
 
 namespace consensus {
 
@@ -61,8 +77,10 @@ class ReplicateMsg;
 
 struct ReadOpsResult {
   ReplicateMsgs messages;
-  yb::OpId preceding_op;
-  bool have_more_messages = false;
+  OpId preceding_op;
+  SchemaPB header_schema;
+  uint32_t header_schema_version;
+  HaveMoreMessages have_more_messages = HaveMoreMessages::kFalse;
   int64_t read_from_disk_size = 0;
 };
 
@@ -103,16 +121,18 @@ class LogCache {
   // If the ops being requested are not available in the log, this will synchronously read these ops
   // from disk. Therefore, this function may take a substantial amount of time and should not be
   // called with important locks held, etc.
-  Result<ReadOpsResult> ReadOps(int64_t after_op_index,
-                                int max_size_bytes);
+  Result<ReadOpsResult> ReadOps(int64_t after_op_index, size_t max_size_bytes);
 
   // Same as above but also includes a 'to_op_index' parameter which will be used to limit results
   // until 'to_op_index' (inclusive).
   //
   // If 'to_op_index' is 0, then all operations after 'after_op_index' will be included.
-  Result<ReadOpsResult> ReadOps(int64_t after_op_index,
-                                int64_t to_op_index,
-                                int max_size_bytes);
+  Result<ReadOpsResult> ReadOps(
+      int64_t after_op_index,
+      int64_t to_op_index,
+      size_t max_size_bytes,
+      CoarseTimePoint deadline = CoarseTimePoint::max(),
+      bool fetch_single_entry = false);
 
   // Append the operations into the log and the cache.  When the messages have completed writing
   // into the on-disk log, fires 'callback'.
@@ -121,9 +141,9 @@ class LogCache {
   // callback fires.
   //
   // Returns non-OK if the Log append itself fails.
-  CHECKED_STATUS AppendOperations(const ReplicateMsgs& msgs, const yb::OpId& committed_op_id,
-                                  RestartSafeCoarseTimePoint batch_mono_time,
-                                  const StatusCallback& callback);
+  Status AppendOperations(const ReplicateMsgs& msgs, const yb::OpId& committed_op_id,
+                          RestartSafeCoarseTimePoint batch_mono_time,
+                          const StatusCallback& callback);
 
   // Return true if an operation with the given index has been written through the cache. The
   // operation may not necessarily be durable yet -- it could still be en route to the log.
@@ -136,9 +156,7 @@ class LogCache {
   // Return the number of bytes of memory currently in use by the cache.
   int64_t BytesUsed() const;
 
-  int64_t num_cached_ops() const {
-    return metrics_.num_ops->value();
-  }
+  int64_t num_cached_ops() const;
 
   int64_t earliest_op_index() const;
 
@@ -165,13 +183,12 @@ class LogCache {
   // Start memory tracking of following operations in case they are still present in cache.
   void TrackOperationsMemory(const OpIds& op_ids);
 
-  CHECKED_STATUS FlushIndex();
-
   Result<OpId> TEST_GetLastOpIdWithType(int64_t max_allowed_index, OperationType op_type);
 
  private:
   FRIEND_TEST(LogCacheTest, TestAppendAndGetMessages);
-  FRIEND_TEST(LogCacheTest, TestGlobalMemoryLimit);
+  FRIEND_TEST(LogCacheTest, TestGlobalMemoryLimitMB);
+  FRIEND_TEST(LogCacheTest, TestGlobalMemoryLimitPercentage);
   FRIEND_TEST(LogCacheTest, TestReplaceMessages);
   friend class LogCacheTest;
 
@@ -180,29 +197,36 @@ class LogCache {
     ReplicateMsgPtr msg;
     // The cached value of msg->SpaceUsedLong(). This method is expensive
     // to compute, so we compute it only once upon insertion.
-    int64_t mem_usage = 0;
+    size_t mem_usage = 0;
 
     // Did we start memory tracking for this entry.
     bool tracked = false;
   };
 
+  typedef boost::container::small_vector<ReplicateMsgPtr, 8> ReplicateMsgVector;
+
   // Try to evict the oldest operations from the queue, stopping either when
   // 'bytes_to_evict' bytes have been evicted, or the op with index
   // 'stop_after_index' has been evicted, whichever comes first.
-  size_t EvictSomeUnlocked(int64_t stop_after_index, int64_t bytes_to_evict);
+  size_t EvictSomeUnlocked(int64_t stop_after_index,
+      int64_t bytes_to_evict,
+      ReplicateMsgVector* evicted_messages) REQUIRES(lock_);
 
   // Update metrics and MemTracker to account for the removal of the
   // given message.
-  void AccountForMessageRemovalUnlocked(const CacheEntry& entry);
+  void AccountForMessageRemovalUnlocked(const CacheEntry& entry) REQUIRES(lock_);
 
   // Return a string with stats
   std::string StatsStringUnlocked() const;
 
-  std::string ToStringUnlocked() const;
+  std::string ToStringUnlocked() const REQUIRES(lock_);
 
-  std::string LogPrefixUnlocked() const;
+  std::string LogPrefix() const;
 
-  void LogCallback(int64_t last_idx_in_batch,
+  std::string LogPrefixUnlocked() const REQUIRES(lock_);
+
+  void LogCallback(bool overwrite,
+                   int64_t last_idx_in_batch,
                    const StatusCallback& user_callback,
                    const Status& log_status);
 
@@ -211,6 +235,8 @@ class LogCache {
     int64_t mem_required = 0;
     // Last idx in batch of provided operations.
     int64_t last_idx_in_batch = -1;
+    // If log cache has been overwritten when preparing append.
+    bool overwritten_cache = false;
   };
 
   PrepareAppendResult PrepareAppendOperations(const ReplicateMsgs& msgs);
@@ -223,23 +249,28 @@ class LogCache {
   // The id of the tablet.
   const std::string tablet_id_;
 
+  const std::string log_prefix_;
+
   mutable simple_spinlock lock_;
 
   // An ordered map that serves as the buffer for the cached messages.
   // Maps from log index -> ReplicateMsg
   // An ordered map that serves as the buffer for the cached messages.  Maps from log index ->
   // CacheEntry
-  typedef std::map<uint64_t, CacheEntry> MessageCache;
-  MessageCache cache_;
+  typedef std::map<int64_t, CacheEntry> MessageCache;
+  MessageCache cache_ GUARDED_BY(lock_);
 
   // The next log index to append. Each append operation must either start with this log index, or
   // go backward (but never skip forward).
-  int64_t next_sequential_op_index_;
+  int64_t next_sequential_op_index_ GUARDED_BY(lock_);
 
   // Any operation with an index >= min_pinned_op_ may not be evicted from the cache. This is used
   // to prevent ops from being evicted until they successfully have been appended to the underlying
   // log.  Protected by lock_.
-  int64_t min_pinned_op_index_;
+  int64_t min_pinned_op_index_ GUARDED_BY(lock_);
+
+  // Number of batches in progress of preparing that have overwritten min_pinned_op_index_.
+  int64_t num_batches_overwritten_cache_;
 
   // Pointer to a parent memtracker for all log caches. This exists to compute server-wide cache
   // size and enforce a server-wide memory limit.  When the first instance of a log cache is
@@ -269,4 +300,3 @@ class LogCache {
 
 } // namespace consensus
 } // namespace yb
-#endif /* YB_CONSENSUS_LOG_CACHE_H */

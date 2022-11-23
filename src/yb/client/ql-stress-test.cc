@@ -11,22 +11,30 @@
 // under the License.
 //
 
+#include "yb/bfql/gen_opcodes.h"
+
 #include "yb/client/client.h"
+#include "yb/client/error.h"
 #include "yb/client/ql-dml-test-base.h"
 #include "yb/client/rejection_score_source.h"
+#include "yb/client/schema.h"
 #include "yb/client/session.h"
 #include "yb/client/table.h"
 #include "yb/client/table_handle.h"
 #include "yb/client/transaction.h"
+#include "yb/client/transaction_manager.h"
+#include "yb/client/yb_op.h"
 
 #include "yb/common/ql_value.h"
+#include "yb/common/schema.h"
 
+#include "yb/consensus/log.h"
 #include "yb/consensus/log_reader.h"
 #include "yb/consensus/raft_consensus.h"
-#include "yb/consensus/replica_state.h"
 #include "yb/consensus/retryable_requests.h"
 
 #include "yb/docdb/consensus_frontier.h"
+#include "yb/docdb/doc_key.h"
 #include "yb/docdb/docdb_rocksdb_util.h"
 
 #include "yb/rocksdb/metadata.h"
@@ -36,6 +44,8 @@
 
 #include "yb/server/hybrid_clock.h"
 
+#include "yb/tablet/tablet.h"
+#include "yb/tablet/tablet_metadata.h"
 #include "yb/tablet/tablet_options.h"
 #include "yb/tablet/tablet_peer.h"
 
@@ -43,13 +53,20 @@
 #include "yb/tserver/tablet_server.h"
 #include "yb/tserver/ts_tablet_manager.h"
 
-#include "yb/util/bfql/gen_opcodes.h"
+#include "yb/util/backoff_waiter.h"
+#include "yb/util/debug-util.h"
+#include "yb/util/format.h"
+#include "yb/util/metrics.h"
 #include "yb/util/random_util.h"
-#include "yb/util/scope_exit.h"
 #include "yb/util/size_literals.h"
-
+#include "yb/util/status_format.h"
+#include "yb/util/status_log.h"
+#include "yb/util/test_thread_holder.h"
 #include "yb/util/tsan_util.h"
+
 #include "yb/yql/cql/ql/util/statement_result.h"
+
+using std::string;
 
 DECLARE_bool(TEST_combine_batcher_errors);
 DECLARE_bool(allow_preempting_compactions);
@@ -126,7 +143,7 @@ class QLStressTest : public QLDmlTestBase<MiniCluster> {
     builder->AddColumn(kValueColumn)->Type(STRING);
   }
 
-  CHECKED_STATUS WaitForTabletLeaders() {
+  Status WaitForTabletLeaders() {
     const MonoTime deadline = MonoTime::Now() + 10s * kTimeMultiplier;
     for (const auto& tablet_id : ListTabletIdsForTable(cluster_.get(), table_->id())) {
       RETURN_NOT_OK(WaitUntilTabletHasLeader(cluster_.get(), tablet_id, deadline));
@@ -142,16 +159,16 @@ class QLStressTest : public QLDmlTestBase<MiniCluster> {
     auto* const req = op->mutable_request();
     QLAddInt32HashValue(req, key);
     table.AddStringColumnValue(req, kValueColumn, value);
-    EXPECT_OK(session->Apply(op));
+    session->Apply(op);
     return op;
   }
 
-  CHECKED_STATUS WriteRow(const YBSessionPtr& session,
-                          const TableHandle& table,
-                          int32_t key,
-                          const std::string& value) {
+  Status WriteRow(const YBSessionPtr& session,
+                  const TableHandle& table,
+                  int32_t key,
+                  const std::string& value) {
     auto op = InsertRow(session, table, key, value);
-    RETURN_NOT_OK(session->Flush());
+    RETURN_NOT_OK(session->TEST_Flush());
     if (op->response().status() != QLResponsePB::YQL_STATUS_OK) {
       return STATUS_FORMAT(
           RemoteError, "Write failed: $0", QLResponsePB::QLStatus_Name(op->response().status()));
@@ -165,13 +182,13 @@ class QLStressTest : public QLDmlTestBase<MiniCluster> {
     auto* const req = op->mutable_request();
     QLAddInt32HashValue(req, key);
     table.AddColumns({kValueColumn}, req);
-    EXPECT_OK(session->Apply(op));
+    session->Apply(op);
     return op;
   }
 
   Result<QLValue> ReadRow(const YBSessionPtr& session, const TableHandle& table, int32_t key) {
     auto op = SelectRow(session, table, key);
-    RETURN_NOT_OK(session->Flush());
+    RETURN_NOT_OK(session->TEST_Flush());
     if (op->response().status() != QLResponsePB::YQL_STATUS_OK) {
       return STATUS_FORMAT(
           RemoteError, "Read failed: $0", QLResponsePB::QLStatus_Name(op->response().status()));
@@ -190,9 +207,9 @@ class QLStressTest : public QLDmlTestBase<MiniCluster> {
     return QLStressTest::InsertRow(session, table_, key, value);
   }
 
-  CHECKED_STATUS WriteRow(const YBSessionPtr& session,
-                          int32_t key,
-                          const std::string& value) {
+  Status WriteRow(const YBSessionPtr& session,
+                  int32_t key,
+                  const std::string& value) {
     return QLStressTest::WriteRow(session, table_, key, value);
   }
 
@@ -257,7 +274,6 @@ bool QLStressTest::CheckRetryableRequestsCountsAndLeaders(
   size_t total_leaders = 0;
   *total_entries = 0;
   bool result = true;
-  size_t replicated_limit = FLAGS_detect_duplicates_for_retryable_requests ? 1 : 0;
   auto peers = ListTabletPeers(cluster_.get(), ListPeersFilter::kAll);
   for (const auto& peer : peers) {
     auto leader = peer->LeaderStatus() != consensus::LeaderStatus::NOT_LEADER;
@@ -277,9 +293,13 @@ bool QLStressTest::CheckRetryableRequestsCountsAndLeaders(
       *total_entries += tablet_entries;
       ++total_leaders;
     }
-    // Last write request could be rejected as duplicate, so followers would not be able to
-    // cleanup replicated requests.
-    if (request_counts.running != 0 || (leader && request_counts.replicated > replicated_limit)) {
+
+    // When duplicates detection is enabled, we use the global min running request id shared by
+    // all tablets for the client so that cleanup of requests on one tablet can be withheld by
+    // requests on a different tablet. The upper bound of residual requests is not deterministic.
+    if (request_counts.running != 0 ||
+        (!FLAGS_detect_duplicates_for_retryable_requests &&
+         leader && request_counts.replicated > 0)) {
       result = false;
     }
   }
@@ -356,7 +376,7 @@ void QLStressTest::TestRetryWrites(bool restarts) {
         }
 
         auto op = InsertRow(session, key, Format("value_$0", key));
-        auto flush_status = session->FlushAndGetOpsErrors();
+        auto flush_status = session->TEST_FlushAndGetOpsErrors();
         const auto& status = flush_status.status;
         if (status.ok()) {
           ASSERT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -476,7 +496,7 @@ TEST_F_EX(QLStressTest, Increment, QLStressTestIntValue) {
     auto* const req = op->mutable_request();
     QLAddInt32HashValue(req, kKey);
     table_.AddInt64ColumnValue(req, kValueColumn, 0);
-    ASSERT_OK(session->ApplyAndFlush(op));
+    ASSERT_OK(session->TEST_ApplyAndFlush(op));
     ASSERT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
 
@@ -499,7 +519,7 @@ TEST_F_EX(QLStressTest, Increment, QLStressTestIntValue) {
   }
 
   for (const auto& op : write_ops) {
-    ASSERT_OK(session->Apply(op));
+    session->Apply(op);
     futures.push_back(session->FlushFuture());
   }
 
@@ -687,7 +707,7 @@ TEST_F_EX(QLStressTest, OldLeaderCatchUpAfterNetworkPartition, QLStressTestSingl
     std::this_thread::sleep_for(5s * yb::kTimeMultiplier);
 
     tserver::MiniTabletServer* leader = nullptr;
-    for (int i = 0; i != cluster_->num_tablet_servers(); ++i) {
+    for (size_t i = 0; i != cluster_->num_tablet_servers(); ++i) {
       auto current = cluster_->mini_tablet_server(i);
       auto peers = current->server()->tablet_manager()->GetTabletPeers();
       ASSERT_EQ(peers.size(), 1);
@@ -743,7 +763,7 @@ TEST_F_EX(QLStressTest, SlowUpdateConsensus, QLStressTestSingleTablet) {
   down_cast<consensus::RaftConsensus*>(peers[0]->consensus())->TEST_DelayUpdate(0s);
 
   int64_t max_peak_consumption = 0;
-  for (int i = 1; i <= cluster_->num_tablet_servers(); ++i) {
+  for (size_t i = 1; i <= cluster_->num_tablet_servers(); ++i) {
     auto server_tracker = MemTracker::FindTracker(Format("server $0", i));
     auto call_tracker = MemTracker::FindTracker("Call", server_tracker);
     auto inbound_rpc_tracker = MemTracker::FindTracker("Inbound RPC", call_tracker);
@@ -869,7 +889,7 @@ void QLStressTest::TestWriteRejection() {
     last_keys_written_update_time = CoarseMonoClock::now();
 
     uint64_t total_rejections = 0;
-    for (int i = 0; i < cluster_->num_tablet_servers(); ++i) {
+    for (size_t i = 0; i < cluster_->num_tablet_servers(); ++i) {
       int64_t rejections = 0;
       auto peers = cluster_->mini_tablet_server(i)->server()->tablet_manager()->GetTabletPeers();
       for (const auto& peer : peers) {
@@ -966,8 +986,11 @@ TEST_F_EX(QLStressTest, LongRemoteBootstrap, QLStressTestLongRemoteBootstrap) {
 
     // Check that first log was garbage collected, so remote bootstrap will be required.
     consensus::ReplicateMsgs replicates;
+    int64_t starting_op_segment_seq_num;
+    yb::SchemaPB schema;
+    uint32_t schema_version;
     return !leaders.front()->log()->GetLogReader()->ReadReplicatesInRange(
-        100, 101, 0, &replicates).ok();
+        100, 101, 0, &replicates, &starting_op_segment_seq_num, &schema, &schema_version).ok();
   }, 30s, "Logs cleaned"));
 
   LOG(INFO) << "Bring replica back, keys written: " << key.load(std::memory_order_acquire);
@@ -1054,8 +1077,8 @@ TEST_F_EX(QLStressTest, DynamicCompactionPriority, QLStressDynamicCompactionPrio
       auto* const req = op->mutable_request();
       QLAddInt32HashValue(req, key);
       table_.AddStringColumnValue(req, kValueColumn, value);
-      ASSERT_OK(session->Apply(op));
-      ASSERT_OK(session->Flush());
+      session->Apply(op);
+      ASSERT_OK(session->TEST_Flush());
       ASSERT_OK(CheckOp(op.get()));
       std::this_thread::sleep_for(100ms);
       ++key;
@@ -1124,7 +1147,7 @@ TEST_F_EX(QLStressTest, SyncOldLeader, QLStressTestSingleTablet) {
   auto old_leader = ASSERT_RESULT(ServerWithLeaders(cluster_.get()));
   LOG(INFO) << "Isolate old leader: "
             << cluster_->mini_tablet_server(old_leader)->server()->permanent_uuid();
-  for (int i = 0; i != cluster_->num_tablet_servers(); ++i) {
+  for (size_t i = 0; i != cluster_->num_tablet_servers(); ++i) {
     if (i != old_leader) {
       ASSERT_OK(SetupConnectivity(cluster_.get(), i, old_leader, Connectivity::kOff));
     }
@@ -1149,7 +1172,7 @@ TEST_F_EX(QLStressTest, SyncOldLeader, QLStressTestSingleTablet) {
     peer->raft_consensus()->TEST_RejectMode(consensus::RejectMode::kNonEmpty);
   }
 
-  for (int i = 0; i != cluster_->num_tablet_servers(); ++i) {
+  for (size_t i = 0; i != cluster_->num_tablet_servers(); ++i) {
     if (i != old_leader) {
       ASSERT_OK(SetupConnectivity(cluster_.get(), i, old_leader, Connectivity::kOn));
     }

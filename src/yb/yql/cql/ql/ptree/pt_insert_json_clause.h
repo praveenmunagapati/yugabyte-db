@@ -15,17 +15,15 @@
 // Tree node definitions for INSERT INTO ... JSON clause.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_YQL_CQL_QL_PTREE_PT_INSERT_JSON_CLAUSE_H_
-#define YB_YQL_CQL_QL_PTREE_PT_INSERT_JSON_CLAUSE_H_
-
-#include "yb/yql/cql/ql/ptree/list_node.h"
-#include "yb/yql/cql/ql/ptree/tree_node.h"
-#include "yb/yql/cql/ql/ptree/pt_expr.h"
-#include "yb/yql/cql/ql/ptree/pt_dml.h"
-#include "yb/yql/cql/ql/ptree/pt_name.h"
+#pragma once
 
 #include <boost/optional.hpp>
 #include <rapidjson/document.h>
+
+#include "yb/util/status.h"
+
+#include "yb/yql/cql/ql/ptree/pt_dml.h"
+#include "yb/yql/cql/ql/ptree/tree_node.h"
 
 namespace yb {
 namespace ql {
@@ -38,8 +36,8 @@ class PTInsertJsonClause: public PTCollection {
 
   // Constructor and destructor.
   PTInsertJsonClause(MemoryContext* memctx,
-                     const YBLocation::SharedPtr& loc,
-                     const PTExpr::SharedPtr& json_expr,
+                     const YBLocationPtr& loc,
+                     const PTExprPtr& json_expr,
                      bool default_null);
   virtual ~PTInsertJsonClause();
 
@@ -55,13 +53,13 @@ class PTInsertJsonClause: public PTCollection {
   }
 
   // Node semantics analysis.
-  CHECKED_STATUS Analyze(SemContext* sem_context) override;
+  Status Analyze(SemContext* sem_context) override;
   void PrintSemanticAnalysisResult(SemContext* sem_context);
 
   // Initialize this clause with JSON string and parsed JSON document.
   // Note that you have to std::move the document here.
-  CHECKED_STATUS PreExecInit(const std::string& json_string,
-                             rapidjson::Document json_document) {
+  Status PreExecInit(const std::string& json_string,
+                     rapidjson::Document json_document) {
     DCHECK(!json_document_) << "Double call to PreExecInit!";
     DCHECK(json_document.IsObject()) << "Supplied JSON should be an object";
     json_document_ = std::move(json_document);
@@ -73,7 +71,7 @@ class PTInsertJsonClause: public PTCollection {
     return default_null_;
   }
 
-  const PTExpr::SharedPtr& Expr() const {
+  const PTExprPtr& Expr() const {
     return json_expr_;
   }
 
@@ -92,7 +90,7 @@ class PTInsertJsonClause: public PTCollection {
   bool                                 default_null_;
 
   // Expression representing raw JSON string, either a string constant or a bind variable.
-  const PTExpr::SharedPtr              json_expr_;
+  const PTExprPtr              json_expr_;
 
   // Raw JSON string, only available after being set via PreExecInit.
   std::string                          json_string_;
@@ -103,5 +101,3 @@ class PTInsertJsonClause: public PTCollection {
 
 }  // namespace ql
 }  // namespace yb
-
-#endif // YB_YQL_CQL_QL_PTREE_PT_INSERT_JSON_CLAUSE_H_

@@ -11,18 +11,22 @@
 // under the License.
 //
 
-#include <thread>
-
 #include <boost/circular_buffer.hpp>
 
+#include "yb/client/error.h"
 #include "yb/client/ql-dml-test-base.h"
+#include "yb/client/schema.h"
 #include "yb/client/session.h"
 #include "yb/client/table_alterer.h"
 #include "yb/client/table_handle.h"
+#include "yb/client/yb_op.h"
 
 #include "yb/common/ql_value.h"
+#include "yb/common/schema.h"
 
 #include "yb/master/master_util.h"
+
+#include "yb/rocksdb/db.h"
 
 #include "yb/tablet/tablet.h"
 #include "yb/tablet/tablet_peer.h"
@@ -33,21 +37,25 @@
 
 #include "yb/util/async_util.h"
 #include "yb/util/backoff_waiter.h"
-#include "yb/util/curl_util.h"
-#include "yb/util/jsonreader.h"
+#include "yb/util/format.h"
 #include "yb/util/random.h"
 #include "yb/util/random_util.h"
+#include "yb/util/status_format.h"
+#include "yb/util/status_log.h"
 #include "yb/util/tostring.h"
 #include "yb/util/tsan_util.h"
 
 #include "yb/yql/cql/ql/util/statement_result.h"
+
+using std::string;
+using std::vector;
 
 DECLARE_bool(mini_cluster_reuse_data);
 DECLARE_bool(rocksdb_disable_compactions);
 DECLARE_int32(yb_num_shards_per_tserver);
 DECLARE_int64(db_block_cache_size_bytes);
 DECLARE_bool(flush_rocksdb_on_shutdown);
-DECLARE_int32(max_stale_read_bound_time_ms);
+DECLARE_uint64(max_stale_read_bound_time_ms);
 
 using namespace std::literals;
 
@@ -160,14 +168,14 @@ class QLDmlTest : public QLDmlTestBase<MiniCluster> {
     QLAddStringRangeValue(req, r2);
     table_.AddInt32ColumnValue(req, "c1", c1);
     table_.AddStringColumnValue(req, "c2", c2);
-    CHECK_OK(session->Apply(op));
+    session->Apply(op);
     return op;
   }
 
-  void InsertRows(size_t num_rows) {
+  void InsertRows(int num_rows) {
     auto session = NewSession();
     boost::circular_buffer<std::future<FlushStatus>> futures(kInsertBatchSize);
-    for (size_t i = 0; i != num_rows; ++i) {
+    for (int i = 0; i != num_rows; ++i) {
       for (;;) {
         // Remove all the futures that are done.
         while (!futures.empty() && IsReady(futures.front())) {
@@ -205,7 +213,7 @@ class QLDmlTest : public QLDmlTestBase<MiniCluster> {
     table_.AddInt32Condition(condition, "r1", QL_OP_EQUAL, r1);
     table_.AddStringCondition(condition, "r2", QL_OP_EQUAL, r2);
     table_.AddColumns(columns, req);
-    EXPECT_OK(session->Apply(op));
+    session->Apply(op);
     return op;
   }
 
@@ -219,7 +227,7 @@ class QLDmlTest : public QLDmlTestBase<MiniCluster> {
   YBqlReadOpPtr SelectRow() {
     auto session = NewSession();
     auto result = SelectRow(session, kAllColumns, 1, "a", 2, "b");
-    EXPECT_OK(session->Flush());
+    EXPECT_OK(session->TEST_Flush());
     return result;
   }
 
@@ -227,7 +235,7 @@ class QLDmlTest : public QLDmlTestBase<MiniCluster> {
                            YBConsistencyLevel consistency_level = YBConsistencyLevel::STRONG) {
     auto op = SelectRow(session, kValueColumns, key);
     op->set_yb_consistency_level(consistency_level);
-    RETURN_NOT_OK(session->Flush());
+    RETURN_NOT_OK(session->TEST_Flush());
     if (op->response().status() != QLResponsePB::YQL_STATUS_OK) {
       return STATUS_FORMAT(
           RemoteError, "Read filed: $0", QLResponsePB::QLStatus_Name(op->response().status()));
@@ -246,11 +254,11 @@ class QLDmlTest : public QLDmlTestBase<MiniCluster> {
       int32 r1, const std::string& r2,
       int32 c1, const std::string& c2) {
     auto op = SelectRow(session, {"c1", "c2"}, h1, h2, r1, r2);
-    EXPECT_OK(session->Flush());
+    EXPECT_OK(session->TEST_Flush());
 
     VERIFY_EQ(QLResponsePB::YQL_STATUS_OK, op->response().status());
     auto rowblock = RowsResult(op.get()).GetRowBlock();
-    VERIFY_EQ(1, rowblock->row_count());
+    VERIFY_EQ(1U, rowblock->row_count());
     const auto& row = rowblock->row(0);
     VERIFY_EQ(c1, row.column(0).int32_value());
     VERIFY_EQ(c2, row.column(1).string_value());
@@ -271,7 +279,7 @@ TEST_F(QLDmlTest, TestInsertUpdateAndSelect) {
     // insert into t values (1, 'a', 2, 'b', 3, 'c');
     const YBSessionPtr session(NewSession());
     const YBqlWriteOpPtr op = InsertRow(session, 1, "a", 2, "b", 3, "c");
-    ASSERT_OK(session->Flush());
+    ASSERT_OK(session->TEST_Flush());
     ASSERT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
 
@@ -299,7 +307,7 @@ TEST_F(QLDmlTest, TestInsertUpdateAndSelect) {
     table_.AddInt32ColumnValue(req, "c1", 4);
     table_.AddStringColumnValue(req, "c2", "d");
     const YBSessionPtr session(NewSession());
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
@@ -309,7 +317,7 @@ TEST_F(QLDmlTest, TestInsertUpdateAndSelect) {
     // select c1, c2 from t where h1 = 1 and h2 = 'a' and r1 = 2 and r2 = 'b';
     const YBSessionPtr session = NewSession();
     const YBqlReadOpPtr op = SelectRow(session, {"c1", "c2"}, 1, "a", 2, "b");
-    EXPECT_OK(session->Flush());
+    EXPECT_OK(session->TEST_Flush());
 
     // Expect 4, 'd' returned
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -332,7 +340,7 @@ TEST_F(QLDmlTest, TestInsertWrongSchema) {
   // The request created has schema version 0 by default
   const YBqlWriteOpPtr op = InsertRow(session, 1, "a", 2, "b", 3, "c");
 
-  EXPECT_OK(session->Flush());
+  EXPECT_OK(session->TEST_Flush());
   EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_SCHEMA_VERSION_MISMATCH);
 }
 
@@ -359,7 +367,7 @@ class QLDmlRangeFilterBase: public QLDmlTest {
 size_t CountIterators(MiniCluster* cluster) {
   size_t result = 0;
 
-  for (int i = 0; i != cluster->num_tablet_servers(); ++i) {
+  for (size_t i = 0; i != cluster->num_tablet_servers(); ++i) {
     auto peers = cluster->mini_tablet_server(i)->server()->tablet_manager()->GetTabletPeers();
     for (const auto& peer : peers) {
       auto statistics = peer->tablet()->regulardb_statistics();
@@ -377,7 +385,7 @@ const std::string kHashStr = "all_records_have_same_id";
 } // namespace
 
 TEST_F_EX(QLDmlTest, RangeFilter, QLDmlRangeFilterBase) {
-  constexpr size_t kTotalLines = NonTsanVsTsan(25000ULL, 5000ULL);
+  constexpr int32_t kTotalLines = NonTsanVsTsan(25000ULL, 5000ULL);
   auto session = NewSession();
   if (!FLAGS_mini_cluster_reuse_data) {
     for(int32_t i = 0; i != kTotalLines;) {
@@ -388,17 +396,17 @@ TEST_F_EX(QLDmlTest, RangeFilter, QLDmlRangeFilterBase) {
                                           StrRangeFor(i),
                                           -i,
                                           RandomValueAt(i));
-      ASSERT_OK(session->Flush());
+      ASSERT_OK(session->TEST_Flush());
       ASSERT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
       ++i;
       if (i % 100 == 0) {
-        ASSERT_OK(session->Flush());
+        ASSERT_OK(session->TEST_Flush());
       }
       if (i % 5000 == 0) {
         LOG(WARNING) << "Inserted " << i << " rows";
       }
     }
-    ASSERT_OK(session->Flush());
+    ASSERT_OK(session->TEST_Flush());
     session = NewSession();
     LOG(WARNING) << "Finished creating DB";
     constexpr int32_t kProbeStep = 997;
@@ -452,7 +460,7 @@ TEST_F(QLDmlTest, TestInsertMultipleRows) {
     const YBqlWriteOpPtr op1 = InsertRow(session, 1, "a", 2, "b", 3, "c");
     const YBqlWriteOpPtr op2 = InsertRow(session, 1, "a", 2, "d", 4, "e");
 
-    CHECK_OK(session->Flush());
+    CHECK_OK(session->TEST_Flush());
     EXPECT_EQ(op1->response().status(), QLResponsePB::YQL_STATUS_OK);
     EXPECT_EQ(op2->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
@@ -471,7 +479,7 @@ TEST_F(QLDmlTest, TestInsertMultipleRows) {
     AddAllColumns(req);
 
     const YBSessionPtr session(NewSession());
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     // Expect 1, 'a', 2, 'b', 3, 'c' returned
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -486,7 +494,7 @@ TEST_F(QLDmlTest, TestInsertMultipleRows) {
     req->mutable_where_expr()->mutable_condition()->mutable_operands()->RemoveLast();
     table_.AddStringCondition(
        req->mutable_where_expr()->mutable_condition(), "r2", QL_OP_EQUAL, "d");
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     // Expect 1, 'a', 2, 'd', 4, 'e' returned
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -507,7 +515,7 @@ TEST_F(QLDmlTest, TestSelectMultipleRows) {
     const YBqlWriteOpPtr op1 = InsertRow(session, 1, "a", 2, "b", 3, "c");
     const YBqlWriteOpPtr op2 = InsertRow(session, 1, "a", 2, "d", 4, "e");
 
-    CHECK_OK(session->Flush());
+    CHECK_OK(session->TEST_Flush());
     EXPECT_EQ(op1->response().status(), QLResponsePB::YQL_STATUS_OK);
     EXPECT_EQ(op2->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
@@ -525,7 +533,7 @@ TEST_F(QLDmlTest, TestSelectMultipleRows) {
     table_.AddStringCondition(condition, "r2", QL_OP_EQUAL, "d");
     AddAllColumns(req);
 
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     // Expect 1, 'a', 2, 'b', 3, 'c' and 1, 'a', 2, 'd', 4, 'e' returned
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -551,7 +559,7 @@ TEST_F(QLDmlTest, TestSelectMultipleRows) {
     table_.AddStringCondition(condition, "r2", QL_OP_EQUAL, "d");
     AddAllColumns(req);
 
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     // Expect 1, 'a', 2, 'b', 3, 'c' and 1, 'a', 2, 'd', 4, 'e' returned
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -575,7 +583,7 @@ TEST_F(QLDmlTest, TestSelectWithoutConditionWithLimit) {
     for (int32_t i = 0; i < 100; i++) {
       ops.push_back(InsertRow(session, 1, "a", 2 + i, "b", 3 + i, "c"));
     }
-    EXPECT_OK(session->Flush());
+    EXPECT_OK(session->TEST_Flush());
     for (const auto& op : ops) {
       EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
     }
@@ -592,7 +600,7 @@ TEST_F(QLDmlTest, TestSelectWithoutConditionWithLimit) {
 
     req->set_limit(5);
     const YBSessionPtr session(NewSession());
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     // Expect 5 rows:
     //   1, 'a', 2, 'b', 3, 'c'
@@ -622,7 +630,7 @@ TEST_F(QLDmlTest, TestUpsert) {
     QLAddInt32RangeValue(req, 2);
     QLAddStringRangeValue(req, "b");
     table_.AddInt32ColumnValue(req, "c1", 3);
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
@@ -654,7 +662,7 @@ TEST_F(QLDmlTest, TestUpsert) {
     QLAddInt32RangeValue(req, 2);
     QLAddStringRangeValue(req, "b");
     table_.AddStringColumnValue(req, "c2", "c");
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
@@ -676,7 +684,7 @@ TEST_F(QLDmlTest, TestDelete) {
   {
     // insert into t values (1, 'a', 2, 'b', 3, 'c');
     const YBqlWriteOpPtr op = InsertRow(session, 1, "a", 2, "b", 3, "c");
-    ASSERT_OK(session->Flush());
+    ASSERT_OK(session->TEST_Flush());
     ASSERT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
 
@@ -690,7 +698,7 @@ TEST_F(QLDmlTest, TestDelete) {
     QLAddInt32RangeValue(req, 2);
     QLAddStringRangeValue(req, "b");
     table_.SetColumn(req->add_column_values(), "c1");
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
@@ -698,7 +706,7 @@ TEST_F(QLDmlTest, TestDelete) {
   {
     // select c1, c2 from t where h1 = 1 and h2 = 'a' and r1 = 2 and r2 = 'b';
     const YBqlReadOpPtr op = SelectRow(session, {"c1", "c2"}, 1, "a", 2, "b");
-    ASSERT_OK(session->Flush());
+    ASSERT_OK(session->TEST_Flush());
 
     // Expect null, 'c' returned
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -718,7 +726,7 @@ TEST_F(QLDmlTest, TestDelete) {
     QLAddStringHashValue(req, "a");
     QLAddInt32RangeValue(req, 2);
     QLAddStringRangeValue(req, "b");
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
@@ -726,7 +734,7 @@ TEST_F(QLDmlTest, TestDelete) {
   {
     // select c1, c2 from t where h1 = 1 and h2 = 'a' and r1 = 2 and r2 = 'b';
     const YBqlReadOpPtr op = SelectRow(session, {"c1", "c2"}, 1, "a", 2, "b");
-    ASSERT_OK(session->Flush());
+    ASSERT_OK(session->TEST_Flush());
 
     // Expect no row returned
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -740,7 +748,7 @@ TEST_F(QLDmlTest, TestConditionalInsert) {
   {
     // insert into t values (1, 'a', 2, 'b', 3, 'c');
     const YBqlWriteOpPtr op = InsertRow(session, 1, "a", 2, "b", 3, "c");
-    ASSERT_OK(session->Flush());
+    ASSERT_OK(session->TEST_Flush());
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
 
@@ -768,7 +776,7 @@ TEST_F(QLDmlTest, TestConditionalInsert) {
     table_.AddStringColumnValue(req, "c2", "d");
     auto* const condition = req->mutable_if_expr()->mutable_condition();
     condition->set_op(QL_OP_NOT_EXISTS);
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     // Expect not applied
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -776,7 +784,7 @@ TEST_F(QLDmlTest, TestConditionalInsert) {
     EXPECT_EQ(rowblock->row_count(), 1);
     const auto& row = rowblock->row(0);
     EXPECT_EQ(rowblock->schema().column(0).name(), "[applied]");
-    EXPECT_EQ(rowblock->schema().column(0).type_info()->type(), BOOL);
+    EXPECT_EQ(rowblock->schema().column(0).type_info()->type, BOOL);
     EXPECT_FALSE(row.column(0).bool_value());
   }
 
@@ -807,7 +815,7 @@ TEST_F(QLDmlTest, TestConditionalInsert) {
     table_.AddCondition(condition, QL_OP_NOT_EXISTS);
     table_.AddStringCondition(condition, "c2", QL_OP_EQUAL, "d");
     req->mutable_column_refs()->add_ids(table_.ColumnId("c2"));
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     // Expect not applied, return c2 = 'd'. Verify column names ("[applied]" and "c2") also.
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -816,17 +824,17 @@ TEST_F(QLDmlTest, TestConditionalInsert) {
     const auto& row = rowblock->row(0);
     EXPECT_EQ(rowblock->schema().num_columns(), 6);
     EXPECT_EQ(rowblock->schema().column(0).name(), "[applied]");
-    EXPECT_EQ(rowblock->schema().column(0).type_info()->type(), BOOL);
+    EXPECT_EQ(rowblock->schema().column(0).type_info()->type, BOOL);
     EXPECT_EQ(rowblock->schema().column(1).name(), "h1");
-    EXPECT_EQ(rowblock->schema().column(1).type_info()->type(), INT32);
+    EXPECT_EQ(rowblock->schema().column(1).type_info()->type, INT32);
     EXPECT_EQ(rowblock->schema().column(2).name(), "h2");
-    EXPECT_EQ(rowblock->schema().column(2).type_info()->type(), STRING);
+    EXPECT_EQ(rowblock->schema().column(2).type_info()->type, STRING);
     EXPECT_EQ(rowblock->schema().column(3).name(), "r1");
-    EXPECT_EQ(rowblock->schema().column(3).type_info()->type(), INT32);
+    EXPECT_EQ(rowblock->schema().column(3).type_info()->type, INT32);
     EXPECT_EQ(rowblock->schema().column(4).name(), "r2");
-    EXPECT_EQ(rowblock->schema().column(4).type_info()->type(), STRING);
+    EXPECT_EQ(rowblock->schema().column(4).type_info()->type, STRING);
     EXPECT_EQ(rowblock->schema().column(5).name(), "c2");
-    EXPECT_EQ(rowblock->schema().column(5).type_info()->type(), STRING);
+    EXPECT_EQ(rowblock->schema().column(5).type_info()->type, STRING);
     EXPECT_FALSE(row.column(0).bool_value());
     EXPECT_EQ(row.column(1).int32_value(), 1);
     EXPECT_EQ(row.column(2).string_value(), "a");
@@ -862,7 +870,7 @@ TEST_F(QLDmlTest, TestConditionalInsert) {
     table_.AddCondition(condition, QL_OP_NOT_EXISTS);
     table_.AddStringCondition(condition, "c2", QL_OP_EQUAL, "c");
     req->mutable_column_refs()->add_ids(table_.ColumnId("c2"));
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     // Expect applied
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -870,7 +878,7 @@ TEST_F(QLDmlTest, TestConditionalInsert) {
     EXPECT_EQ(rowblock->row_count(), 1);
     const auto& row = rowblock->row(0);
     EXPECT_EQ(rowblock->schema().column(0).name(), "[applied]");
-    EXPECT_EQ(rowblock->schema().column(0).type_info()->type(), BOOL);
+    EXPECT_EQ(rowblock->schema().column(0).type_info()->type, BOOL);
     EXPECT_TRUE(row.column(0).bool_value());
   }
 
@@ -889,7 +897,7 @@ TEST_F(QLDmlTest, TestConditionalInsert) {
     // Sanity check: test regular insert to override the old row.
     // insert into t values (1, 'a', 2, 'b', 5, 'e');
     const YBqlWriteOpPtr op = InsertRow(session, 1, "a", 2, "b", 5, "e");
-    ASSERT_OK(session->Flush());
+    ASSERT_OK(session->TEST_Flush());
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
 
@@ -910,7 +918,7 @@ TEST_F(QLDmlTest, TestConditionalUpdate) {
   {
     // insert into t values (1, 'a', 2, 'b', 3, 'c');
     const YBqlWriteOpPtr op = InsertRow(session, 1, "a", 2, "b", 3, "c");
-    ASSERT_OK(session->Flush());
+    ASSERT_OK(session->TEST_Flush());
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
 
@@ -937,7 +945,7 @@ TEST_F(QLDmlTest, TestConditionalUpdate) {
     table_.AddInt32ColumnValue(req, "c1", 6);
     auto* const condition = req->mutable_if_expr()->mutable_condition();
     condition->set_op(QL_OP_NOT_EXISTS);
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     // Expect not applied
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -945,7 +953,7 @@ TEST_F(QLDmlTest, TestConditionalUpdate) {
     EXPECT_EQ(rowblock->row_count(), 1);
     const auto& row = rowblock->row(0);
     EXPECT_EQ(rowblock->schema().column(0).name(), "[applied]");
-    EXPECT_EQ(rowblock->schema().column(0).type_info()->type(), BOOL);
+    EXPECT_EQ(rowblock->schema().column(0).type_info()->type, BOOL);
     EXPECT_FALSE(row.column(0).bool_value());
   }
 
@@ -972,7 +980,7 @@ TEST_F(QLDmlTest, TestConditionalUpdate) {
     table_.AddInt32ColumnValue(req, "c1", 6);
     auto* const condition = req->mutable_if_expr()->mutable_condition();
     condition->set_op(QL_OP_EXISTS);
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     // Expect applied
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -980,7 +988,7 @@ TEST_F(QLDmlTest, TestConditionalUpdate) {
     EXPECT_EQ(rowblock->row_count(), 1);
     const auto& row = rowblock->row(0);
     EXPECT_EQ(rowblock->schema().column(0).name(), "[applied]");
-    EXPECT_EQ(rowblock->schema().column(0).type_info()->type(), BOOL);
+    EXPECT_EQ(rowblock->schema().column(0).type_info()->type, BOOL);
     EXPECT_TRUE(row.column(0).bool_value());
   }
 
@@ -1001,7 +1009,7 @@ TEST_F(QLDmlTest, TestConditionalDelete) {
   {
     // insert into t values (1, 'a', 2, 'b', 3, 'c');
     const YBqlWriteOpPtr op = InsertRow(session, 1, "a", 2, "b", 3, "c");
-    ASSERT_OK(session->Flush());
+    ASSERT_OK(session->TEST_Flush());
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
 
@@ -1028,7 +1036,7 @@ TEST_F(QLDmlTest, TestConditionalDelete) {
     table_.SetColumn(req->add_column_values(), "c1");
     table_.SetInt32Condition(req->mutable_if_expr()->mutable_condition(), "c1", QL_OP_EQUAL, 4);
     req->mutable_column_refs()->add_ids(table_.ColumnId("c1"));
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     // Expect not applied, return c1 = 3. Verify column names also.
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -1037,17 +1045,17 @@ TEST_F(QLDmlTest, TestConditionalDelete) {
     const auto& row = rowblock->row(0);
     EXPECT_EQ(rowblock->schema().num_columns(), 6);
     EXPECT_EQ(rowblock->schema().column(0).name(), "[applied]");
-    EXPECT_EQ(rowblock->schema().column(0).type_info()->type(), BOOL);
+    EXPECT_EQ(rowblock->schema().column(0).type_info()->type, BOOL);
     EXPECT_EQ(rowblock->schema().column(1).name(), "h1");
-    EXPECT_EQ(rowblock->schema().column(1).type_info()->type(), INT32);
+    EXPECT_EQ(rowblock->schema().column(1).type_info()->type, INT32);
     EXPECT_EQ(rowblock->schema().column(2).name(), "h2");
-    EXPECT_EQ(rowblock->schema().column(2).type_info()->type(), STRING);
+    EXPECT_EQ(rowblock->schema().column(2).type_info()->type, STRING);
     EXPECT_EQ(rowblock->schema().column(3).name(), "r1");
-    EXPECT_EQ(rowblock->schema().column(3).type_info()->type(), INT32);
+    EXPECT_EQ(rowblock->schema().column(3).type_info()->type, INT32);
     EXPECT_EQ(rowblock->schema().column(4).name(), "r2");
-    EXPECT_EQ(rowblock->schema().column(4).type_info()->type(), STRING);
+    EXPECT_EQ(rowblock->schema().column(4).type_info()->type, STRING);
     EXPECT_EQ(rowblock->schema().column(5).name(), "c1");
-    EXPECT_EQ(rowblock->schema().column(5).type_info()->type(), INT32);
+    EXPECT_EQ(rowblock->schema().column(5).type_info()->type, INT32);
     EXPECT_FALSE(row.column(0).bool_value());
     EXPECT_EQ(row.column(1).int32_value(), 1);
     EXPECT_EQ(row.column(2).string_value(), "a");
@@ -1082,7 +1090,7 @@ TEST_F(QLDmlTest, TestConditionalDelete) {
     table_.AddCondition(condition, QL_OP_EXISTS);
     table_.AddInt32Condition(condition, "c1", QL_OP_EQUAL, 3);
     req->mutable_column_refs()->add_ids(table_.ColumnId("c1"));
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     // Expect applied
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -1090,7 +1098,7 @@ TEST_F(QLDmlTest, TestConditionalDelete) {
     EXPECT_EQ(rowblock->row_count(), 1);
     const auto& row = rowblock->row(0);
     EXPECT_EQ(rowblock->schema().column(0).name(), "[applied]");
-    EXPECT_EQ(rowblock->schema().column(0).type_info()->type(), BOOL);
+    EXPECT_EQ(rowblock->schema().column(0).type_info()->type, BOOL);
     EXPECT_TRUE(row.column(0).bool_value());
   }
 
@@ -1122,7 +1130,7 @@ TEST_F(QLDmlTest, TestConditionalDelete) {
     QLAddStringRangeValue(req, "c");
     auto* const condition = req->mutable_if_expr()->mutable_condition();
     condition->set_op(QL_OP_EXISTS);
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     // Expect not applied
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
@@ -1130,7 +1138,7 @@ TEST_F(QLDmlTest, TestConditionalDelete) {
     EXPECT_EQ(rowblock->row_count(), 1);
     const auto& row = rowblock->row(0);
     EXPECT_EQ(rowblock->schema().column(0).name(), "[applied]");
-    EXPECT_EQ(rowblock->schema().column(0).type_info()->type(), BOOL);
+    EXPECT_EQ(rowblock->schema().column(0).type_info()->type, BOOL);
     EXPECT_FALSE(row.column(0).bool_value());
   }
 }
@@ -1147,7 +1155,7 @@ TEST_F(QLDmlTest, TestError) {
     QLAddStringRangeValue(req, "b");
     table_.AddInt32ColumnValue(req, "c1", 3);
     table_.AddStringColumnValue(req, "c2", "c");
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
@@ -1164,7 +1172,7 @@ TEST_F(QLDmlTest, TestError) {
     table_.AddStringCondition(condition, "r2", QL_OP_NOT_EQUAL, "b");
     table_.AddColumns({"c1", "c2"}, req);
 
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
 
     // Expect values not comparable error.
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_RUNTIME_ERROR);
@@ -1182,7 +1190,7 @@ TEST_F(QLDmlTest, TestSimultaneousReadAndWrite) {
     if (i > 0) {
       read_op = SelectRow(session, { "c1", "c2" }, 1, "a", i - 1, "b");
     }
-    ASSERT_OK(session->Flush());
+    ASSERT_OK(session->TEST_Flush());
     ASSERT_EQ(QLResponsePB::YQL_STATUS_OK, write_op->response().status());
     if (read_op) {
       ASSERT_EQ(QLResponsePB::YQL_STATUS_OK, read_op->response().status());
@@ -1224,9 +1232,9 @@ TEST_F(QLDmlTest, OpenRecentlyCreatedTable) {
       auto* const req = op->mutable_request();
       QLAddInt32HashValue(req, k);
       table.AddInt32ColumnValue(req, "v", -k);
-      ASSERT_OK(session->Apply(op));
+      session->Apply(op);
     }
-    ASSERT_OK(session->Flush());
+    ASSERT_OK(session->TEST_Flush());
     table_creation_thread.join();
   }
 }
@@ -1240,7 +1248,7 @@ TEST_F(QLDmlTest, ReadFollower) {
 
   auto must_see_all_rows_after_this_deadline = MonoTime::Now() + 5s * kTimeMultiplier;
   auto session = NewSession();
-  for (size_t i = 0; i != kNumRows; ++i) {
+  for (int i = 0; i != kNumRows; ++i) {
     for (;;) {
       auto row = ReadRow(session, KeyForIndex(i), YBConsistencyLevel::CONSISTENT_PREFIX);
       if (!row.ok() && row.status().IsNotFound()) {
@@ -1255,7 +1263,7 @@ TEST_F(QLDmlTest, ReadFollower) {
 
   LOG(INFO) << "All rows were read successfully";
 
-  for (int i = 0; i != cluster_->num_tablet_servers(); ++i) {
+  for (size_t i = 0; i != cluster_->num_tablet_servers(); ++i) {
     cluster_->mini_tablet_server(i)->Shutdown();
   }
 
@@ -1269,7 +1277,7 @@ TEST_F(QLDmlTest, ReadFollower) {
 
   // Check that after restart we don't miss any rows.
   std::vector<size_t> missing_rows;
-  for (size_t i = 0; i != kNumRows; ++i) {
+  for (int i = 0; i != kNumRows; ++i) {
     auto row = ReadRow(session, KeyForIndex(i), YBConsistencyLevel::CONSISTENT_PREFIX);
     if (!row.ok() && row.status().IsNotFound()) {
       missing_rows.push_back(i);
@@ -1288,7 +1296,7 @@ TEST_F(QLDmlTest, DeletePartialRangeKey) {
 
   {
     auto op = InsertRow(session, row_key, {3, "c"});
-    ASSERT_OK(session->Flush());
+    ASSERT_OK(session->TEST_Flush());
     ASSERT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
 
@@ -1298,7 +1306,7 @@ TEST_F(QLDmlTest, DeletePartialRangeKey) {
     QLAddInt32HashValue(req, row_key.h1);
     QLAddStringHashValue(req, row_key.h2);
     QLAddInt32RangeValue(req, row_key.r1);
-    CHECK_OK(session->ApplyAndFlush(op));
+    CHECK_OK(session->TEST_ApplyAndFlush(op));
     EXPECT_EQ(op->response().status(), QLResponsePB::YQL_STATUS_OK);
   }
 

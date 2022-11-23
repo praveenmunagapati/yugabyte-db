@@ -9,15 +9,17 @@
 # https://github.com/YugaByte/yugabyte-db/blob/master/licenses/POLYFORM-FREE-TRIAL-LICENSE-1.0.0.txt
 
 import json
+import logging
 
 from ybops.cloud.common.method import (AbstractInstancesMethod, AbstractAccessMethod,
-                                       AbstractMethod,
+                                       AbstractMethod, UpdateMountedDisksMethod,
                                        ChangeInstanceTypeMethod, CreateInstancesMethod,
                                        CreateRootVolumesMethod, DestroyInstancesMethod,
-                                       ProvisionInstancesMethod, ReplaceRootVolumeMethod)
+                                       ProvisionInstancesMethod, ReplaceRootVolumeMethod,
+                                       DeleteRootVolumesMethod)
 from ybops.cloud.gcp.utils import GCP_PERSISTENT, GCP_SCRATCH
 from ybops.common.exceptions import YBOpsRuntimeError, get_exception_message
-from ybops.utils import format_rsa_key, validated_key_file
+from ybops.utils.ssh import format_rsa_key, validated_key_file, get_ssh_host_port, DEFAULT_SSH_PORT
 
 
 class GcpReplaceRootVolumeMethod(ReplaceRootVolumeMethod):
@@ -32,7 +34,7 @@ class GcpReplaceRootVolumeMethod(ReplaceRootVolumeMethod):
 
     def _host_info_with_current_root_volume(self, args, host_info):
         args.private_ip = host_info["private_ip"]
-        return (args, host_info["root_volume_device_name"])
+        return (vars(args), host_info["root_volume_device_name"])
 
 
 class GcpCreateInstancesMethod(CreateInstancesMethod):
@@ -80,19 +82,18 @@ class GcpProvisionInstancesMethod(ProvisionInstancesMethod):
 
     def add_extra_args(self):
         super(GcpProvisionInstancesMethod, self).add_extra_args()
-        self.parser.add_argument("--use_chrony", action="store_true",
-                                 help="Whether to use chrony instead of NTP.")
         self.parser.add_argument("--volume_type", choices=[GCP_SCRATCH, GCP_PERSISTENT],
                                  default="scratch", help="Storage type for GCP instances.")
 
     def update_ansible_vars_with_args(self, args):
         super(GcpProvisionInstancesMethod, self).update_ansible_vars_with_args(args)
-        self.extra_vars["use_chrony"] = args.use_chrony
         self.extra_vars["device_names"] = self.cloud.get_device_names(args)
         self.extra_vars["mount_points"] = self.cloud.get_mount_points_csv(args)
 
 
 class GcpCreateRootVolumesMethod(CreateRootVolumesMethod):
+    """Subclass for creating root volumes in GCP.
+    """
     def __init__(self, base_command):
         super(GcpCreateRootVolumesMethod, self).__init__(base_command)
         self.create_method = GcpCreateInstancesMethod(base_command)
@@ -112,6 +113,16 @@ class GcpCreateRootVolumesMethod(CreateRootVolumesMethod):
             args.region, args.zone, name, has_static_ip=args.assign_static_public_ip)
 
 
+class GcpDeleteRootVolumesMethod(DeleteRootVolumesMethod):
+    """Subclass for deleting root volumes in GCP.
+    """
+    def __init__(self, base_command):
+        super(GcpDeleteRootVolumesMethod, self).__init__(base_command)
+
+    def delete_volumes(self, args):
+        self.cloud.delete_volumes(args)
+
+
 class GcpDestroyInstancesMethod(DestroyInstancesMethod):
     """Subclass for deleting instances in GCP. Uses the API to delete instance bypassing Ansible.
     """
@@ -120,7 +131,8 @@ class GcpDestroyInstancesMethod(DestroyInstancesMethod):
         super(GcpDestroyInstancesMethod, self).__init__(base_command)
 
     def callback(self, args):
-        self.cloud.delete_instance(args)
+        filters = "((status = \"RUNNING\") OR (status = \"TERMINATED\"))"
+        self.cloud.delete_instance(args, filters=filters)
 
 
 class GcpQueryRegionsMethod(AbstractMethod):
@@ -169,8 +181,6 @@ class GcpQueryInstanceTypesMethod(AbstractMethod):
         self.parser.add_argument("--regions", nargs='+')
         self.parser.add_argument("--custom_payload", required=False,
                                  help="JSON payload of per-region data.")
-        self.parser.add_argument("--gcp_internal", action="store_true", default=False,
-                                 help="display internal testing instance types")
 
     def callback(self, args):
         print(json.dumps(self.cloud.get_instance_types(args)))
@@ -288,7 +298,7 @@ class GcpChangeInstanceTypeMethod(ChangeInstanceTypeMethod):
 
     def _host_info(self, args, host_info):
         args.private_ip = host_info["private_ip"]
-        return args
+        return vars(args)
 
 
 class GcpResumeInstancesMethod(AbstractInstancesMethod):
@@ -301,7 +311,7 @@ class GcpResumeInstancesMethod(AbstractInstancesMethod):
                                  help="The ip of the instance to resume.")
 
     def callback(self, args):
-        self.cloud.start_instance(args, args.custom_ssh_port)
+        self.cloud.start_instance(vars(args), [args.custom_ssh_port])
 
 
 class GcpPauseInstancesMethod(AbstractInstancesMethod):
@@ -314,4 +324,53 @@ class GcpPauseInstancesMethod(AbstractInstancesMethod):
                                  help="The ip of the instance to pause.")
 
     def callback(self, args):
-        self.cloud.stop_instance(args)
+        self.cloud.stop_instance(vars(args))
+
+
+class GcpHardRebootInstancesMethod(AbstractInstancesMethod):
+    def __init__(self, base_command):
+        super(GcpHardRebootInstancesMethod, self).__init__(base_command, "hard_reboot")
+
+    def add_extra_args(self):
+        super(GcpHardRebootInstancesMethod, self).add_extra_args()
+
+    def callback(self, args):
+        instance = self.cloud.get_host_info(args)
+        if not instance:
+            raise YBOpsRuntimeError("Could not find host {} to hard reboot".format(
+                args.search_pattern))
+        host_info = vars(args)
+        host_info.update(instance)
+        instance_state = host_info['instance_state']
+        if instance_state not in ('RUNNING', 'STOPPING', 'TERMINATED', 'PROVISIONING', 'STAGING'):
+            raise YBOpsRuntimeError("Instance is in invalid state '{}' for attempting a hard reboot"
+                                    .format(instance_state))
+        if instance_state in ('RUNNING', 'STOPPING'):
+            logging.info("Stopping instance {}".format(args.search_pattern))
+            self.cloud.stop_instance(host_info)
+        logging.info("Starting instance {}".format(args.search_pattern))
+        extra_vars = get_ssh_host_port(host_info, args.custom_ssh_port)
+        self.cloud.start_instance(host_info, [DEFAULT_SSH_PORT, extra_vars["ssh_port"]])
+
+
+class GcpUpdateMountedDisksMethod(UpdateMountedDisksMethod):
+    def __init__(self, base_command):
+        super(GcpUpdateMountedDisksMethod, self).__init__(base_command)
+
+    def add_extra_args(self):
+        super(GcpUpdateMountedDisksMethod, self).add_extra_args()
+        self.parser.add_argument("--volume_type", choices=[GCP_SCRATCH, GCP_PERSISTENT],
+                                 default="scratch", help="Storage type for GCP instances.")
+
+
+class GcpTagsMethod(AbstractInstancesMethod):
+    def __init__(self, base_command):
+        super(GcpTagsMethod, self).__init__(base_command, "tags")
+
+    def add_extra_args(self):
+        super(GcpTagsMethod, self).add_extra_args()
+        self.parser.add_argument("--remove_tags", required=False,
+                                 help="Tag keys to remove.")
+
+    def callback(self, args):
+        self.cloud.modify_tags(args)

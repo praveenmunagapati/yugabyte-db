@@ -23,7 +23,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#ifndef ROCKSDB_LITE
 
 #include <algorithm>
 #include <set>
@@ -48,15 +47,17 @@
 #include "yb/rocksdb/util/hash.h"
 #include "yb/rocksdb/util/logging.h"
 #include "yb/rocksdb/util/mutexlock.h"
-#include "yb/util/string_util.h"
 #include "yb/rocksdb/util/testharness.h"
 #include "yb/rocksdb/util/testutil.h"
 #include "yb/rocksdb/utilities/merge_operators.h"
 
+#include "yb/util/string_util.h"
+#include "yb/util/test_util.h"
+
 using std::unique_ptr;
 
 namespace rocksdb {
-class PlainTableKeyDecoderTest : public testing::Test {};
+class PlainTableKeyDecoderTest : public RocksDBTest {};
 
 TEST_F(PlainTableKeyDecoderTest, ReadNonMmap) {
   std::string tmp;
@@ -110,7 +111,7 @@ TEST_F(PlainTableKeyDecoderTest, ReadNonMmap) {
   }
 }
 
-class PlainTableDBTest : public testing::Test,
+class PlainTableDBTest : public RocksDBTest,
                          public testing::WithParamInterface<bool> {
  protected:
  private:
@@ -437,14 +438,14 @@ TEST_P(PlainTableDBTest, Flush) {
           ASSERT_OK(Put("1000000000000foo", "v1"));
           ASSERT_OK(Put("0000000000000bar", "v2"));
           ASSERT_OK(Put("1000000000000foo", "v3"));
-          dbfull()->TEST_FlushMemTable();
+          ASSERT_OK(dbfull()->TEST_FlushMemTable());
 
           ASSERT_TRUE(dbfull()->GetIntProperty(
               "rocksdb.estimate-table-readers-mem", &int_num));
           ASSERT_GT(int_num, 0U);
 
           TablePropertiesCollection ptc;
-          reinterpret_cast<DB*>(dbfull())->GetPropertiesOfAllTables(&ptc);
+          ASSERT_OK(reinterpret_cast<DB*>(dbfull())->GetPropertiesOfAllTables(&ptc));
           ASSERT_EQ(1U, ptc.size());
           auto row = ptc.begin();
           auto tp = row->second;
@@ -512,23 +513,23 @@ TEST_P(PlainTableDBTest, Flush2) {
         DestroyAndReopen(&options);
         ASSERT_OK(Put("0000000000000bar", "b"));
         ASSERT_OK(Put("1000000000000foo", "v1"));
-        dbfull()->TEST_FlushMemTable();
+        ASSERT_OK(dbfull()->TEST_FlushMemTable());
 
         ASSERT_OK(Put("1000000000000foo", "v2"));
-        dbfull()->TEST_FlushMemTable();
+        ASSERT_OK(dbfull()->TEST_FlushMemTable());
         ASSERT_EQ("v2", Get("1000000000000foo"));
 
         ASSERT_OK(Put("0000000000000eee", "v3"));
-        dbfull()->TEST_FlushMemTable();
+        ASSERT_OK(dbfull()->TEST_FlushMemTable());
         ASSERT_EQ("v3", Get("0000000000000eee"));
 
         ASSERT_OK(Delete("0000000000000bar"));
-        dbfull()->TEST_FlushMemTable();
+        ASSERT_OK(dbfull()->TEST_FlushMemTable());
         ASSERT_EQ("NOT_FOUND", Get("0000000000000bar"));
 
         ASSERT_OK(Put("0000000000000eee", "v5"));
         ASSERT_OK(Put("9000000000000eee", "v5"));
-        dbfull()->TEST_FlushMemTable();
+        ASSERT_OK(dbfull()->TEST_FlushMemTable());
         ASSERT_EQ("v5", Get("0000000000000eee"));
 
         // Test Bloom Filter
@@ -600,7 +601,7 @@ TEST_P(PlainTableDBTest, Iterator) {
         ASSERT_OK(Put("1000000000foo005", "v__5"));
         ASSERT_OK(Put("1000000000foo007", "v__7"));
         ASSERT_OK(Put("1000000000foo008", "v__8"));
-        dbfull()->TEST_FlushMemTable();
+        ASSERT_OK(dbfull()->TEST_FlushMemTable());
         ASSERT_EQ("v1", Get("1000000000foo001"));
         ASSERT_EQ("v__3", Get("1000000000foo003"));
         Iterator* iter = dbfull()->NewIterator(ReadOptions());
@@ -711,7 +712,7 @@ TEST_P(PlainTableDBTest, IteratorLargeKeys) {
     ASSERT_OK(Put(key_list[i], ToString(i)));
   }
 
-  dbfull()->TEST_FlushMemTable();
+  ASSERT_OK(dbfull()->TEST_FlushMemTable());
 
   Iterator* iter = dbfull()->NewIterator(ReadOptions());
   iter->Seek(key_list[0]);
@@ -759,7 +760,7 @@ TEST_P(PlainTableDBTest, IteratorLargeKeysWithPrefix) {
     ASSERT_OK(Put(key_list[i], ToString(i)));
   }
 
-  dbfull()->TEST_FlushMemTable();
+  ASSERT_OK(dbfull()->TEST_FlushMemTable());
 
   Iterator* iter = dbfull()->NewIterator(ReadOptions());
   iter->Seek(key_list[0]);
@@ -794,7 +795,7 @@ TEST_P(PlainTableDBTest, IteratorReverseSuffixComparator) {
   ASSERT_OK(Put("1000000000foo005", "v__5"));
   ASSERT_OK(Put("1000000000foo007", "v__7"));
   ASSERT_OK(Put("1000000000foo008", "v__8"));
-  dbfull()->TEST_FlushMemTable();
+  ASSERT_OK(dbfull()->TEST_FlushMemTable());
   ASSERT_EQ("v1", Get("1000000000foo001"));
   ASSERT_EQ("v__3", Get("1000000000foo003"));
   Iterator* iter = dbfull()->NewIterator(ReadOptions());
@@ -872,7 +873,7 @@ TEST_P(PlainTableDBTest, HashBucketConflict) {
       ASSERT_OK(Put("2000000000000fo2", "v"));
       ASSERT_OK(Put("2000000000000fo3", "v"));
 
-      dbfull()->TEST_FlushMemTable();
+      ASSERT_OK(dbfull()->TEST_FlushMemTable());
 
       ASSERT_EQ("v1", Get("5000000000000fo0"));
       ASSERT_EQ("v2", Get("5000000000000fo1"));
@@ -966,7 +967,7 @@ TEST_P(PlainTableDBTest, HashBucketConflictReverseSuffixComparator) {
       ASSERT_OK(Put("2000000000000fo2", "v"));
       ASSERT_OK(Put("2000000000000fo3", "v"));
 
-      dbfull()->TEST_FlushMemTable();
+      ASSERT_OK(dbfull()->TEST_FlushMemTable());
 
       ASSERT_EQ("v1", Get("5000000000000fo0"));
       ASSERT_EQ("v2", Get("5000000000000fo1"));
@@ -1048,7 +1049,7 @@ TEST_P(PlainTableDBTest, NonExistingKeyToNonEmptyBucket) {
   ASSERT_OK(Put("5000000000000fo1", "v2"));
   ASSERT_OK(Put("5000000000000fo2", "v3"));
 
-  dbfull()->TEST_FlushMemTable();
+  ASSERT_OK(dbfull()->TEST_FlushMemTable());
 
   ASSERT_EQ("v1", Get("5000000000000fo0"));
   ASSERT_EQ("v2", Get("5000000000000fo1"));
@@ -1099,7 +1100,7 @@ TEST_P(PlainTableDBTest, CompactionTrigger) {
       ASSERT_OK(Put(Key(i), values[i]));
     }
     ASSERT_OK(Put(Key(999), ""));
-    dbfull()->TEST_WaitForFlushMemTable();
+    ASSERT_OK(dbfull()->TEST_WaitForFlushMemTable());
     ASSERT_EQ(NumTableFilesAtLevel(0), num + 1);
   }
 
@@ -1110,7 +1111,7 @@ TEST_P(PlainTableDBTest, CompactionTrigger) {
     ASSERT_OK(Put(Key(i), values[i]));
   }
   ASSERT_OK(Put(Key(999), ""));
-  dbfull()->TEST_WaitForCompact();
+  ASSERT_OK(dbfull()->TEST_WaitForCompact());
 
   ASSERT_EQ(NumTableFilesAtLevel(0), 0);
   ASSERT_EQ(NumTableFilesAtLevel(1), 1);
@@ -1126,7 +1127,7 @@ TEST_P(PlainTableDBTest, AdaptiveTable) {
   ASSERT_OK(Put("1000000000000foo", "v1"));
   ASSERT_OK(Put("0000000000000bar", "v2"));
   ASSERT_OK(Put("1000000000000foo", "v3"));
-  dbfull()->TEST_FlushMemTable();
+  ASSERT_OK(dbfull()->TEST_FlushMemTable());
 
   options.create_if_missing = false;
   std::shared_ptr<TableFactory> dummy_factory;
@@ -1140,7 +1141,7 @@ TEST_P(PlainTableDBTest, AdaptiveTable) {
 
   ASSERT_OK(Put("2000000000000foo", "v4"));
   ASSERT_OK(Put("3000000000000bar", "v5"));
-  dbfull()->TEST_FlushMemTable();
+  ASSERT_OK(dbfull()->TEST_FlushMemTable());
   ASSERT_EQ("v4", Get("2000000000000foo"));
   ASSERT_EQ("v5", Get("3000000000000bar"));
 
@@ -1167,13 +1168,3 @@ int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
-
-#else
-#include <stdio.h>
-
-int main(int argc, char** argv) {
-  fprintf(stderr, "SKIPPED as plain table is not supported in ROCKSDB_LITE\n");
-  return 0;
-}
-
-#endif  // !ROCKSDB_LITE

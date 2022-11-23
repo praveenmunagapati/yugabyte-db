@@ -10,13 +10,13 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-
 #include "yb/util/fast_varint.h"
 
-#include "yb/util/bytes_formatter.h"
-#include "yb/util/debug/leakcheck_disabler.h"
+#include <array>
+
 #include "yb/util/cast.h"
-#include "yb/util/debug-util.h"
+#include "yb/util/result.h"
+#include "yb/util/status_format.h"
 
 using std::string;
 
@@ -251,7 +251,7 @@ Result<int64_t> FastDecodeSignedVarIntUnsafe(Slice* slice) {
 
 Status FastDecodeSignedVarIntUnsafe(const std::string& encoded, int64_t* v, size_t* decoded_size) {
   return FastDecodeSignedVarIntUnsafe(
-      util::to_uchar_ptr(encoded.c_str()), encoded.size(), v, decoded_size);
+      to_uchar_ptr(encoded.c_str()), encoded.size(), v, decoded_size);
 }
 
 Status FastDecodeDescendingSignedVarIntUnsafe(yb::Slice *slice, int64_t *dest) {
@@ -277,19 +277,8 @@ size_t UnsignedVarIntLength(uint64_t v) {
   return result;
 }
 
-void FastAppendUnsignedVarIntToStr(uint64_t v, std::string* dest) {
-  char buf[kMaxVarIntBufferSize];
-  size_t len = 0;
-  FastEncodeUnsignedVarInt(v, to_uchar_ptr(buf), &len);
-  DCHECK_LE(len, 10);
-  dest->append(buf, len);
-}
-
-void FastEncodeUnsignedVarInt(uint64_t v, uint8_t *dest, size_t *size) {
+size_t FastEncodeUnsignedVarInt(uint64_t v, uint8_t *dest) {
   const size_t n = UnsignedVarIntLength(v);
-  if (size)
-    *size = n;
-
   size_t i;
   if (n == 10) {
     dest[0] = 0xff;
@@ -311,9 +300,10 @@ void FastEncodeUnsignedVarInt(uint64_t v, uint8_t *dest, size_t *size) {
   for (; i < n; ++i) {
     dest[i] = v >> (8 * (n - 1 - i));
   }
+  return n;
 }
 
-CHECKED_STATUS FastDecodeUnsignedVarInt(
+Status FastDecodeUnsignedVarInt(
     const uint8_t* src, size_t src_size, uint64_t* v, size_t* decoded_size) {
   if (src_size == 0) {
     return STATUS(Corruption, "Cannot decode a variable-length integer of zero size");
@@ -332,7 +322,7 @@ CHECKED_STATUS FastDecodeUnsignedVarInt(
   }
 
   uint64_t result = 0;
-  int i = 0;
+  size_t i = 0;
   if (n_bytes == 9) {
     if (src[1] & 0x80) {
       n_bytes = 10;

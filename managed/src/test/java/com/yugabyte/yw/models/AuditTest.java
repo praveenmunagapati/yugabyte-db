@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableMap;
 import com.yugabyte.yw.common.FakeDBApplication;
 import com.yugabyte.yw.common.ModelFactory;
 import com.yugabyte.yw.common.audit.AuditService;
+import com.yugabyte.yw.models.extended.UserWithFeatures;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -46,7 +47,7 @@ public class AuditTest extends FakeDBApplication {
     customer = ModelFactory.testCustomer("tc1", "Test Customer 1");
     user = ModelFactory.testUser(customer);
     Map<String, String> flashData = Collections.emptyMap();
-    Map<String, Object> argData = ImmutableMap.of("user", user);
+    Map<String, Object> argData = ImmutableMap.of("user", new UserWithFeatures().setUser(user));
     request = mock(Http.Request.class);
     Long id = 2L;
     play.api.mvc.RequestHeader header = mock(play.api.mvc.RequestHeader.class);
@@ -58,7 +59,7 @@ public class AuditTest extends FakeDBApplication {
   }
 
   public Audit createEntry(UUID taskUUID, Users user) {
-    return Audit.create(user.uuid, user.customerUUID, "/test/api/call", "PUT", null, taskUUID);
+    return Audit.create(user, "/test/api/call", "PUT", null, null, null, null, taskUUID, null);
   }
 
   @Test
@@ -80,8 +81,12 @@ public class AuditTest extends FakeDBApplication {
     List<Audit> entries = Audit.getAll(customer.uuid);
     assertEquals(entries.size(), 1);
     assertEquals(entries.get(0).getUserUUID(), user.uuid);
+    assertEquals(entries.get(0).getUserEmail(), user.email);
     assertEquals(entries.get(0).getApiCall(), "/api/customer/test/universe/test");
     assertEquals(entries.get(0).getApiMethod(), "PUT");
+    assertNull(entries.get(0).getTarget());
+    assertNull(entries.get(0).getTargetID());
+    assertNull(entries.get(0).getAction());
     assertNull(entries.get(0).getTaskUUID());
     assertNull(entries.get(0).getPayload());
     assertNotNull(entries.get(0).getTimestamp());
@@ -94,9 +99,33 @@ public class AuditTest extends FakeDBApplication {
     List<Audit> entries = Audit.getAll(customer.uuid);
     assertEquals(entries.size(), 1);
     assertEquals(entries.get(0).getUserUUID(), user.uuid);
+    assertEquals(entries.get(0).getUserEmail(), user.email);
     assertEquals(entries.get(0).getApiCall(), "/api/customer/test/universe/test");
     assertEquals(entries.get(0).getApiMethod(), "PUT");
+    assertNull(entries.get(0).getTarget());
+    assertNull(entries.get(0).getTargetID());
+    assertNull(entries.get(0).getAction());
     assertEquals(entries.get(0).getTaskUUID(), randUUID);
+    assertNull(entries.get(0).getPayload());
+    assertNotNull(entries.get(0).getTimestamp());
+  }
+
+  @Test
+  public void testCreateAuditEntryWithTargetAndAction() {
+    Audit.TargetType target = Audit.TargetType.Universe;
+    String targetID = "Test TargetID";
+    Audit.ActionType action = Audit.ActionType.Create;
+    auditService.createAuditEntry(context, request, target, targetID, action);
+    List<Audit> entries = Audit.getAll(customer.uuid);
+    assertEquals(entries.size(), 1);
+    assertEquals(entries.get(0).getUserUUID(), user.uuid);
+    assertEquals(entries.get(0).getUserEmail(), user.email);
+    assertEquals(entries.get(0).getApiCall(), "/api/customer/test/universe/test");
+    assertEquals(entries.get(0).getApiMethod(), "PUT");
+    assertEquals(entries.get(0).getTarget(), target);
+    assertEquals(entries.get(0).getTargetID(), targetID);
+    assertEquals(entries.get(0).getAction(), action);
+    assertNull(entries.get(0).getTaskUUID());
     assertNull(entries.get(0).getPayload());
     assertNotNull(entries.get(0).getTimestamp());
   }
@@ -117,8 +146,12 @@ public class AuditTest extends FakeDBApplication {
     List<Audit> entries = Audit.getAll(customer.uuid);
     assertEquals(entries.size(), 1);
     assertEquals(entries.get(0).getUserUUID(), user.uuid);
+    assertEquals(entries.get(0).getUserEmail(), user.email);
     assertEquals(entries.get(0).getApiCall(), "/api/customer/test/universe/test");
     assertEquals(entries.get(0).getApiMethod(), "PUT");
+    assertNull(entries.get(0).getTarget());
+    assertNull(entries.get(0).getTargetID());
+    assertNull(entries.get(0).getAction());
     assertNull(entries.get(0).getTaskUUID());
     assertEquals(entries.get(0).getPayload(), expectedPayload);
     assertNotNull(entries.get(0).getTimestamp());
@@ -132,10 +165,60 @@ public class AuditTest extends FakeDBApplication {
     List<Audit> entries = Audit.getAll(customer.uuid);
     assertEquals(entries.size(), 1);
     assertEquals(entries.get(0).getUserUUID(), user.uuid);
+    assertEquals(entries.get(0).getUserEmail(), user.email);
     assertEquals(entries.get(0).getApiCall(), "/api/customer/test/universe/test");
     assertEquals(entries.get(0).getApiMethod(), "PUT");
+    assertNull(entries.get(0).getTarget());
+    assertNull(entries.get(0).getTargetID());
+    assertNull(entries.get(0).getAction());
     assertEquals(entries.get(0).getTaskUUID(), randUUID);
     assertEquals(entries.get(0).getPayload(), testPayload);
+    assertNotNull(entries.get(0).getTimestamp());
+  }
+
+  @Test
+  public void testCreateAuditEntryWithPayloadAndTargetAndAction() {
+    ObjectNode testPayload = Json.newObject().put("foo", "bar").put("abc", "xyz");
+    Audit.TargetType target = Audit.TargetType.Universe;
+    String targetID = "Test TargetID";
+    Audit.ActionType action = Audit.ActionType.Create;
+    auditService.createAuditEntry(context, request, target, targetID, action, testPayload);
+    List<Audit> entries = Audit.getAll(customer.uuid);
+    assertEquals(entries.size(), 1);
+    assertEquals(entries.get(0).getUserUUID(), user.uuid);
+    assertEquals(entries.get(0).getUserEmail(), user.email);
+    assertEquals(entries.get(0).getApiCall(), "/api/customer/test/universe/test");
+    assertEquals(entries.get(0).getApiMethod(), "PUT");
+    assertEquals(entries.get(0).getTarget(), target);
+    assertEquals(entries.get(0).getTargetID(), targetID);
+    assertEquals(entries.get(0).getAction(), action);
+    assertNull(entries.get(0).getTaskUUID());
+    assertEquals(entries.get(0).getPayload(), testPayload);
+    assertNotNull(entries.get(0).getTimestamp());
+  }
+
+  @Test
+  public void testCreateAuditEntryWithAll() {
+    UUID taskUUID = UUID.randomUUID();
+    ObjectNode testPayload = Json.newObject().put("foo", "bar").put("abc", "xyz");
+    Audit.TargetType target = Audit.TargetType.Universe;
+    String targetID = "Test TargetID";
+    Audit.ActionType action = Audit.ActionType.Create;
+    ObjectNode testAdditionalDetails = Json.newObject().put("fizz", "buzz").put("123", "321");
+    auditService.createAuditEntry(
+        context, request, target, targetID, action, testPayload, taskUUID, testAdditionalDetails);
+    List<Audit> entries = Audit.getAll(customer.uuid);
+    assertEquals(entries.size(), 1);
+    assertEquals(entries.get(0).getUserUUID(), user.uuid);
+    assertEquals(entries.get(0).getUserEmail(), user.email);
+    assertEquals(entries.get(0).getApiCall(), "/api/customer/test/universe/test");
+    assertEquals(entries.get(0).getApiMethod(), "PUT");
+    assertEquals(entries.get(0).getTarget(), target);
+    assertEquals(entries.get(0).getTargetID(), targetID);
+    assertEquals(entries.get(0).getAction(), action);
+    assertEquals(entries.get(0).getTaskUUID(), taskUUID);
+    assertEquals(entries.get(0).getPayload(), testPayload);
+    assertEquals(entries.get(0).getAdditionalDetails(), testAdditionalDetails);
     assertNotNull(entries.get(0).getTimestamp());
   }
 

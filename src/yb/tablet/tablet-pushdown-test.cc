@@ -31,21 +31,31 @@
 //
 
 #include <algorithm>
+#include <limits>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
-#include "yb/common/ql_expr.h"
+#include "yb/common/common_fwd.h"
 #include "yb/common/ql_protocol_util.h"
+#include "yb/common/ql_rowblock.h"
 #include "yb/common/schema.h"
 
-#include "yb/docdb/doc_rowwise_iterator.h"
+#include "yb/gutil/strings/numbers.h"
 
+#include "yb/tablet/local_tablet_writer.h"
+#include "yb/tablet/read_result.h"
+#include "yb/tablet/tablet-test-util.h"
 #include "yb/tablet/tablet.h"
-#include "yb/tablet/tablet-test-base.h"
+
+#include "yb/util/status_log.h"
 #include "yb/util/test_macros.h"
 #include "yb/util/test_util.h"
+
+using std::string;
 
 namespace yb {
 namespace tablet {
@@ -70,12 +80,12 @@ class TabletPushdownTest : public YBTabletTest {
       nrows_ = 100000;
     }
 
-    LocalTabletWriter writer(tablet().get());
+    LocalTabletWriter writer(tablet());
     QLWriteRequestPB req;
-    for (int64_t i = 0; i < nrows_; i++) {
+    for (int i = 0; i < nrows_; i++) {
       QLAddInt32HashValue(&req, i);
       QLAddInt32ColumnValue(&req, kFirstColumnId + 1, i * 10);
-      QLAddStringColumnValue(&req, kFirstColumnId + 2, StringPrintf("%08" PRId64, i));
+      QLAddStringColumnValue(&req, kFirstColumnId + 2, StringPrintf("%08d", i));
       ASSERT_OK_FAST(writer.Write(&req));
     }
   }
@@ -93,13 +103,14 @@ class TabletPushdownTest : public YBTabletTest {
     QLReadRequestResult result;
     TransactionMetadataPB transaction;
     QLAddColumns(schema_, {}, &req);
+    WriteBuffer rows_data(1024);
     EXPECT_OK(tablet()->HandleQLReadRequest(
-        CoarseTimePoint::max() /* deadline */, read_time, req, transaction, &result));
+        CoarseTimePoint::max() /* deadline */, read_time, req, transaction, &result, &rows_data));
 
     ASSERT_EQ(QLResponsePB::YQL_STATUS_OK, result.response.status())
         << "Error: " << result.response.error_message();
 
-    auto row_block = CreateRowBlock(QLClient::YQL_CLIENT_CQL, schema_, result.rows_data);
+    auto row_block = CreateRowBlock(QLClient::YQL_CLIENT_CQL, schema_, rows_data.ToBuffer());
     std::vector<std::string> results;
     for (const auto& row : row_block->rows()) {
       results.push_back(row.ToString());
@@ -114,7 +125,7 @@ class TabletPushdownTest : public YBTabletTest {
   }
 
  private:
-  uint64_t nrows_;
+  int nrows_;
 };
 
 TEST_F(TabletPushdownTest, TestPushdownIntKeyRange) {

@@ -18,8 +18,6 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSDB_SST_FILE_MANAGER_H
-#define YB_ROCKSDB_SST_FILE_MANAGER_H
 
 #pragma once
 
@@ -27,8 +25,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "yb/rocksdb/status.h"
-#include "yb/util/result.h"
+#include "yb/util/status.h"
 
 namespace rocksdb {
 
@@ -97,5 +94,3 @@ yb::Result<SstFileManager*> NewSstFileManager(
     bool delete_exisitng_trash = true);
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_SST_FILE_MANAGER_H

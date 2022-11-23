@@ -16,11 +16,12 @@
 //   an interface with multiple implementations for different use-cases.
 //--------------------------------------------------------------------------------------------------
 
-#ifndef YB_COMMON_QL_RESULTSET_H_
-#define YB_COMMON_QL_RESULTSET_H_
+#pragma once
 
 #include "yb/common/common_fwd.h"
 #include "yb/common/ql_type.h"
+
+#include "yb/util/write_buffer.h"
 
 namespace yb {
 
@@ -46,16 +47,16 @@ class QLRSRowDesc {
   explicit QLRSRowDesc(const QLRSRowDescPB& desc_pb);
   virtual ~QLRSRowDesc();
 
-  int32_t rscol_count() const {
+  size_t rscol_count() const {
     return rscol_descs_.size();
   }
 
-  const vector<RSColDesc>& rscol_descs() const {
+  const std::vector<RSColDesc>& rscol_descs() const {
     return rscol_descs_;
   }
 
  private:
-  vector<RSColDesc> rscol_descs_;
+  std::vector<RSColDesc> rscol_descs_;
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -65,7 +66,7 @@ class QLResultSet {
   typedef std::shared_ptr<QLResultSet> SharedPtr;
 
   // Constructor and destructor.
-  QLResultSet(const QLRSRowDesc* rsrow_desc, faststring* rows_data);
+  QLResultSet(const QLRSRowDesc* rsrow_desc, WriteBuffer* rows_data);
   virtual ~QLResultSet();
 
   // Allocate a new row at the end of result set.
@@ -76,13 +77,17 @@ class QLResultSet {
   void AppendColumn(size_t index, const QLValuePB& value);
 
   // Row count
-  size_t rsrow_count() const;
+  size_t rsrow_count() const {
+    return rsrow_count_;
+  }
+
+  void Complete();
 
  private:
   const QLRSRowDesc* rsrow_desc_ = nullptr;
-  faststring* rows_data_ = nullptr;
+  WriteBuffer* rows_data_ = nullptr;
+  WriteBufferPos count_position_;
+  size_t rsrow_count_ = 0;
 };
 
 } // namespace yb
-
-#endif // YB_COMMON_QL_RESULTSET_H_

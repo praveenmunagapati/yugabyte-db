@@ -44,8 +44,11 @@
 #include <rapidjson/stringbuffer.h> // NOLINT
 
 #include "yb/gutil/strings/escaping.h"
-#include "yb/util/jsonwriter.h"
+
 #include "yb/util/debug/trace_event_impl.h"
+#include "yb/util/jsonwriter.h"
+#include "yb/util/monotime.h"
+#include "yb/util/status.h"
 
 namespace yb {
 namespace server {
@@ -54,6 +57,7 @@ using std::map;
 using std::string;
 using std::stringstream;
 using std::vector;
+using std::pair;
 
 using yb::debug::CategoryFilter;
 using yb::debug::TraceLog;

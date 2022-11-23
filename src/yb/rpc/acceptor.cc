@@ -36,17 +36,29 @@
 #include <pthread.h>
 #include <stdint.h>
 
-#include <gflags/gflags.h>
+#include <atomic>
+#include <list>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
 #include <glog/logging.h>
+#include <gtest/gtest_prod.h>
 
 #include "yb/gutil/ref_counted.h"
 #include "yb/gutil/strings/substitute.h"
-#include "yb/rpc/messenger.h"
-#include "yb/util/flag_tags.h"
+
+#include "yb/rpc/reactor.h"
+
+#include "yb/util/flags.h"
 #include "yb/util/metrics.h"
+#include "yb/util/monotime.h"
 #include "yb/util/net/sockaddr.h"
-#include "yb/util/net/socket.h"
 #include "yb/util/status.h"
+#include "yb/util/status_format.h"
+#include "yb/util/status_log.h"
 #include "yb/util/thread.h"
 
 using google::protobuf::Message;
@@ -56,7 +68,7 @@ METRIC_DEFINE_counter(server, rpc_connections_accepted,
                       yb::MetricUnit::kConnections,
                       "Number of incoming TCP connections made to the RPC server");
 
-DEFINE_int32(rpc_acceptor_listen_backlog, 128,
+DEFINE_UNKNOWN_int32(rpc_acceptor_listen_backlog, 128,
              "Socket backlog parameter used when listening for RPC connections. "
              "This defines the maximum length to which the queue of pending "
              "TCP connections inbound to the RPC server may grow. If a connection "

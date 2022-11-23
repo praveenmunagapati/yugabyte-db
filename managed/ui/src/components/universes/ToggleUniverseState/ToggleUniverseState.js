@@ -5,7 +5,6 @@
 import React, { Component } from 'react';
 import { YBModal, YBTextInput } from '../../common/forms/fields';
 import { getPromiseState } from '../../../utils/PromiseUtils';
-import { browserHistory } from 'react-router';
 
 import './ToggleUniverseState.scss';
 
@@ -30,12 +29,15 @@ class ToggleUniverseState extends Component {
       universePaused,
       universe: {
         currentUniverse: { data }
-      }
+      },
+      focusedUniverse = null
     } = this.props;
+    const { universeUUID } = focusedUniverse ? focusedUniverse : data;
+
     this.props.onHide();
     universePaused
-      ? this.props.submitRestartUniverse(data.universeUUID)
-      : this.props.submitPauseUniverse(data.universeUUID);
+      ? this.props.submitRestartUniverse(universeUUID)
+      : this.props.submitPauseUniverse(universeUUID);
   };
 
   componentDidUpdate(prevProps) {
@@ -46,7 +48,9 @@ class ToggleUniverseState extends Component {
         getPromiseState(this.props.universe.restartUniverse).isSuccess())
     ) {
       this.props.fetchUniverseMetadata();
-      browserHistory.push('/universes');
+      if (this.props.location.pathname !== '/universes') {
+        window.location.reload();
+      }
     }
   }
 
@@ -60,8 +64,9 @@ class ToggleUniverseState extends Component {
       universe: {
         currentUniverse: { data }
       },
+      focusedUniverse = null
     } = this.props;
-    const { name } = data;
+    const { name } = focusedUniverse ? focusedUniverse : data;
 
     return (
       <YBModal
@@ -88,6 +93,7 @@ class ToggleUniverseState extends Component {
                 <li>Any configured alerts and health checks will not be triggered.</li>
                 <li>Scheduled backups will be stopped.</li>
                 <li>Any changes to universe configuration are not allowed.</li>
+                <li>For Azure universes IP-addresses of any instance can be changed on restart.</li>
                 <li>
                   All data in the cluster will be saved and the cluster can be unpaused at any time.
                 </li>

@@ -13,6 +13,7 @@
 
 #include <gtest/gtest.h>
 
+#include "yb/client/table.h"
 #include "yb/client/table_handle.h"
 #include "yb/client/yb_table_name.h"
 
@@ -21,13 +22,17 @@
 #include "yb/integration-tests/yb_mini_cluster_test_base.h"
 #include "yb/integration-tests/cluster_verifier.h"
 
-#include "yb/master/catalog_manager.h"
 #include "yb/master/encryption_manager.h"
 
-#include "yb/util/test_util.h"
+#include "yb/tools/yb-admin_client.h"
+
+#include "yb/util/backoff_waiter.h"
 #include "yb/util/random_util.h"
+#include "yb/util/status_log.h"
+#include "yb/util/stol_utils.h"
 #include "yb/util/string_util.h"
-#include "yb/master/master.pb.h"
+
+using std::string;
 
 DECLARE_int64(db_write_buffer_size);
 DECLARE_int32(memstore_size_mb);
@@ -57,11 +62,11 @@ class EncryptionTest : public YBTableTestBase, public testing::WithParamInterfac
 
   bool enable_ysql() override { return false; }
 
-  int num_tablet_servers() override {
+  size_t num_tablet_servers() override {
     return 3;
   }
 
-  int num_masters() override {
+  size_t num_masters() override {
     return 3;
   }
 
@@ -100,9 +105,8 @@ class EncryptionTest : public YBTableTestBase, public testing::WithParamInterfac
   void VerifyWrittenRecords() {
     auto result_kvs = GetScanResults(client::TableRange(table_));
     for (uint32_t i = 0; i < result_kvs.size(); i++) {
-      int32_t key;
       auto split = StringSplit(result_kvs[i].first, '_');
-      key = boost::lexical_cast<int32_t>(split.back());
+      int32_t key = CHECK_RESULT(CheckedStoInt<int32_t>(split.back()));
       ASSERT_EQ(Format("k_$0", key), result_kvs[i].first);
       ASSERT_TRUE(string(kKeySize, 'a' + (key % 26)) == result_kvs[i].second);
     }
@@ -115,7 +119,7 @@ class EncryptionTest : public YBTableTestBase, public testing::WithParamInterfac
         current_key_id_, std::string(bytes.begin(), bytes.end())));
   }
 
-  CHECKED_STATUS WaitForAllMastersHaveLatestKeyInMemory() {
+  Status WaitForAllMastersHaveLatestKeyInMemory() {
     return LoggedWaitFor([&]() -> Result<bool> {
       return yb_admin_client_->AllMastersHaveUniverseKeyInMemory(current_key_id_).ok();
     }, 30s, "Wait for all masters to have key in memory");
@@ -127,7 +131,7 @@ class EncryptionTest : public YBTableTestBase, public testing::WithParamInterfac
     ASSERT_OK(yb_admin_client_->IsEncryptionEnabled());
   }
 
-  CHECKED_STATUS WaitForLoadBalanced() {
+  Status WaitForLoadBalanced() {
     SleepFor(MonoDelta::FromSeconds(5));
     return LoggedWaitFor([&]() -> Result<bool> {
       return client_->IsLoadBalanced(3);
@@ -167,7 +171,7 @@ TEST_F(EncryptionTest, MasterLeaderRestart) {
   CreateAdminClient();
   ASSERT_OK(WaitForAllMastersHaveLatestKeyInMemory());
   // Restart the tablet servers and make sure they can contact the new master leader for the key.
-  for (int i = 0; i < external_mini_cluster()->num_tablet_servers(); i++) {
+  for (size_t i = 0; i < external_mini_cluster()->num_tablet_servers(); i++) {
     external_mini_cluster()->tablet_server(i)->Shutdown();
     CHECK_OK(external_mini_cluster()->tablet_server(i)->Restart());
     SleepFor(MonoDelta::FromSeconds(5));\
@@ -184,7 +188,7 @@ TEST_F(EncryptionTest, MasterLeaderRestart) {
 
 TEST_F(EncryptionTest, AllMastersRestart) {
   WriteWorkload(0, kNumKeys);
-  for (int i = 0; i < external_mini_cluster()->num_masters(); i++) {
+  for (size_t i = 0; i < external_mini_cluster()->num_masters(); i++) {
     external_mini_cluster()->master(i)->Shutdown();
     CHECK_OK(external_mini_cluster()->master(i)->Restart());
   }
@@ -198,7 +202,7 @@ TEST_F(EncryptionTest, AllMastersRestart) {
 
 TEST_F(EncryptionTest, RollingMasterRestart) {
   WriteWorkload(0, kNumKeys);
-  for (int i = 0; i < external_mini_cluster()->num_masters(); i++) {
+  for (size_t i = 0; i < external_mini_cluster()->num_masters(); i++) {
     external_mini_cluster()->master(i)->Shutdown();
     CHECK_OK(external_mini_cluster()->master(i)->Restart());
     ASSERT_OK(WaitForAllMastersHaveLatestKeyInMemory());

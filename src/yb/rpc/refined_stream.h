@@ -11,8 +11,7 @@
 // under the License.
 //
 
-#ifndef YB_RPC_REFINED_STREAM_H
-#define YB_RPC_REFINED_STREAM_H
+#pragma once
 
 #include "yb/rpc/circular_read_buffer.h"
 #include "yb/rpc/stream.h"
@@ -29,9 +28,9 @@ YB_DEFINE_ENUM(LocalSide, (kClient)(kServer));
 class StreamRefiner {
  public:
   virtual void Start(RefinedStream* stream) = 0;
-  virtual CHECKED_STATUS ProcessHeader() = 0;
-  virtual CHECKED_STATUS Send(OutboundDataPtr data) = 0;
-  virtual CHECKED_STATUS Handshake() = 0;
+  virtual Status ProcessHeader() = 0;
+  virtual Status Send(OutboundDataPtr data) = 0;
+  virtual Status Handshake() = 0;
   virtual Result<ReadBufferFull> Read(StreamReadBuffer* out) = 0;
   virtual const Protocol* GetProtocol() = 0;
 
@@ -52,16 +51,16 @@ class RefinedStream : public Stream, public StreamContext {
 
   size_t GetPendingWriteBytes() override;
   void Close() override;
-  CHECKED_STATUS TryWrite() override;
+  Status TryWrite() override;
   void ParseReceived() override;
   bool Idle(std::string* reason) override;
   void DumpPB(const DumpRunningRpcsRequestPB& req, RpcConnectionPB* resp) override;
   const Endpoint& Remote() const override;
   const Endpoint& Local() const override;
-  CHECKED_STATUS Start(bool connect, ev::loop_ref* loop, StreamContext* context) override;
+  Status Start(bool connect, ev::loop_ref* loop, StreamContext* context) override;
   void Shutdown(const Status& status) override;
   Result<size_t> Send(OutboundDataPtr data) override;
-  void Cancelled(size_t handle) override;
+  bool Cancelled(size_t handle) override;
   bool IsConnected() override;
   const Protocol* GetProtocol() override;
   StreamReadBuffer& ReadBuffer() override;
@@ -77,9 +76,9 @@ class RefinedStream : public Stream, public StreamContext {
   void Transferred(const OutboundDataPtr& data, const Status& status) override;
   void Destroy(const Status& status) override;
 
-  CHECKED_STATUS Established(RefinedStreamState state);
-  CHECKED_STATUS SendToLower(OutboundDataPtr data);
-  CHECKED_STATUS StartHandshake();
+  Status Established(RefinedStreamState state);
+  Status SendToLower(OutboundDataPtr data);
+  Status StartHandshake();
 
   StreamContext& context() const {
     return *context_;
@@ -127,5 +126,3 @@ class RefinedStreamFactory : public StreamFactory {
 
 }  // namespace rpc
 }  // namespace yb
-
-#endif  // YB_RPC_REFINED_STREAM_H

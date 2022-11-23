@@ -15,7 +15,7 @@ import com.yugabyte.yw.common.kms.algorithms.SupportedAlgorithmInterface;
 import com.yugabyte.yw.common.kms.util.EncryptionAtRestUtil;
 import com.yugabyte.yw.common.kms.util.EncryptionAtRestUtil.BackupEntry;
 import com.yugabyte.yw.common.kms.util.KeyProvider;
-import com.yugabyte.yw.forms.UniverseTaskParams.EncryptionAtRestConfig;
+import com.yugabyte.yw.forms.EncryptionAtRestConfig;
 import com.yugabyte.yw.models.KmsConfig;
 import com.yugabyte.yw.models.KmsHistory;
 import com.yugabyte.yw.models.KmsHistoryId;
@@ -40,20 +40,28 @@ public abstract class EncryptionAtRestService<T extends SupportedAlgorithmInterf
 
   protected abstract T[] getSupportedAlgorithms();
 
-  private T validateEncryptionAlgorithm(String algorithm) {
+  public T validateEncryptionAlgorithm(String algorithm) {
     return Arrays.stream(getSupportedAlgorithms())
         .filter(algo -> algo.name().equals(algorithm))
         .findFirst()
         .orElse(null);
   }
 
-  private boolean validateKeySize(int keySize, T algorithm) {
+  public boolean validateKeySize(int keySize, T algorithm) {
     return algorithm
         .getKeySizes()
         .stream()
         .anyMatch(supportedKeySize -> supportedKeySize == keySize);
   }
 
+  /**
+   * Creates Universe key using KMS provider. If required first it creates CMK/EKE.
+   *
+   * @param universeUUID
+   * @param configUUID
+   * @param config
+   * @return
+   */
   protected abstract byte[] createKeyWithService(
       UUID universeUUID, UUID configUUID, EncryptionAtRestConfig config);
 
@@ -114,12 +122,19 @@ public abstract class EncryptionAtRestService<T extends SupportedAlgorithmInterf
       LOG.warn(errMsg);
       return null;
     }
+
     // Attempt to retrieve cached entry
     byte[] keyVal = EncryptionAtRestUtil.getUniverseKeyCacheEntry(universeUUID, keyRef);
     // Retrieve through KMS provider if no cache entry exists
     if (keyVal == null) {
       LOG.debug("Universe key cache entry empty. Retrieving key from service");
       keyVal = retrieveKeyWithService(universeUUID, configUUID, keyRef, config);
+      // Update the cache entry
+      if (keyVal != null) {
+        EncryptionAtRestUtil.setUniverseKeyCacheEntry(universeUUID, keyRef, keyVal);
+      } else {
+        LOG.warn("Could not retrieve key from key ref for universe " + universeUUID.toString());
+      }
     }
     return keyVal;
   }
@@ -142,11 +157,39 @@ public abstract class EncryptionAtRestService<T extends SupportedAlgorithmInterf
     return key;
   }
 
+  protected abstract byte[] validateRetrieveKeyWithService(
+      UUID universeUUID,
+      UUID configUUID,
+      byte[] keyRef,
+      EncryptionAtRestConfig config,
+      ObjectNode authConfig);
+
+  public byte[] validateConfigForUpdate(
+      UUID universeUUID,
+      UUID configUUID,
+      byte[] keyRef,
+      EncryptionAtRestConfig config,
+      ObjectNode authConfig) {
+    if (keyRef == null) {
+      String errMsg =
+          String.format(
+              "Retrieve key could not find a key ref for universe %s...", universeUUID.toString());
+      LOG.warn(errMsg);
+      return null;
+    }
+    // LOG.debug("DO_NOT_PRINT::config dictionary is : {}", authConfig.toString());
+    byte[] keyVal =
+        validateRetrieveKeyWithService(universeUUID, configUUID, keyRef, config, authConfig);
+    return keyVal;
+  }
+
   protected void cleanupWithService(UUID universeUUID, UUID configUUID) {}
 
   public void cleanup(UUID universeUUID, UUID configUUID) {
-    EncryptionAtRestUtil.removeKeyRotationHistory(universeUUID, configUUID);
-    cleanupWithService(universeUUID, configUUID);
+    int keyCount = EncryptionAtRestUtil.removeKeyRotationHistory(universeUUID, configUUID);
+    if (keyCount != 0) {
+      cleanupWithService(universeUUID, configUUID);
+    }
   }
 
   protected EncryptionAtRestService(KeyProvider keyProvider) {
@@ -181,27 +224,48 @@ public abstract class EncryptionAtRestService<T extends SupportedAlgorithmInterf
   }
 
   public KmsConfig createAuthConfig(UUID customerUUID, String configName, ObjectNode config) {
-    ObjectNode maskedConfig =
-        EncryptionAtRestUtil.maskConfigData(customerUUID, config, this.keyProvider);
     KmsConfig result =
-        KmsConfig.createKMSConfig(customerUUID, this.keyProvider, maskedConfig, configName);
+        KmsConfig.createKMSConfig(customerUUID, this.keyProvider, config, configName);
     UUID configUUID = result.configUUID;
     ObjectNode existingConfig = getAuthConfig(configUUID);
     ObjectNode updatedConfig = createAuthConfigWithService(configUUID, existingConfig);
     if (updatedConfig != null) {
-      ObjectNode updatedMaskedConfig =
-          EncryptionAtRestUtil.maskConfigData(customerUUID, updatedConfig, this.keyProvider);
-      KmsConfig.updateKMSConfig(configUUID, updatedMaskedConfig);
+      KmsConfig.updateKMSConfig(configUUID, updatedConfig);
     } else {
       result.delete();
       result = null;
     }
 
+    // LOG.debug("DO_NOT_PRINT::createAuthConfig returning: {}", result);
+    return result;
+  }
+
+  public KmsConfig updateAuthConfig(UUID customerUUID, UUID configUUID, ObjectNode config) {
+    KmsConfig result = KmsConfig.get(configUUID);
+    KmsConfig.updateKMSConfig(configUUID, config);
+    ObjectNode existingConfig = getAuthConfig(configUUID);
+    ObjectNode updatedConfig = createAuthConfigWithService(configUUID, existingConfig);
+    if (updatedConfig != null) {
+      result = KmsConfig.updateKMSConfig(configUUID, updatedConfig);
+    } else {
+      return null;
+    }
     return result;
   }
 
   public ObjectNode getAuthConfig(UUID configUUID) {
-    return EncryptionAtRestUtil.getAuthConfig(configUUID, this.keyProvider);
+    return EncryptionAtRestUtil.getAuthConfig(configUUID);
+  }
+
+  public boolean UpdateAuthConfigProperties(
+      UUID customerUUID, UUID configUUID, ObjectNode updatedConfig) {
+    LOG.debug(
+        "Called UpdateAuthConfigProperties for {} - {} ",
+        customerUUID.toString(),
+        configUUID.toString());
+    if (updatedConfig == null) return false;
+    KmsConfig result = KmsConfig.updateKMSConfig(configUUID, updatedConfig);
+    return (result == null) ? false : true;
   }
 
   public List<KmsHistory> getKeyRotationHistory(UUID configUUID, UUID universeUUID) {

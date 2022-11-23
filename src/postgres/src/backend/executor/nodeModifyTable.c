@@ -790,7 +790,12 @@ ExecDelete(ModifyTableState *mtstate,
 	}
 	else if (IsYBRelation(resultRelationDesc))
 	{
-		bool row_found = YBCExecuteDelete(resultRelationDesc, planSlot, estate, mtstate);
+		bool row_found = YBCExecuteDelete(resultRelationDesc,
+										  planSlot,
+										  ((ModifyTable *) mtstate->ps.plan)->ybReturningColumns,
+										  mtstate->yb_fetch_target_tuple,
+										  estate->yb_es_is_single_row_modify_txn,
+										  changingPart);
 		if (!row_found)
 		{
 			/*
@@ -976,13 +981,15 @@ ldelete:;
 		}
 		else if (IsYBRelation(resultRelationDesc))
 		{
-			if (mtstate->yb_mt_is_single_row_update_or_delete)
+			if (mtstate->yb_fetch_target_tuple)
 			{
-				slot = planSlot;
+				slot = ExecFilterJunk(resultRelInfo->ri_junkFilter, planSlot);
 			}
 			else
 			{
-				slot = ExecFilterJunk(resultRelInfo->ri_junkFilter, planSlot);
+				/* No target tuple means no need for junk filters. */
+				Assert(resultRelInfo->ri_junkFilter == NULL);
+				slot = planSlot;
 			}
 
 			delbuffer = InvalidBuffer;
@@ -1138,7 +1145,7 @@ ExecCrossPartitionUpdate(ModifyTableState *mtstate,
 	bool		tuple_deleted;
 	TupleTableSlot *epqslot = NULL;
 	bool    prev_yb_is_single_row_modify_txn =
-		estate->es_yb_is_single_row_modify_txn;
+		estate->yb_es_is_single_row_modify_txn;
 
 	*inserted_tuple = NULL;
 	*retry_slot = NULL;
@@ -1244,7 +1251,7 @@ ExecCrossPartitionUpdate(ModifyTableState *mtstate,
 
 	/* Revert ExecPrepareTupleRouting's node change. */
 	estate->es_result_relation_info = resultRelInfo;
-	estate->es_yb_is_single_row_modify_txn = prev_yb_is_single_row_modify_txn;
+	estate->yb_es_is_single_row_modify_txn = prev_yb_is_single_row_modify_txn;
 	if (mtstate->mt_transition_capture)
 	{
 		mtstate->mt_transition_capture->tcs_original_insert_tuple = NULL;
@@ -1368,9 +1375,7 @@ ExecUpdate(ModifyTableState *mtstate,
 	{
 		bool		partition_constraint_failed;
 
-		if (resultRelInfo->ri_WithCheckOptions != NIL)
-			ExecWithCheckOptions(WCO_RLS_UPDATE_CHECK, resultRelInfo, slot, estate);
-
+		yb_lreplace:;
 		/*
 		 * Check the constraints of the tuple.
 		 */
@@ -1384,13 +1389,47 @@ ExecUpdate(ModifyTableState *mtstate,
 			resultRelInfo->ri_PartitionCheck &&
 			!ExecPartitionCheck(resultRelInfo, slot, estate, false /* emitError */);
 
+		if (!partition_constraint_failed && resultRelInfo->ri_WithCheckOptions != NIL)
+		{
+			/*
+			 * ExecWithCheckOptions() will skip any WCOs which are not of the
+			 * kind we are looking for at this point.
+			 */
+			ExecWithCheckOptions(WCO_RLS_UPDATE_CHECK, resultRelInfo, slot, estate);
+		}
+
+
+		/*
+		 * If a partition check failed, try to move the row into the right
+		 * partition.
+		 */
 		if (partition_constraint_failed)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("This operation would cause a row to change the partition, "
-							"this is not yet supported"),
-					 errhint("See https://github.com/YugaByte/yugabyte-db/issues/%d. "
-							 "Click '+' on the description to raise its priority", 5310)));
+		{
+			TupleTableSlot *inserted_tuple, *retry_slot;
+			bool            retry;
+
+
+			/*
+			 * ExecCrossPartitionUpdate will first DELETE the row from the
+			 * partition it's currently in and then insert it back into the
+			 * root table, which will re-route it to the correct partition.
+			 * The first part may have to be repeated if it is detected that
+			 * the tuple we're trying to move has been concurrently updated.
+ 			 */
+
+			retry = !ExecCrossPartitionUpdate(mtstate, resultRelInfo, tupleid,
+											  oldtuple, slot, planSlot,
+											  epqstate, canSetTag,
+											  &retry_slot, &inserted_tuple);
+			if (retry)
+			{
+				slot = retry_slot;
+				tuple = ExecMaterializeSlot(slot);
+				goto yb_lreplace;
+ 			}
+
+			return inserted_tuple;
+ 		}
 
 		RangeTblEntry *rte = rt_fetch(resultRelInfo->ri_RangeTableIndex,
 									  estate->es_range_table);
@@ -1413,15 +1452,30 @@ ExecUpdate(ModifyTableState *mtstate,
 		bool is_pk_updated =
 			bms_overlap(YBGetTablePrimaryKeyBms(resultRelationDesc), actualUpdatedCols);
 
+		/*
+		 * TODO(alex): It probably makes more sense to pass a
+		 *             transformed slot instead of a plan slot? Note though
+		 *             that it can have tuple materialized already.
+		 */
+
+		ModifyTable *plan = (ModifyTable *) mtstate->ps.plan;
 		if (is_pk_updated)
 		{
-			YBCExecuteUpdateReplace(resultRelationDesc, planSlot, tuple, estate, mtstate);
+			YBCExecuteUpdateReplace(resultRelationDesc, planSlot, tuple);
 			row_found = true;
 		}
 		else
 		{
-			row_found = YBCExecuteUpdate(
-				resultRelationDesc, planSlot, tuple, estate, mtstate, actualUpdatedCols);
+			row_found = YBCExecuteUpdate(resultRelationDesc,
+										 planSlot,
+										 oldtuple,
+										 tuple,
+										 estate,
+										 plan,
+										 mtstate->yb_fetch_target_tuple,
+										 estate->yb_es_is_single_row_modify_txn,
+										 actualUpdatedCols,
+										 canSetTag);
 		}
 
 		bms_free(extraUpdatedCols);
@@ -1434,9 +1488,12 @@ ExecUpdate(ModifyTableState *mtstate,
 			return NULL;
 		}
 
-		/* Update indices selectively if necessary, Single row updates do not affect indices */
+		/*
+		 * Update indices selectively if necessary, updates w/o fetched target tuple
+		 * do not affect indices.
+		 */
 		if (YBCRelInfoHasSecondaryIndices(resultRelInfo) &&
-		    !mtstate->yb_mt_is_single_row_update_or_delete)
+			mtstate->yb_fetch_target_tuple)
 		{
 			Datum	ybctid = YBCGetYBTupleIdFromSlot(planSlot);
 			List *no_update_index_list = ((ModifyTable *)mtstate->ps.plan)->no_update_index_list;
@@ -2208,9 +2265,9 @@ ExecPrepareTupleRouting(ModifyTableState *mtstate,
 	 * As such, we should reevaluate single-row transaction constraints after
 	 * we determine the concrete partition.
 	 */
-	if (estate->es_yb_is_single_row_modify_txn)
+	if (estate->yb_es_is_single_row_modify_txn)
 	{
-		estate->es_yb_is_single_row_modify_txn = YBCIsSingleRowTxnCapableRel(partrel);
+		estate->yb_es_is_single_row_modify_txn = YBCIsSingleRowTxnCapableRel(partrel);
 	}
 
 	return slot;
@@ -2607,7 +2664,7 @@ ExecModifyTable(PlanState *pstate)
 				else
 				{
 					bool prev_yb_is_single_row_modify_txn =
-							estate->es_yb_is_single_row_modify_txn;
+							estate->yb_es_is_single_row_modify_txn;
 
 					/* Prepare for tuple routing. */
 					slot = ExecPrepareTupleRouting(node, estate, proute,
@@ -2618,7 +2675,7 @@ ExecModifyTable(PlanState *pstate)
 
 					/* Revert ExecPrepareTupleRouting's state change. */
 					estate->es_result_relation_info = resultRelInfo;
-					estate->es_yb_is_single_row_modify_txn = prev_yb_is_single_row_modify_txn;
+					estate->yb_es_is_single_row_modify_txn = prev_yb_is_single_row_modify_txn;
 				}
 				break;
 			case CMD_UPDATE:
@@ -2695,7 +2752,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 
 	mtstate->mt_plans = (PlanState **) palloc0(sizeof(PlanState *) * nplans);
 	mtstate->resultRelInfo = estate->es_result_relations + node->resultRelIndex;
-	mtstate->yb_mt_is_single_row_update_or_delete = YBCIsSingleRowUpdateOrDelete(node);
+	mtstate->yb_fetch_target_tuple = !YbCanSkipFetchingTargetTupleForModifyTable(node);
 
 	/* If modifying a partitioned table, initialize the root table info */
 	if (node->rootResultRelIndex >= 0)
@@ -3058,11 +3115,17 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 			case CMD_UPDATE:
 			case CMD_DELETE:
 				/*
-				 * If it's a YB single row UPDATE/DELETE we do not perform an
-				 * initial scan to populate the ybctid, so there is no junk
-				 * attribute to extract.
+				 * If it's a YB UPDATE/DELETE that didn't fetch the target tuple,
+				 * there is no junk attribute to extract.
 				 */
-				junk_filter_needed = !mtstate->yb_mt_is_single_row_update_or_delete;
+				if (IsYBRelation(mtstate->resultRelInfo->ri_RelationDesc))
+				{
+					junk_filter_needed = mtstate->yb_fetch_target_tuple;
+				}
+				else
+				{
+					junk_filter_needed = true;
+				}
 				break;
 			default:
 				elog(ERROR, "unknown operation");

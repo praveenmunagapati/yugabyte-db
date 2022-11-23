@@ -11,19 +11,32 @@
 // under the License.
 //
 
-#ifndef YB_MASTER_PERMISSIONS_MANAGER_H
-#define YB_MASTER_PERMISSIONS_MANAGER_H
+#pragma once
+
+#include <stdint.h>
+
+#include <set>
+#include <type_traits>
+#include <utility>
+
+#include "yb/util/flags.h"
+#include <glog/logging.h>
 
 #include "yb/common/entity_ids.h"
 #include "yb/common/roles_permissions.h"
 
-#include "yb/master/master.pb.h"
-#include "yb/master/catalog_entity_info.h"
+#include "yb/gutil/callback.h"
+#include "yb/gutil/integral_types.h"
+
 #include "yb/master/catalog_manager.h"
 
 #include "yb/rpc/rpc.h"
 
-#include "yb/util/status.h"
+#include "yb/util/debug/lock_debug.h"
+#include "yb/util/math_util.h"
+#include "yb/util/shared_lock.h"
+#include "yb/util/status_callback.h"
+#include "yb/util/status_fwd.h"
 #include "yb/util/unique_lock.h"
 
 namespace yb {
@@ -37,28 +50,28 @@ class PermissionsManager final {
   //
   // The RPC context is provided for logging/tracing purposes.
   // but this function does not itself respond to the RPC.
-  CHECKED_STATUS CreateRole(const CreateRoleRequestPB* req,
-                            CreateRoleResponsePB* resp,
-                            rpc::RpcContext* rpc) EXCLUDES(mutex_);
+  Status CreateRole(const CreateRoleRequestPB* req,
+                    CreateRoleResponsePB* resp,
+                    rpc::RpcContext* rpc) EXCLUDES(mutex_);
 
   // Alter an existing role for authentication/authorization.
   //
   // The RPC context is provided for logging/tracing purposes,
   // but this function does not itself respond to the RPC.
-  CHECKED_STATUS AlterRole(const AlterRoleRequestPB* req,
-                           AlterRoleResponsePB* resp,
-                           rpc::RpcContext* rpc) EXCLUDES(mutex_);
+  Status AlterRole(const AlterRoleRequestPB* req,
+                   AlterRoleResponsePB* resp,
+                   rpc::RpcContext* rpc) EXCLUDES(mutex_);
 
   // Delete the role.
   //
   // The RPC context is provided for logging/tracing purposes,
   // but this function does not itself respond to the RPC.
-  CHECKED_STATUS DeleteRole(const DeleteRoleRequestPB* req,
-                            DeleteRoleResponsePB* resp,
-                            rpc::RpcContext* rpc) EXCLUDES(mutex_);
+  Status DeleteRole(const DeleteRoleRequestPB* req,
+                    DeleteRoleResponsePB* resp,
+                    rpc::RpcContext* rpc) EXCLUDES(mutex_);
 
   // Generic Create Role function for both default roles and user defined roles.
-  CHECKED_STATUS CreateRoleUnlocked(
+  Status CreateRoleUnlocked(
       const std::string& role_name,
       const std::string& salted_hash,
       const bool login,
@@ -69,29 +82,29 @@ class PermissionsManager final {
       const bool increment_roles_version = true) REQUIRES(mutex_);
 
   // Grant one role to another role.
-  CHECKED_STATUS GrantRevokeRole(const GrantRevokeRoleRequestPB* req,
-                                 GrantRevokeRoleResponsePB* resp,
-                                 rpc::RpcContext* rpc) EXCLUDES(mutex_);
+  Status GrantRevokeRole(const GrantRevokeRoleRequestPB* req,
+                         GrantRevokeRoleResponsePB* resp,
+                         rpc::RpcContext* rpc) EXCLUDES(mutex_);
 
   // Grant/Revoke a permission to a role.
-  CHECKED_STATUS GrantRevokePermission(const GrantRevokePermissionRequestPB* req,
-                                       GrantRevokePermissionResponsePB* resp,
-                                       rpc::RpcContext* rpc) EXCLUDES(mutex_);
+  Status GrantRevokePermission(const GrantRevokePermissionRequestPB* req,
+                               GrantRevokePermissionResponsePB* resp,
+                               rpc::RpcContext* rpc) EXCLUDES(mutex_);
 
   // Get all the permissions granted to resources.
-  CHECKED_STATUS GetPermissions(const GetPermissionsRequestPB* req,
-                                GetPermissionsResponsePB* resp,
-                                rpc::RpcContext* rpc) EXCLUDES(mutex_);
+  Status GetPermissions(const GetPermissionsRequestPB* req,
+                        GetPermissionsResponsePB* resp,
+                        rpc::RpcContext* rpc) EXCLUDES(mutex_);
 
   void BuildResourcePermissionsUnlocked() REQUIRES(mutex_);
 
   // Increment the version stored in roles_version_ if it exists. Otherwise, creates a
   // SysVersionInfo object with version equal to 0 to track the roles versions.
-  CHECKED_STATUS IncrementRolesVersionUnlocked() REQUIRES_SHARED(mutex_);
+  Status IncrementRolesVersionUnlocked() REQUIRES_SHARED(mutex_);
 
   // Grant the specified permissions.
   template<class RespClass>
-  CHECKED_STATUS GrantPermissions(
+  Status GrantPermissions(
       const RoleName& role_name,
       const std::string& canonical_resource,
       const std::string& resource_name,
@@ -105,22 +118,22 @@ class PermissionsManager final {
   // don't leave old permissions alive. This is specially dangerous when a resource with the same
   // canonical name is created again.
   template<class RespClass>
-  CHECKED_STATUS RemoveAllPermissionsForResourceUnlocked(
+  Status RemoveAllPermissionsForResourceUnlocked(
       const std::string& canonical_resource, RespClass* resp)
       REQUIRES(mutex_);
 
   template<class RespClass>
-  CHECKED_STATUS RemoveAllPermissionsForResource(const std::string& canonical_resource,
-                                                 RespClass* resp) EXCLUDES(mutex_);
+  Status RemoveAllPermissionsForResource(const std::string& canonical_resource,
+                                         RespClass* resp) EXCLUDES(mutex_);
 
-  CHECKED_STATUS PrepareDefaultRoles(int64_t term) EXCLUDES(mutex_);
+  Status PrepareDefaultRoles(int64_t term) EXCLUDES(mutex_);
 
   void GetAllRoles(std::vector<scoped_refptr<RoleInfo>>* roles) EXCLUDES(mutex_);
 
   // Find all the roles for which 'role' is a member of the list 'member_of'.
   std::vector<std::string> DirectMemberOf(const RoleName& role) REQUIRES_SHARED(mutex_);
 
-  void TraverseRole(const string& role_name, std::unordered_set<RoleName>* granted_roles)
+  void TraverseRole(const std::string& role_name, std::unordered_set<RoleName>* granted_roles)
       REQUIRES_SHARED(mutex_);
 
   // Build the recursive map of roles (recursive_granted_roles_). If r1 is granted to r2, and r2
@@ -137,7 +150,7 @@ class PermissionsManager final {
 
   // This is invoked from PrepareDefaultSysConfig in catalog manger and sets up the default state of
   // of cluster security config.
-  CHECKED_STATUS PrepareDefaultSecurityConfigUnlocked(int64_t term)
+  Status PrepareDefaultSecurityConfigUnlocked(int64_t term)
       REQUIRES(mutex_);
 
   // Sets the security config loaded from the sys catalog.
@@ -187,5 +200,3 @@ class PermissionsManager final {
 
 }  // namespace master
 }  // namespace yb
-
-#endif  // YB_MASTER_PERMISSIONS_MANAGER_H

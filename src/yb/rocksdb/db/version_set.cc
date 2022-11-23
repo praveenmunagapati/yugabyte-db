@@ -43,10 +43,9 @@
 
 #include "yb/gutil/casts.h"
 
-#include "yb/util/flags.h"
 #include "yb/util/format.h"
+#include "yb/util/status_format.h"
 
-#include "yb/rocksdb/compaction_filter.h"
 #include "yb/rocksdb/db/filename.h"
 #include "yb/rocksdb/db/file_numbers.h"
 #include "yb/rocksdb/db/internal_stats.h"
@@ -61,20 +60,24 @@
 #include "yb/rocksdb/env.h"
 #include "yb/rocksdb/merge_operator.h"
 #include "yb/rocksdb/table/internal_iterator.h"
+#include "yb/rocksdb/table/iterator_wrapper.h"
 #include "yb/rocksdb/table/table_reader.h"
 #include "yb/rocksdb/table/merger.h"
 #include "yb/rocksdb/table/two_level_iterator.h"
 #include "yb/rocksdb/table/format.h"
-#include "yb/rocksdb/table/plain_table_factory.h"
 #include "yb/rocksdb/table/meta_blocks.h"
 #include "yb/rocksdb/table/get_context.h"
 
 #include "yb/rocksdb/util/coding.h"
 #include "yb/rocksdb/util/file_reader_writer.h"
-#include "yb/rocksdb/util/file_util.h"
 #include "yb/rocksdb/util/logging.h"
+#include "yb/rocksdb/util/statistics.h"
 #include "yb/rocksdb/util/stop_watch.h"
 #include "yb/rocksdb/util/sync_point.h"
+
+#include "yb/util/test_kill.h"
+
+using std::unique_ptr;
 
 namespace rocksdb {
 
@@ -751,7 +754,7 @@ void Version::GetColumnFamilyMetaData(ColumnFamilyMetaData* cf_meta) {
         file_path = ioptions->db_paths.back().path;
       }
       files.emplace_back(
-          MakeTableFileName("", file->fd.GetNumber()),
+          file->fd.GetNumber(),
           file_path,
           file->fd.GetTotalFileSize(),
           file->fd.GetBaseFileSize(),
@@ -759,6 +762,7 @@ void Version::GetColumnFamilyMetaData(ColumnFamilyMetaData* cf_meta) {
               file->raw_key_size + file->raw_value_size,
           ConvertBoundaryValues(file->smallest),
           ConvertBoundaryValues(file->largest),
+          file->imported,
           file->being_compacted);
       level_size += file->fd.GetTotalFileSize();
     }
@@ -1400,13 +1404,9 @@ void VersionStorageInfo::SetFinalized() {
     assert(MaxBytesForLevel(level) >= max_bytes_prev_level);
     max_bytes_prev_level = MaxBytesForLevel(level);
   }
-  int num_empty_non_l0_level = 0;
   for (int level = 0; level < num_levels(); level++) {
     assert(LevelFiles(level).size() == 0 ||
            LevelFiles(level).size() == LevelFilesBrief(level).num_files);
-    if (level > 0 && NumLevelBytes(level) > 0) {
-      num_empty_non_l0_level++;
-    }
     if (LevelFiles(level).size() > 0) {
       assert(level < num_non_empty_levels());
     }
@@ -2067,7 +2067,7 @@ std::string Version::DebugString(bool hex) const {
   return r;
 }
 
-Result<std::string> Version::GetMiddleKey() {
+Result<TableCache::TableReaderWithHandle> Version::GetLargestSstTableReader() {
   // Largest files are at lowest level.
   const auto level = storage_info_.num_levels_ - 1;
   const FileMetaData* largest_sst_meta = nullptr;
@@ -2081,11 +2081,20 @@ Result<std::string> Version::GetMiddleKey() {
     return STATUS(Incomplete, "No SST files.");
   }
 
-  const auto trwh = VERIFY_RESULT(table_cache_->GetTableReader(
+  return table_cache_->GetTableReader(
       vset_->env_options_, cfd_->internal_comparator(), largest_sst_meta->fd, kDefaultQueryId,
-      /* no_io =*/ false, cfd_->internal_stats()->GetFileReadHist(level),
-      IsFilterSkipped(level, /* is_file_last_in_level =*/ true)));
+      /* no_io = */ false, cfd_->internal_stats()->GetFileReadHist(level),
+      IsFilterSkipped(level, /* is_file_last_in_level = */ true));
+}
+
+Result<std::string> Version::GetMiddleKey() {
+  const auto trwh = VERIFY_RESULT(GetLargestSstTableReader());
   return trwh.table_reader->GetMiddleKey();
+}
+
+Result<TableReader*> Version::TEST_GetLargestSstTableReader() {
+  const auto trwh = VERIFY_RESULT(GetLargestSstTableReader());
+  return trwh.table_reader;
 }
 
 // this is used to batch writes to the manifest file
@@ -2320,7 +2329,7 @@ Status VersionSet::LogAndApply(ColumnFamilyData* column_family_data,
           break;
         }
         TEST_KILL_RANDOM("VersionSet::LogAndApply:BeforeAddRecord",
-                         rocksdb_kill_odds * REDUCE_ODDS2);
+                         test_kill_odds * REDUCE_ODDS2);
         s = descriptor_log_->AddRecord(record);
         if (!s.ok()) {
           break;
@@ -2525,7 +2534,7 @@ class ManifestReader {
     return Status::OK();
   }
 
-  CHECKED_STATUS Next() {
+  Status Next() {
     Slice record;
     if (!reader_->ReadRecord(&record, &scratch_)) {
       return STATUS(EndOfFile, "");
@@ -2544,7 +2553,7 @@ class ManifestReader {
   uint64_t current_manifest_file_size() const { return current_manifest_file_size_; }
   const std::string& manifest_filename() const { return manifest_filename_; }
  private:
-  CHECKED_STATUS ReadManifestFilename() {
+  Status ReadManifestFilename() {
     // Read "CURRENT" file, which contains a pointer to the current manifest file
     Status s = ReadFileToString(env_, CurrentFileName(dbname_), &manifest_filename_);
     if (!s.ok()) {
@@ -2755,7 +2764,7 @@ Status VersionSet::Recover(
             &flushed_frontier, edit.flushed_frontier_, UpdateUserValueType::kLargest);
         VLOG(1) << "Updating flushed frontier with that from edit: "
                 << edit.flushed_frontier_->ToString()
-                << ", new flushed froniter: " << flushed_frontier->ToString();
+                << ", new flushed frontier: " << flushed_frontier->ToString();
       } else {
         VLOG(1) << "No flushed frontier found in edit";
       }
@@ -3028,7 +3037,6 @@ Status VersionSet::ListColumnFamilies(std::vector<std::string>* column_families,
   return s;
 }
 
-#ifndef ROCKSDB_LITE
 Status VersionSet::ReduceNumberOfLevels(const std::string& dbname,
                                         const Options* options,
                                         const EnvOptions& env_options,
@@ -3132,8 +3140,8 @@ Status VersionSet::DumpManifest(const Options& options, const std::string& dscna
   uint64_t next_file = 0;
   uint64_t last_sequence = 0;
   uint64_t previous_log_number = 0;
-  UserFrontier* flushed_frontier = nullptr;
-  int count = 0;
+  UserFrontierPtr flushed_frontier;
+  int count __attribute__((unused)) = 0;
   std::unordered_map<uint32_t, std::string> comparators;
   std::unordered_map<uint32_t, BaseReferencedVersionBuilder*> builders;
 
@@ -3237,7 +3245,7 @@ Status VersionSet::DumpManifest(const Options& options, const std::string& dscna
       }
 
       if (edit.flushed_frontier_) {
-        flushed_frontier = edit.flushed_frontier_.get();
+        flushed_frontier = edit.flushed_frontier_;
       }
 
       if (edit.max_column_family_) {
@@ -3294,7 +3302,7 @@ Status VersionSet::DumpManifest(const Options& options, const std::string& dscna
 
     next_file_number_.store(next_file + 1);
     SetLastSequenceNoSanityChecking(last_sequence);
-    if (flushed_frontier) {
+    if (flushed_frontier && FlushedFrontier()) {
       DCHECK_EQ(*flushed_frontier, *FlushedFrontier());
     }
     prev_log_number_ = previous_log_number;
@@ -3304,12 +3312,11 @@ Status VersionSet::DumpManifest(const Options& options, const std::string& dscna
         "%" PRIu64 " prev_log_number %" PRIu64 " max_column_family %u flushed_values %s\n",
         next_file_number_.load(), last_sequence, previous_log_number,
         column_family_set_->GetMaxColumnFamily(),
-        yb::ToString(flushed_frontier).c_str());
+        yb::ToString(flushed_frontier.get()).c_str());
   }
 
   return s;
 }
-#endif  // ROCKSDB_LITE
 
 // Set the last sequence number to s.
 void VersionSet::SetLastSequence(SequenceNumber s) {
@@ -3340,7 +3347,7 @@ void VersionSet::MarkFileNumberUsedDuringRecovery(uint64_t number) {
 
 namespace {
 
-CHECKED_STATUS AddEdit(const VersionEdit& edit, const DBOptions* db_options, log::Writer* log) {
+Status AddEdit(const VersionEdit& edit, const DBOptions* db_options, log::Writer* log) {
   std::string record;
   if (!edit.AppendEncodedTo(&record)) {
     return STATUS(Corruption,
@@ -3571,7 +3578,12 @@ InternalIterator* VersionSet::MakeInputIterator(Compaction* c) {
         const LevelFilesBrief* flevel = c->input_levels(which);
         for (size_t i = 0; i < flevel->num_files; i++) {
           FileMetaData* fmd = c->input(which, i);
-          if (c->input(which, i)->delete_after_compaction) {
+          if (c->input(which, i)->delete_after_compaction()) {
+            RLOG(
+                InfoLogLevel::INFO_LEVEL, db_options_->info_log,
+                yb::Format(
+                    "[$0] File marked for deletion, will be removed after compaction. file: $1",
+                    c->column_family_data()->GetName(), fmd->ToString()).c_str());
             RecordTick(cfd->ioptions()->statistics, COMPACTION_FILES_FILTERED);
             continue;
           }
@@ -3688,27 +3700,18 @@ void VersionSet::GetLiveFilesMetaData(std::vector<LiveFileMetaData>* metadata) {
     for (int level = 0; level < cfd->NumberLevels(); level++) {
       for (const auto& file :
            cfd->current()->storage_info()->LevelFiles(level)) {
-        LiveFileMetaData filemetadata;
-        filemetadata.column_family_name = cfd->GetName();
-        uint32_t path_id = file->fd.GetPathId();
-        if (path_id < db_options_->db_paths.size()) {
-          filemetadata.db_path = db_options_->db_paths[path_id].path;
-        } else {
-          assert(!db_options_->db_paths.empty());
-          filemetadata.db_path = db_options_->db_paths.back().path;
-        }
-        filemetadata.name = MakeTableFileName("", file->fd.GetNumber());
-        filemetadata.level = level;
-        filemetadata.total_size = file->fd.GetTotalFileSize();
-        filemetadata.base_size = file->fd.GetBaseFileSize();
-        // TODO: replace base_size with an accurate metadata size for
-        // uncompressed data. Look into: BlockBasedTableBuilder
-        filemetadata.uncompressed_size = filemetadata.base_size +
-            file->raw_key_size + file->raw_value_size;
-        filemetadata.smallest = ConvertBoundaryValues(file->smallest);
-        filemetadata.largest = ConvertBoundaryValues(file->largest);
-        filemetadata.imported = file->imported;
-        metadata->push_back(filemetadata);
+        const auto path_id = file->fd.GetPathId();
+        const auto& db_path = path_id < db_options_->db_paths.size()
+                                  ? db_options_->db_paths[path_id].path
+                                  : db_options_->db_paths.back().path;
+        // TODO: replace base_size with an accurate metadata size for uncompressed data.
+        // Look into: BlockBasedTableBuilder
+        const auto uncompressed_size =
+            file->fd.GetBaseFileSize() + file->raw_key_size + file->raw_value_size;
+        metadata->emplace_back(
+            cfd->GetName(), level, file->fd.GetNumber(), db_path, file->fd.GetTotalFileSize(),
+            file->fd.GetBaseFileSize(), uncompressed_size, ConvertBoundaryValues(file->smallest),
+            ConvertBoundaryValues(file->largest), file->imported, file->being_compacted);
       }
     }
   }

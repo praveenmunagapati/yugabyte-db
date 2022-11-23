@@ -18,8 +18,6 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSDB_IMMUTABLE_OPTIONS_H
-#define YB_ROCKSDB_IMMUTABLE_OPTIONS_H
 
 #pragma once
 
@@ -136,8 +134,8 @@ struct ImmutableCFOptions {
   std::shared_ptr<IteratorReplacer> iterator_replacer;
 
   CompactionFileFilterFactory* compaction_file_filter_factory;
+
+  std::shared_ptr<RocksDBPriorityThreadPoolMetrics> priority_thread_pool_metrics;
 };
 
 }  // namespace rocksdb
-
-#endif // YB_ROCKSDB_IMMUTABLE_OPTIONS_H

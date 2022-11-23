@@ -13,20 +13,37 @@
 
 #include "yb/tserver/tserver_metrics_heartbeat_data_provider.h"
 
-#include "yb/master/master.pb.h"
+#include "yb/consensus/log.h"
+
+#include "yb/docdb/docdb_rocksdb_util.h"
+
+#include "yb/master/master_heartbeat.pb.h"
+
 #include "yb/tablet/tablet.h"
+#include "yb/tablet/tablet_metadata.h"
 #include "yb/tablet/tablet_peer.h"
+
+#include "yb/tserver/cdc_consumer.h"
 #include "yb/tserver/tablet_server.h"
 #include "yb/tserver/ts_tablet_manager.h"
+#include "yb/tserver/tserver_service.service.h"
+
 #include "yb/util/logging.h"
 #include "yb/util/mem_tracker.h"
+#include "yb/util/metrics.h"
+#include "yb/util/flags.h"
 
-DEFINE_int32(tserver_heartbeat_metrics_interval_ms, 5000,
+DEFINE_UNKNOWN_int32(tserver_heartbeat_metrics_interval_ms, 5000,
              "Interval (in milliseconds) at which tserver sends its metrics in a heartbeat to "
              "master.");
 
-DEFINE_bool(tserver_heartbeat_metrics_add_drive_data, true,
+DEFINE_UNKNOWN_bool(tserver_heartbeat_metrics_add_drive_data, true,
             "Add drive data to metrics which tserver sends to master");
+
+DEFINE_UNKNOWN_bool(tserver_heartbeat_metrics_add_replication_status, true,
+            "Add replication status to metrics tserver sends to master");
+
+DECLARE_uint64(rocksdb_max_file_size_for_compaction);
 
 using namespace std::literals;
 
@@ -53,7 +70,8 @@ void TServerMetricsHeartbeatDataProvider::DoAddData(
   bool no_full_tablet_report = !req->has_tablet_report() || req->tablet_report().is_incremental();
   bool should_add_tablet_data =
       FLAGS_tserver_heartbeat_metrics_add_drive_data && no_full_tablet_report;
-
+  bool should_add_replication_status =
+      FLAGS_tserver_heartbeat_metrics_add_replication_status && no_full_tablet_report;
 
   for (const auto& tablet_peer : server().tablet_manager()->GetTabletPeers()) {
     if (tablet_peer) {
@@ -76,18 +94,58 @@ void TServerMetricsHeartbeatDataProvider::DoAddData(
         }
       }
     }
+
+    // Report replication errors from the CDC consumer.
+    auto consumer = down_cast<enterprise::TabletServer&>(server()).GetCDCConsumer();
+    if (consumer != nullptr && should_add_replication_status) {
+      const auto tablet_replication_error_map = consumer->GetReplicationErrors();
+      for (const auto& tablet_kv : tablet_replication_error_map) {
+        const TabletId& tablet_id = tablet_kv.first;
+
+        auto replication_state = req->add_replication_state();
+        replication_state->set_tablet_id(tablet_id);
+
+        auto& stream_to_status = *replication_state->mutable_stream_replication_statuses();
+        const auto& stream_replication_error_map = tablet_kv.second;
+        for (const auto& stream_kv : stream_replication_error_map) {
+          const CDCStreamId& stream_id = stream_kv.first;
+          const auto& replication_error_map = stream_kv.second;
+
+          auto& error_to_detail = *stream_to_status[stream_id].mutable_replication_errors();
+          for (const auto& error_kv : replication_error_map) {
+            const ReplicationErrorPb error = error_kv.first;
+            const std::string& detail = error_kv.second;
+
+            // Do not report this error if we have already reported it, unless the master needs a
+            // full tablet report.
+            if (no_full_tablet_report &&
+                prev_replication_error_map_.count(tablet_id) == 1 &&
+                prev_replication_error_map_[tablet_id].count(stream_id) == 1 &&
+                prev_replication_error_map_[tablet_id][stream_id].count(error) == 1 &&
+                prev_replication_error_map_[tablet_id][stream_id][error] == detail) {
+              continue;
+            }
+
+            error_to_detail[static_cast<int32_t>(error)] = detail;
+          }
+        }
+      }
+
+      prev_replication_error_map_ = tablet_replication_error_map;
+    }
   }
+
   metrics->set_total_sst_file_size(total_file_sizes);
   metrics->set_uncompressed_sst_file_size(uncompressed_file_sizes);
   metrics->set_num_sst_files(num_files);
 
   // Get the total number of read and write operations.
   auto reads_hist = server().GetMetricsHistogram(
-      TabletServerServiceIf::RpcMetricIndexes::kMetricIndexRead);
+      TabletServerServiceRpcMethodIndexes::kRead);
   uint64_t num_reads = (reads_hist != nullptr) ? reads_hist->TotalCount() : 0;
 
   auto writes_hist = server().GetMetricsHistogram(
-      TabletServerServiceIf::RpcMetricIndexes::kMetricIndexWrite);
+      TabletServerServiceRpcMethodIndexes::kWrite);
   uint64_t num_writes = (writes_hist != nullptr) ? writes_hist->TotalCount() : 0;
 
   // Calculate the read and write ops per second.
@@ -107,6 +165,9 @@ void TServerMetricsHeartbeatDataProvider::DoAddData(
   uint64_t uptime_seconds = CalculateUptime();
 
   metrics->set_uptime_seconds(uptime_seconds);
+  // If the "max file size for compaction" flag is greater than 0, then tablet splitting should
+  // be disabled for tablets with a default TTL.
+  metrics->set_disable_tablet_split_if_default_ttl(FLAGS_rocksdb_max_file_size_for_compaction > 0);
 
   VLOG_WITH_PREFIX(4) << "Read Ops per second: " << rops_per_sec;
   VLOG_WITH_PREFIX(4) << "Write Ops per second: " << wops_per_sec;

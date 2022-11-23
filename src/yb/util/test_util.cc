@@ -29,31 +29,40 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
+
 #include "yb/util/test_util.h"
 
-#include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <gtest/gtest-spi.h>
 
+#include "yb/gutil/casts.h"
+#include "yb/gutil/strings/join.h"
 #include "yb/gutil/strings/strcat.h"
-#include "yb/gutil/strings/substitute.h"
 #include "yb/gutil/strings/util.h"
 #include "yb/gutil/walltime.h"
-#include "yb/util/env.h"
-#include "yb/util/path_util.h"
-#include "yb/util/random.h"
-#include "yb/util/spinlock_profiling.h"
-#include "yb/util/thread.h"
-#include "yb/util/logging.h"
 
-DEFINE_string(test_leave_files, "on_failure",
+#include "yb/util/env.h"
+#include "yb/util/env_util.h"
+#include "yb/util/flags.h"
+#include "yb/util/logging.h"
+#include "yb/util/path_util.h"
+#include "yb/util/spinlock_profiling.h"
+#include "yb/util/status_format.h"
+#include "yb/util/status_log.h"
+#include "yb/util/thread.h"
+#include "yb/util/debug/trace_event.h"
+
+DEFINE_UNKNOWN_string(test_leave_files, "on_failure",
               "Whether to leave test files around after the test run. "
               " Valid values are 'always', 'on_failure', or 'never'");
 
-DEFINE_int32(test_random_seed, 0, "Random seed to use for randomized tests");
+DEFINE_UNKNOWN_int32(test_random_seed, 0, "Random seed to use for randomized tests");
 DECLARE_int64(memory_limit_hard_bytes);
 DECLARE_bool(enable_tracing);
 DECLARE_bool(TEST_running_test);
+DECLARE_bool(never_fsync);
+DECLARE_string(vmodule);
+DECLARE_bool(TEST_allow_duplicate_flag_callbacks);
 
 using std::string;
 using strings::Substitute;
@@ -73,6 +82,7 @@ YBTest::YBTest()
   : env_(new EnvWrapper(Env::Default())),
     test_dir_(GetTestDataDirectory()) {
   InitThreading();
+  debug::EnableTraceEvents();
 }
 
 // env passed in from subclass, for tests that run in-memory
@@ -105,6 +115,15 @@ void YBTest::SetUp() {
   FLAGS_enable_tracing = true;
   FLAGS_memory_limit_hard_bytes = 8 * 1024 * 1024 * 1024L;
   FLAGS_TEST_running_test = true;
+  FLAGS_never_fsync = true;
+  // Certain dynamically registered callbacks like ReloadPgConfig in pg_supervisor use constant
+  // string name as they are expected to be singleton per process. But in MiniClusterTests multiple
+  // YB masters and tservers will register for callbacks with same name in one test process.
+  // Ideally we would prefix the names with the yb process names, but we currently lack the ability
+  // to do so. We still have coverage for this in ExternalMiniClusterTests.
+  // TODO(Hari): #14682
+  FLAGS_TEST_allow_duplicate_flag_callbacks = true;
+
   for (const char* env_var_name : {
       "ASAN_OPTIONS",
       "LSAN_OPTIONS",
@@ -156,6 +175,13 @@ void OverrideFlagForSlowTests(const std::string& flag_name,
   }
   google::SetCommandLineOptionWithMode(flag_name.c_str(), new_value.c_str(),
                                        google::SET_FLAG_IF_DEFAULT);
+}
+
+Status EnableVerboseLoggingForModule(const std::string& module, int level) {
+  string old_value = FLAGS_vmodule;
+  string new_value = Format("$0$1$2=$3", old_value, (old_value.empty() ? "" : ","), module, level);
+
+  return SET_FLAG(vmodule, new_value);
 }
 
 int SeedRandom() {
@@ -256,72 +282,6 @@ void AssertEventually(const std::function<void(void)>& f,
   }
 }
 
-Status Wait(const std::function<Result<bool>()>& condition,
-            CoarseTimePoint deadline,
-            const std::string& description,
-            MonoDelta initial_delay,
-            double delay_multiplier,
-            MonoDelta max_delay) {
-  auto start = CoarseMonoClock::Now();
-  MonoDelta delay = initial_delay;
-  for (;;) {
-    const auto current = condition();
-    if (!current.ok()) {
-      return current.status();
-    }
-    if (current.get()) {
-      break;
-    }
-    const auto now = CoarseMonoClock::Now();
-    const MonoDelta left(deadline - now);
-    if (left <= MonoDelta::kZero) {
-      return STATUS_FORMAT(TimedOut,
-                           "Operation '$0' didn't complete within $1ms",
-                           description,
-                           MonoDelta(now - start).ToMilliseconds());
-    }
-    delay = std::min(std::min(MonoDelta::FromSeconds(delay.ToSeconds() * delay_multiplier), left),
-                     max_delay);
-    SleepFor(delay);
-  }
-  return Status::OK();
-}
-
-Status Wait(const std::function<Result<bool>()>& condition,
-            MonoTime deadline,
-            const std::string& description,
-            MonoDelta initial_delay,
-            double delay_multiplier,
-            MonoDelta max_delay) {
-  auto left = deadline - MonoTime::Now();
-  return Wait(condition, CoarseMonoClock::Now() + left, description, initial_delay,
-              delay_multiplier, max_delay);
-}
-
-// Waits for the given condition to be true or until the provided timeout has expired.
-Status WaitFor(const std::function<Result<bool>()>& condition,
-               MonoDelta timeout,
-               const string& description,
-               MonoDelta initial_delay,
-               double delay_multiplier,
-               MonoDelta max_delay) {
-  return Wait(condition, MonoTime::Now() + timeout, description, initial_delay, delay_multiplier,
-              max_delay);
-}
-
-Status LoggedWaitFor(
-    const std::function<Result<bool>()>& condition,
-    MonoDelta timeout,
-    const string& description,
-    MonoDelta initial_delay,
-    double delay_multiplier,
-    MonoDelta max_delay) {
-  LOG(INFO) << description << " - started";
-  auto status = WaitFor(condition, timeout, description, initial_delay);
-  LOG(INFO) << description << " - completed: " << yb::ToString(status);
-  return status;
-}
-
 string GetToolPath(const string& rel_path, const string& tool_name) {
   string exe;
   CHECK_OK(Env::Default()->GetExecutablePath(&exe));
@@ -331,33 +291,19 @@ string GetToolPath(const string& rel_path, const string& tool_name) {
   return tool_path;
 }
 
-int CalcNumTablets(int num_tablet_servers) {
+string GetCertsDir() {
+  const auto sub_dir = JoinPathSegments("ent", "test_certs");
+  return JoinPathSegments(env_util::GetRootDir(sub_dir), sub_dir);
+}
+
+int CalcNumTablets(size_t num_tablet_servers) {
 #ifdef NDEBUG
   return 0;  // Will use the default.
 #elif defined(THREAD_SANITIZER) || defined(ADDRESS_SANITIZER)
-  return num_tablet_servers;
+  return narrow_cast<int>(num_tablet_servers);
 #else
-  return num_tablet_servers * 3;
+  return narrow_cast<int>(num_tablet_servers * 3);
 #endif
-}
-
-void WaitStopped(const CoarseDuration& duration, std::atomic<bool>* stop) {
-  auto end = CoarseMonoClock::now() + duration;
-  while (!stop->load(std::memory_order_acquire) && CoarseMonoClock::now() < end) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  }
-}
-
-void TestThreadHolder::JoinAll() {
-  LOG(INFO) << __func__;
-
-  for (auto& thread : threads_) {
-    if (thread.joinable()) {
-      thread.join();
-    }
-  }
-
-  LOG(INFO) << __func__ << " done";
 }
 
 } // namespace yb

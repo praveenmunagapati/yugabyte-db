@@ -19,27 +19,23 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef ROCKSDB_TABLE_MOCK_TABLE_H
-#define ROCKSDB_TABLE_MOCK_TABLE_H
+#pragma once
 
 #include <algorithm>
 #include <atomic>
 #include <map>
 #include <memory>
-#include <set>
 #include <string>
 #include <utility>
 
-#include "yb/rocksdb/util/kv_map.h"
-#include "yb/rocksdb/port/port.h"
 #include "yb/rocksdb/comparator.h"
+#include "yb/rocksdb/port/port.h"
 #include "yb/rocksdb/table.h"
 #include "yb/rocksdb/table/internal_iterator.h"
 #include "yb/rocksdb/table/table_builder.h"
 #include "yb/rocksdb/table/table_reader.h"
+#include "yb/rocksdb/util/kv_map.h"
 #include "yb/rocksdb/util/mutexlock.h"
-#include "yb/rocksdb/util/testharness.h"
-#include "yb/rocksdb/util/testutil.h"
 
 namespace rocksdb {
 namespace mock {
@@ -58,7 +54,7 @@ class MockTableReader : public TableReader {
 
   bool IsSplitSst() const override { return false; }
 
-  void SetDataFileReader(unique_ptr<RandomAccessFileReader>&& data_file) override { assert(false); }
+  void SetDataFileReader(std::unique_ptr<RandomAccessFileReader>&& data_file) override { assert(false); }
 
   InternalIterator* NewIterator(const ReadOptions&, Arena* arena,
                                 bool skip_filters = false) override;
@@ -159,6 +155,10 @@ class MockTableBuilder : public TableBuilder {
     return TableProperties();
   }
 
+  const std::string& LastKey() const override {
+    return (--table_.end())->first;
+  }
+
  private:
   uint32_t id_;
   MockTableFileSystem* file_system_;
@@ -170,13 +170,13 @@ class MockTableFactory : public TableFactory {
   MockTableFactory();
   const char* Name() const override { return "MockTable"; }
   Status NewTableReader(const TableReaderOptions& table_reader_options,
-                        unique_ptr<RandomAccessFileReader>&& file,
+                        std::unique_ptr<RandomAccessFileReader>&& file,
                         uint64_t file_size,
-                        unique_ptr<TableReader>* table_reader) const override;
+                        std::unique_ptr<TableReader>* table_reader) const override;
 
   bool IsSplitSstForWriteSupported() const override { return false; }
 
-  TableBuilder* NewTableBuilder(
+  std::unique_ptr<TableBuilder> NewTableBuilder(
       const TableBuilderOptions& table_builder_options, uint32_t column_familly_id,
       WritableFileWriter* base_file, WritableFileWriter* data_file = nullptr) const override;
 
@@ -211,5 +211,3 @@ class MockTableFactory : public TableFactory {
 
 }  // namespace mock
 }  // namespace rocksdb
-
-#endif  // ROCKSDB_TABLE_MOCK_TABLE_H

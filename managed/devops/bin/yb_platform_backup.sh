@@ -102,14 +102,32 @@ create_postgres_backup() {
   db_host="$3"
   db_port="$4"
   verbose="$5"
+  yba_installer="$6"
+  pg_dump="pg_dump"
+
+  # Determine pg_dump path in yba-installer cases where postgres is installed in data_dir.
+  if [[ "${yba_installer}" = true ]]; then
+    # TODO: Need to pick up from system for bring their own postgres.
+    pg_dump=$(find ${data_dir} -name pg_dump)
+  fi
+
   if [[ "${verbose}" = true ]]; then
-    backup_cmd="pg_dump -h ${db_host} -p ${db_port} -U ${db_username} -Fc -v --clean ${PLATFORM_DB_NAME}"
+    backup_cmd="${pg_dump} -h ${db_host} -p ${db_port} -U ${db_username} -Fc -v --clean \
+      ${PLATFORM_DB_NAME}"
   else
-    backup_cmd="pg_dump -h ${db_host} -p ${db_port} -U ${db_username} -Fc --clean ${PLATFORM_DB_NAME}"
+    backup_cmd="${pg_dump} -h ${db_host} -p ${db_port} -U ${db_username} -Fc --clean \
+      ${PLATFORM_DB_NAME}"
   fi
   # Run pg_dump.
   echo "Creating Yugabyte Platform DB backup ${backup_path}..."
-  docker_aware_cmd "postgres" "${backup_cmd}" > "${backup_path}"
+  if [[ "${yba_installer}" = true ]]; then
+    # -f flag does not work for docker based installs. Tries to dump inside postgres container but
+    # we need output on the host itself.
+    ybai_backup_cmd = "${backup_cmd} -f ${backup_path}"
+    docker_aware_cmd "postgres" "${ybai_backup_cmd}"
+  else
+    docker_aware_cmd "postgres" "${backup_cmd}" > "${backup_path}"
+  fi
   echo "Done"
 }
 
@@ -120,15 +138,24 @@ restore_postgres_backup() {
   db_host="$3"
   db_port="$4"
   verbose="$5"
+  yba_installer="$6"
+  pg_restore="pg_restore"
+
+  # Determine pg_restore path in yba-installer cases where postgres is installed in data_dir.
+  if [[ "${yba_installer}" = true ]]; then
+    pg_restore=$(find ${data_dir} -name pg_restore)
+  fi
+
   if [[ "${verbose}" = true ]]; then
-    restore_cmd="pg_restore -h ${db_host} -p ${db_port} -U ${db_username} -c -v -d \
-    ${PLATFORM_DB_NAME}"
+    restore_cmd="${pg_restore} -h ${db_host} -p ${db_port} -U ${db_username} -c -v -d \
+      ${PLATFORM_DB_NAME} ${backup_path}"
   else
-    restore_cmd="pg_restore -h ${db_host} -p ${db_port} -U ${db_username} -c -d ${PLATFORM_DB_NAME}"
+    restore_cmd="${pg_restore} -h ${db_host} -p ${db_port} -U ${db_username} -c -d \
+      ${PLATFORM_DB_NAME} ${backup_path}"
   fi
   # Run pg_restore.
   echo "Restoring Yugabyte Platform DB backup ${backup_path}..."
-  docker_aware_cmd "postgres" "${restore_cmd}" < "${backup_path}"
+  docker_aware_cmd "postgres" "${restore_cmd}"
   echo "Done"
 }
 
@@ -156,9 +183,10 @@ create_backup() {
   db_port="${7}"
   verbose="${8}"
   prometheus_host="${9}"
-  k8s_namespace="${10}"
-  k8s_pod="${11}"
-  exclude_releases_flag=""
+  prometheus_port="${10}"
+  k8s_namespace="${11}"
+  k8s_pod="${12}"
+  include_releases_flag="**/releases/**"
 
   mkdir -p "${output_path}"
 
@@ -189,10 +217,33 @@ create_backup() {
       echo "Failed"
       return
     fi
+
+    # The version_metadata.json file is always present in the container, so
+    # we don't need to check if the file exists before copying it to the output path.
+
+    # Note that the copied path is version_metadata_backup.json and not version_metadata.json
+    # because executing yb_platform_backup.sh with the kubectl command will first execute the
+    # script in the container, making the version metadata file already be renamed to
+    # version_metadata_backup.json and placed at location
+    # /opt/yugabyte/yugaware/version_metadata_backup.json in the container. We extract this file
+    # from the container to our local machine for version checking.
+
+    version_path="/opt/yugabyte/yugaware/version_metadata_backup.json"
+
+    fl="version_metadata_backup.json"
+
+    # Copy version_metadata_backup.json from container to local machine.
+    kubectl cp "${k8s_pod}:${version_path}" "${output_path}/${fl}" -n "${k8s_namespace}" -c yugaware
+
+    # Delete version_metadata_backup.json from container.
+    kubectl -n "${k8s_namespace}" exec -it "${k8s_pod}" -c yugaware -- \
+      /bin/bash -c "rm /opt/yugabyte/yugaware/version_metadata_backup.json"
+
     echo "Copying backup from container"
     # Copy backup archive from container to local machine.
     kubectl -n "${k8s_namespace}" -c yugaware cp \
       "${k8s_pod}:${backup_file}" "${output_path}/${backup_file}"
+
     # Delete backup archive from container.
     kubectl -n "${k8s_namespace}" exec -it "${k8s_pod}" -c yugaware -- \
       /bin/bash -c "rm /opt/yugabyte/yugaware/backup*.tgz"
@@ -200,27 +251,36 @@ create_backup() {
     return
   fi
 
-  if [[ "$exclude_releases" = true ]]; then
-    exclude_releases_flag="--exclude release*"
+  version_path=$(find ${data_dir} -wholename **/yugaware/conf/version_metadata.json)
+
+  # At least keep some default as a worst case.
+  if [ ! -f ${version_path} ] || [ -z ${version_path} ]; then
+    version_path="/opt/yugabyte/yugaware/conf/version_metadata.json"
   fi
 
-  exclude_dirs="--exclude postgres* --exclude devops --exclude yugaware/lib \
-  --exclude yugaware/logs --exclude yugaware/README.md --exclude yugaware/bin \
-  --exclude yugaware/conf --exclude backup_*.tgz --exclude helm"
+  command="cat ${version_path}"
+
+  docker_aware_cmd "yugaware" "${command}" > "${output_path}/version_metadata_backup.json"
+
+  if [[ "$exclude_releases" = true ]]; then
+    include_releases_flag=""
+  fi
 
   modify_service yb-platform stop
 
-  tar_name="${output_path}/backup_${now}.tgz"
+  tar_name="${output_path}/backup_${now}.tar"
+  tgz_name="${output_path}/backup_${now}.tgz"
   db_backup_path="${data_dir}/${PLATFORM_DUMP_FNAME}"
   trap 'delete_postgres_backup ${db_backup_path}' RETURN
-  create_postgres_backup "${db_backup_path}" "${db_username}" "${db_host}" "${db_port}" "${verbose}"
+  create_postgres_backup "${db_backup_path}" "${db_username}" "${db_host}" "${db_port}" \
+                         "${verbose}" "${yba_installer}"
 
   # Backup prometheus data.
   if [[ "$exclude_prometheus" = false ]]; then
     trap 'run_sudo_cmd "rm -rf ${data_dir}/${PROMETHEUS_SNAPSHOT_DIR}"' RETURN
     echo "Creating prometheus snapshot..."
     set_prometheus_data_dir "${prometheus_host}" "${data_dir}"
-    snapshot_dir=$(curl -X POST "http://${prometheus_host}:9090/api/v1/admin/tsdb/snapshot" |
+    snapshot_dir=$(curl -X POST "http://${prometheus_host}:${prometheus_port}/api/v1/admin/tsdb/snapshot" |
       python -c "import sys, json; print(json.load(sys.stdin)['data']['name'])")
     mkdir -p "$data_dir/$PROMETHEUS_SNAPSHOT_DIR"
     run_sudo_cmd "cp -aR ${PROMETHEUS_DATA_DIR}/snapshots/${snapshot_dir} \
@@ -228,13 +288,29 @@ create_backup() {
     run_sudo_cmd "rm -rf ${PROMETHEUS_DATA_DIR}/snapshots/${snapshot_dir}"
   fi
   echo "Creating platform backup package..."
+  cd ${data_dir}
   if [[ "${verbose}" = true ]]; then
-    tar ${exclude_releases_flag} ${exclude_dirs} -czvf "${tar_name}" -C "${data_dir}" .
+    find . \( -path "**/data/certs/**" -o -path "**/data/keys/**" -o -path "**/data/provision/**" \
+              -o -path "**/data/licenses/**" \
+              -o -path "**/data/yb-platform/keys/**" -o -path "**/data/yb-platform/certs/**" \
+              -o -path "**/swamper_rules/**" -o -path "**/swamper_targets/**" \
+              -o -path "**/prometheus/rules/**" -o -path "**/prometheus/targets/**" \
+              -o -path "**/${PLATFORM_DUMP_FNAME}" -o -path "**/${PROMETHEUS_SNAPSHOT_DIR}/**" \
+              -o -path "${include_releases_flag}" \) -exec tar -rvf "${tar_name}" {} +
   else
-    tar ${exclude_releases_flag} ${exclude_dirs} -czf "${tar_name}" -C "${data_dir}" .
+    find . \( -path "**/data/certs/**" -o -path "**/data/keys/**" -o -path "**/data/provision/**" \
+              -o -path "**/data/licenses/**" \
+              -o -path "**/data/yb-platform/keys/**" -o -path "**/data/yb-platform/certs/**" \
+              -o -path "**/swamper_rules/**" -o -path "**/swamper_targets/**" \
+              -o -path "**/prometheus/rules/**" -o -path "**/prometheus/targets/**" \
+              -o -path "**/${PLATFORM_DUMP_FNAME}" -o -path "**/${PROMETHEUS_SNAPSHOT_DIR}/**" \
+              -o -path "${include_releases_flag}" \) -exec tar -rf "${tar_name}" {} +
   fi
 
-  echo "Finished creating backup ${tar_name}"
+  gzip -9 < ${tar_name} > ${tgz_name}
+  cleanup "${tar_name}"
+
+  echo "Finished creating backup ${tgz_name}"
   modify_service yb-platform restart
 }
 
@@ -249,15 +325,43 @@ restore_backup() {
   data_dir="${8}"
   k8s_namespace="${9}"
   k8s_pod="${10}"
+  disable_version_check="${11}"
   prometheus_dir_regex="^${PROMETHEUS_SNAPSHOT_DIR}/$"
+  if [[ "${yba_installer}" = true ]]; then
+    prometheus_dir_regex="${PROMETHEUS_SNAPSHOT_DIR}"
+  fi
+
+  m_path=""
+
+  if [ -f ../../src/main/resources/version_metadata.json ]; then
+
+      m_path="../../src/main/resources/version_metadata.json"
+
+  else
+
+      # The version_metadata.json file is always present in the container, so
+      # we don't need to check if the file exists before copying it to the output path.
+      m_path="/opt/yugabyte/yugaware/conf/version_metadata.json"
+
+  fi
+
+  input_path_rel=$(dirname ${input_path})
+  r_pth="${input_path_rel}/version_metadata_backup.json"
+  r_path_current="${input_path_rel}/version_metadata.json"
 
   # Perform K8s restore.
   if [[ -n "${k8s_namespace}" ]] || [[ -n "${k8s_pod}" ]]; then
+
     # Copy backup archive to container.
     echo "Copying backup to container"
     kubectl -n "${k8s_namespace}" -c yugaware cp \
       "${input_path}" "${k8s_pod}:/opt/yugabyte/yugaware/"
     echo "Done"
+
+    # Copy version_metadata_backup.json to container.
+    kubectl -n "${k8s_namespace}" -c yugaware cp \
+      "${r_pth}" "${k8s_pod}:/opt/yugabyte/yugaware/"
+
     # Determine backup archive filename.
     # Note: There is a slight race condition here. It will always use the most recent backup file.
     backup_file=$(kubectl -n "${k8s_namespace}" -c yugaware exec -it "${k8s_pod}" -c yugaware -- \
@@ -269,12 +373,66 @@ restore_backup() {
       verbose_flag="-v"
     fi
     backup_script="/opt/yugabyte/devops/bin/yb_platform_backup.sh"
-    kubectl -n "${k8s_namespace}" exec -it "${k8s_pod}" -c yugaware -- /bin/bash -c \
-      "${backup_script} restore ${verbose_flag} --input /opt/yugabyte/yugaware/${backup_file}"
+
+    #Passing in the required argument for --disable_version_check if set to true, since
+    #the script is called again within the Kubernetes container.
+    d="--disable_version_check"
+    cont_path="/opt/yugabyte/yugaware"
+
+    if [ "$disable_version_check" != true ]; then
+      kubectl -n "${k8s_namespace}" exec -it "${k8s_pod}" -c yugaware -- /bin/bash -c \
+        "${backup_script} restore ${verbose_flag} --input ${cont_path}/${backup_file}"
+    else
+      kubectl -n "${k8s_namespace}" exec -it "${k8s_pod}" -c yugaware -- /bin/bash -c \
+        "${backup_script} restore ${verbose_flag} --input ${cont_path}/${backup_file} ${d}"
+    fi
+
+    # Delete version_metadata_backup.json from container.
+    kubectl -n "${k8s_namespace}" exec -it "${k8s_pod}" -c yugaware -- \
+      /bin/bash -c "rm /opt/yugabyte/yugaware/version_metadata_backup.json"
+
+    # Delete version_metadata.json from container (it already exists at conf folder)
+    kubectl -n "${k8s_namespace}" exec -it "${k8s_pod}" -c yugaware -- \
+      /bin/bash -c "rm /opt/yugabyte/yugaware/version_metadata.json"
+
     # Delete backup archive from container.
     kubectl -n "${k8s_namespace}" exec -it "${k8s_pod}" -c yugaware -- \
       /bin/bash -c "rm /opt/yugabyte/yugaware/backup*.tgz"
     return
+  fi
+
+  if [ "$disable_version_check" != true ]
+  then
+  command="cat ${m_path}"
+
+  docker_aware_cmd "yugaware" "${command}" > "${input_path_rel}/version_metadata.json"
+
+  version_command="'import json, sys; print(json.load(sys.stdin)[\"version_number\"])'"
+
+  build_command="'import json, sys; print(json.load(sys.stdin)[\"build_number\"])'"
+
+  version="eval cat ${r_path_current} | python -c ${version_command}"
+
+  build="eval cat ${r_path_current} | python -c ${build_command}"
+
+  curr_platform_version=$(${version})-$(${build})
+
+  # The version_metadata.json file is always present in a release package, and it would have
+  # been stored during create_backup(), so we don't need to check if the file exists before
+  # restoring it from the restore path.
+  bp1=$(cat ${r_pth} | python -c ${version_command})
+  bp2=$(cat ${r_pth} | python -c ${build_command})
+  back_plat_version=${bp1}-${bp2}
+
+  if [ ${curr_platform_version} != ${back_plat_version} ]
+  then
+    echo "Your backups were created on a platform of version ${back_plat_version}, and you are
+    attempting to restore these backups on a platform of version ${curr_platform_version},
+    which is a mismatch. Please restore your platform instance exactly back to
+    ${back_plat_version} to proceed, or override this check by running the script with the
+    command line argument --disable_version_check true"
+    exit 1
+  fi
   fi
 
   modify_service yb-platform stop
@@ -288,23 +446,31 @@ restore_backup() {
   fi
 
   restore_postgres_backup "${db_backup_path}" "${db_username}" "${db_host}" "${db_port}" \
-  "${verbose}"
+  "${verbose}" "${yba_installer}"
   # Restore prometheus data.
   if tar -tf "${input_path}" | grep $prometheus_dir_regex; then
     echo "Restoring prometheus snapshot..."
     set_prometheus_data_dir "${prometheus_host}" "${data_dir}"
     modify_service prometheus stop
-    trap 'modify_service prometheus restart' RETURN
     run_sudo_cmd "rm -rf ${PROMETHEUS_DATA_DIR}/*"
-    run_sudo_cmd "mv ${destination}/${PROMETHEUS_SNAPSHOT_DIR}/* ${PROMETHEUS_DATA_DIR}"
+    if [[ "${yba_installer}" = true ]]; then
+      run_sudo_cmd "mv ${destination}/${PROMETHEUS_SNAPSHOT_DIR}/*/* ${PROMETHEUS_DATA_DIR}"
+      run_sudo_cmd "rm -rf ${destination}/${PROMETHEUS_SNAPSHOT_DIR}"
+    else
+      run_sudo_cmd "mv ${destination}/${PROMETHEUS_SNAPSHOT_DIR}/* ${PROMETHEUS_DATA_DIR}"
+    fi
     if [[ "$SERVICE_BASED" = true ]]; then
-      run_sudo_cmd "chown -R prometheus:prometheus ${PROMETHEUS_DATA_DIR}"
+      run_sudo_cmd "chown -R ${prometheus_user}:${prometheus_user} ${PROMETHEUS_DATA_DIR}"
     else
       run_sudo_cmd "chown -R ${NOBODY_UID}:${NOBODY_UID} ${PROMETHEUS_DATA_DIR}"
     fi
+    # Manually execute so postgres TRAP executes.
+    modify_service prometheus restart
   fi
   # Create following directory if it wasn't created yet so restore will succeed.
-  mkdir -p "${destination}/release"
+  if [[ "${yba_installer}" = false ]]; then
+    mkdir -p "${destination}/release"
+  fi
 
   modify_service yb-platform restart
 
@@ -335,8 +501,10 @@ print_backup_usage() {
   echo "  -h, --db_host=HOST             postgres host (default: localhost)"
   echo "  -P, --db_port=PORT             postgres port (default: 5432)"
   echo "  -n, --prometheus_host=HOST     prometheus host (default: localhost)"
+  echo "  -t, --prometheus_port=PORT     prometheus port (default: 9090)"
   echo "  --k8s_namespace                kubernetes namespace"
   echo "  --k8s_pod                      kubernetes pod"
+  echo "  --yba_installer                yba_installer installation (default: false)"
   echo "  -?, --help                     show create help, then exit"
   echo
 }
@@ -353,9 +521,12 @@ print_restore_usage() {
   echo "  -h, --db_host=HOST             postgres host (default: localhost)"
   echo "  -P, --db_port=PORT             postgres port (default: 5432)"
   echo "  -n, --prometheus_host=HOST     prometheus host (default: localhost)"
+  echo "  -e, --prometheus_user=USERNAME prometheus user (default: prometheus)"
   echo "  --k8s_namespace                kubernetes namespace"
   echo "  --k8s_pod                      kubernetes pod"
   echo "  -?, --help                     show restore help, then exit"
+  echo "  --disable_version_check        disable the backup version check (default: false)"
+  echo "  --yba_installer                yba_installer backup (default: false)"
   echo
 }
 
@@ -389,10 +560,14 @@ db_username=postgres
 db_host=localhost
 db_port=5432
 prometheus_host=localhost
+prometheus_port=9090
+prometheus_user=prometheus
 k8s_namespace=""
 k8s_pod=""
 data_dir=/opt/yugabyte
 verbose=false
+disable_version_check=false
+yba_installer=false
 
 case $command in
   -?|--help)
@@ -454,6 +629,10 @@ case $command in
           prometheus_host=$2
           shift 2
           ;;
+        -t|--prometheus_port)
+          prometheus_port=$2
+          shift 2
+          ;;
         --k8s_namespace)
           k8s_namespace=$2
           shift 2
@@ -461,6 +640,10 @@ case $command in
         --k8s_pod)
           k8s_pod=$2
           shift 2
+          ;;
+        --yba_installer)
+          yba_installer=true
+          shift
           ;;
         -?|--help)
           print_backup_usage
@@ -477,7 +660,8 @@ case $command in
     validate_k8s_args "${k8s_namespace}" "${k8s_pod}"
 
     create_backup "$output_path" "$data_dir" "$exclude_prometheus" "$exclude_releases" \
-    "$db_username" "$db_host" "$db_port" "$verbose" "$prometheus_host" "$k8s_namespace" "$k8s_pod"
+    "$db_username" "$db_host" "$db_port" "$verbose" "$prometheus_host" "$prometheus_port" \
+    "$k8s_namespace" "$k8s_pod" ""
     exit 0
     ;;
   restore)
@@ -530,6 +714,10 @@ case $command in
           prometheus_host=$2
           shift 2
           ;;
+        -e|--prometheus_user)
+          prometheus_user=$2
+          shift 2
+          ;;
         --k8s_namespace)
           k8s_namespace=$2
           shift 2
@@ -537,6 +725,15 @@ case $command in
         --k8s_pod)
           k8s_pod=$2
           shift 2
+          ;;
+        --disable_version_check)
+          disable_version_check=true
+          set -x
+          shift
+          ;;
+        --yba_installer)
+          yba_installer=true
+          shift
           ;;
         -?|--help)
           print_restore_usage
@@ -560,7 +757,7 @@ case $command in
     validate_k8s_args "${k8s_namespace}" "${k8s_pod}"
 
     restore_backup "$input_path" "$destination" "$db_host" "$db_port" "$db_username" "$verbose" \
-    "$prometheus_host" "$data_dir" "$k8s_namespace" "$k8s_pod"
+    "$prometheus_host" "$data_dir" "$k8s_namespace" "$k8s_pod" "$disable_version_check"
     exit 0
     ;;
   *)

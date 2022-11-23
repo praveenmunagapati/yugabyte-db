@@ -32,31 +32,40 @@
 
 #include <memory>
 #include <string>
-#include <gflags/gflags.h>
+
+#include "yb/util/flags.h"
 #include <gtest/gtest.h>
 
+#include "yb/client/yb_table_name.h"
+
 #include "yb/common/schema.h"
-#include "yb/common/wire_protocol-test-util.h"
+
 #include "yb/fs/fs_manager.h"
+
 #include "yb/integration-tests/mini_cluster.h"
 #include "yb/integration-tests/yb_mini_cluster_test_base.h"
-#include "yb/master/mini_master.h"
-#include "yb/master/master.h"
-#include "yb/master/master.pb.h"
+
 #include "yb/master/master-test-util.h"
-#include "yb/master/sys_catalog.h"
+#include "yb/master/master_client.pb.h"
+#include "yb/master/mini_master.h"
 #include "yb/master/ts_descriptor.h"
+
+#include "yb/tablet/tablet.h"
+#include "yb/tablet/tablet_peer.h"
+
 #include "yb/tserver/mini_tablet_server.h"
 #include "yb/tserver/tablet_server.h"
+
 #include "yb/util/curl_util.h"
 #include "yb/util/faststring.h"
 #include "yb/util/metrics.h"
 #include "yb/util/test_util.h"
-#include "yb/util/stopwatch.h"
+#include "yb/util/tsan_util.h"
 
 DECLARE_int32(heartbeat_interval_ms);
 DECLARE_int32(yb_num_shards_per_tserver);
 DECLARE_bool(enable_ysql);
+DECLARE_int32(TEST_mini_cluster_registration_wait_time_sec);
 
 METRIC_DECLARE_counter(rows_inserted);
 
@@ -64,6 +73,7 @@ namespace yb {
 
 using std::vector;
 using std::shared_ptr;
+using std::string;
 using master::MiniMaster;
 using master::TSDescriptor;
 using master::TabletLocationsPB;
@@ -120,16 +130,17 @@ class RegistrationTest : public YBMiniClusterTestBase<MiniCluster> {
     MiniTabletServer* ts = cluster_->mini_tablet_server(0);
 
     auto GetCatalogMetric = [&](CounterPrototype& prototype) -> int64_t {
-      auto metrics = cluster_->mini_master()
-                         ->master()
-                         ->catalog_manager()
-                         ->sys_catalog()
-                         ->tablet_peer()
-                         ->shared_tablet()
-                         ->GetTabletMetricsEntity();
+      auto tablet_peer = cluster_->mini_master()->tablet_peer();
+      auto tablet_result = tablet_peer->shared_tablet_safe();
+      if (!tablet_result.ok()) {
+        LOG(WARNING) << "Failed to get tablet: " << tablet_result.status();
+        return 0;
+      }
+      auto tablet = *tablet_result;
+      auto metrics = tablet->GetTabletMetricsEntity();
       return prototype.Instantiate(metrics)->value();
     };
-    int before_rows_inserted = GetCatalogMetric(METRIC_rows_inserted);
+    auto before_rows_inserted = GetCatalogMetric(METRIC_rows_inserted);
     LOG(INFO) << "Begin calculating sys catalog rows inserted";
 
     // Add a tablet, make sure it reports itself.
@@ -146,13 +157,13 @@ class RegistrationTest : public YBMiniClusterTestBase<MiniCluster> {
               locs.replicas(0).ts_info().permanent_uuid();
 
     LOG(INFO) << "Finish calculating sys catalog rows inserted";
-    int after_create_rows_inserted = GetCatalogMetric(METRIC_rows_inserted);
+    auto after_create_rows_inserted = GetCatalogMetric(METRIC_rows_inserted);
     // Check that we inserted the right number of rows for the first table:
     // - 2 for the namespace
     // - 1 for the table
     // - 3 * FLAGS_yb_num_shards_per_tserver for the tablets:
     //    PREPARING, first heartbeat, leader election heartbeat
-    int expected_rows = 2 + 1 + FLAGS_yb_num_shards_per_tserver * 3;
+    int64_t expected_rows = 2 + 1 + FLAGS_yb_num_shards_per_tserver * 3;
     EXPECT_EQ(expected_rows, after_create_rows_inserted - before_rows_inserted);
 
     // Add another tablet, make sure it is reported via incremental.
@@ -267,6 +278,27 @@ TEST_F(RegistrationTest, TestTabletReports) {
 
 TEST_F(RegistrationTest, TestCopartitionedTables) {
   CheckTabletReports(/* co_partition */ true);
+}
+
+class RegistrationFailedTest : public YBMiniClusterTestBase<MiniCluster> {
+  void SetUp() override {
+    // Cause waiting for tservers to register to master to fail.
+    FLAGS_TEST_mini_cluster_registration_wait_time_sec = 0;
+
+    YBMiniClusterTestBase::SetUp();
+    cluster_.reset(new MiniCluster(MiniClusterOptions()));
+
+    // Test that cluster starting fails gracefully.
+    Status s = cluster_->Start();
+    ASSERT_NOK(s);
+    ASSERT_TRUE(s.IsTimedOut()) << s;
+    ASSERT_STR_CONTAINS(s.message().ToBuffer(), "TS(s) never registered with master");
+  }
+};
+
+TEST_F_EX(RegistrationTest, FailRegister, RegistrationFailedTest) {
+  // Do nothing: test happens in RegistrationFailedTest::SetUp.
+  // Logs should show "Shutdown when mini cluster is not running".
 }
 
 } // namespace yb

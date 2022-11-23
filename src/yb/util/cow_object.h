@@ -29,16 +29,19 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_COW_OBJECT_H
-#define YB_UTIL_COW_OBJECT_H
+#pragma once
+
+#include <fcntl.h>
 
 #include <algorithm>
 
 #include <glog/logging.h>
 
 #include "yb/gutil/macros.h"
-#include "yb/util/rwc_lock.h"
+
+#include "yb/util/fault_injection.h"
 #include "yb/util/logging.h"
+#include "yb/util/rwc_lock.h"
 
 namespace yb {
 
@@ -124,6 +127,10 @@ class CowObject {
   bool is_dirty() const {
     DCHECK(lock_.HasReaders() || lock_.HasWriteLock());
     return is_dirty_;
+  }
+
+  void WriteLockThreadChanged() {
+    lock_.WriteLockThreadChanged();
   }
 
  private:
@@ -243,6 +250,14 @@ class CowWriteLock {
     cow_ = nullptr;
   }
 
+  void CommitOrWarn(const Status& status, const char* action) {
+    if (!status.ok()) {
+      LOG(WARNING) << "An error occurred while " << action << ": " << status;
+      return;
+    }
+    Commit();
+  }
+
   void Unlock() {
     if (cow_) {
       cow_->AbortMutation();
@@ -273,6 +288,10 @@ class CowWriteLock {
     return cow_ != nullptr;
   }
 
+  void ThreadChanged() {
+    cow_->WriteLockThreadChanged();
+  }
+
   ~CowWriteLock() {
     Unlock();
   }
@@ -282,5 +301,3 @@ class CowWriteLock {
 };
 
 } // namespace yb
-
-#endif /* YB_UTIL_COW_OBJECT_H */

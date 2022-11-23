@@ -17,10 +17,8 @@
 // under the License.
 //
 
-#ifndef YB_ROCKSDB_TABLE_PLAIN_TABLE_FACTORY_H
-#define YB_ROCKSDB_TABLE_PLAIN_TABLE_FACTORY_H
+#pragma once
 
-#ifndef ROCKSDB_LITE
 #include <stdint.h>
 #include <memory>
 #include <string>
@@ -33,7 +31,6 @@ namespace rocksdb {
 
 struct EnvOptions;
 
-using std::unique_ptr;
 class WritableFile;
 class Table;
 class TableBuilder;
@@ -163,13 +160,14 @@ class PlainTableFactory : public TableFactory {
 
   const char* Name() const override { return "PlainTable"; }
   Status NewTableReader(const TableReaderOptions& table_reader_options,
-                        unique_ptr<RandomAccessFileReader>&& file,
+                        std::unique_ptr<RandomAccessFileReader>&& file,
                         uint64_t file_size,
-                        unique_ptr<TableReader>* table) const override;
+                        std::unique_ptr<TableReader>* table) const override;
 
   bool IsSplitSstForWriteSupported() const override { return false; }
 
-  TableBuilder *NewTableBuilder(const TableBuilderOptions &table_builder_options,
+  std::unique_ptr<TableBuilder> NewTableBuilder(
+      const TableBuilderOptions &table_builder_options,
       uint32_t column_family_id, WritableFileWriter *base_file,
       WritableFileWriter *data_file = nullptr) const override;
 
@@ -192,6 +190,3 @@ class PlainTableFactory : public TableFactory {
 };
 
 }  // namespace rocksdb
-#endif  // ROCKSDB_LITE
-
-#endif // YB_ROCKSDB_TABLE_PLAIN_TABLE_FACTORY_H

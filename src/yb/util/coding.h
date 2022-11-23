@@ -21,16 +21,15 @@
 // * In addition we support variable length "varint" encoding
 // * Strings are encoded prefixed by their length in varint format
 
-#ifndef YB_UTIL_CODING_H
-#define YB_UTIL_CODING_H
+#pragma once
 
 #include <stdint.h>
 #include <string.h>
+
 #include <string>
 
 #include <boost/container/small_vector.hpp>
 
-#include "yb/util/coding_consts.h"
 #include "yb/util/faststring.h"
 #include "yb/util/slice.h"
 
@@ -125,5 +124,3 @@ inline const uint8_t *GetVarint32Ptr(const uint8_t *p,
 }
 
 }  // namespace yb
-
-#endif  // YB_UTIL_CODING_H

@@ -32,56 +32,64 @@
 
 #include "yb/tserver/remote_bootstrap_client.h"
 
-#include <gflags/gflags.h>
 #include <glog/logging.h>
+
+#include "yb/common/index.h"
+#include "yb/common/schema.h"
+#include "yb/common/wire_protocol.h"
 
 #include "yb/consensus/consensus.h"
 #include "yb/consensus/consensus_meta.h"
+#include "yb/consensus/consensus_util.h"
 #include "yb/consensus/metadata.pb.h"
+
 #include "yb/fs/fs_manager.h"
+
 #include "yb/gutil/strings/substitute.h"
-#include "yb/gutil/strings/util.h"
 #include "yb/gutil/walltime.h"
-#include "yb/rpc/messenger.h"
+
 #include "yb/rpc/rpc_controller.h"
+
 #include "yb/tablet/tablet.pb.h"
-#include "yb/tablet/tablet.h"
 #include "yb/tablet/tablet_bootstrap_if.h"
 #include "yb/tablet/tablet_metadata.h"
-#include "yb/tablet/tablet_peer.h"
+
 #include "yb/tserver/remote_bootstrap.pb.h"
 #include "yb/tserver/remote_bootstrap.proxy.h"
 #include "yb/tserver/remote_bootstrap_snapshots.h"
-#include "yb/tserver/tablet_server.h"
 #include "yb/tserver/ts_tablet_manager.h"
+
+#include "yb/util/debug-util.h"
 #include "yb/util/env.h"
 #include "yb/util/env_util.h"
 #include "yb/util/fault_injection.h"
-#include "yb/util/flag_tags.h"
+#include "yb/util/flags.h"
+#include "yb/util/logging.h"
 #include "yb/util/net/net_util.h"
+#include "yb/util/result.h"
 #include "yb/util/scope_exit.h"
 #include "yb/util/size_literals.h"
+#include "yb/util/status_log.h"
 
 using namespace yb::size_literals;
 
-DEFINE_int32(remote_bootstrap_begin_session_timeout_ms, 5000,
+DEFINE_UNKNOWN_int32(remote_bootstrap_begin_session_timeout_ms, 5000,
              "Tablet server RPC client timeout for BeginRemoteBootstrapSession calls.");
 TAG_FLAG(remote_bootstrap_begin_session_timeout_ms, hidden);
 
-DEFINE_int32(remote_bootstrap_end_session_timeout_sec, 15,
+DEFINE_UNKNOWN_int32(remote_bootstrap_end_session_timeout_sec, 15,
              "Tablet server RPC client timeout for EndRemoteBootstrapSession calls. "
              "The timeout is usually a large value because we have to wait for the remote server "
              "to get a CHANGE_ROLE config change accepted.");
 TAG_FLAG(remote_bootstrap_end_session_timeout_sec, hidden);
 
-DEFINE_bool(remote_bootstrap_save_downloaded_metadata, false,
-            "Save copies of the downloaded remote bootstrap files for debugging purposes. "
-            "Note: This is only intended for debugging and should not be normally used!");
+DEFINE_RUNTIME_bool(remote_bootstrap_save_downloaded_metadata, false,
+    "Save copies of the downloaded remote bootstrap files for debugging purposes. "
+    "Note: This is only intended for debugging and should not be normally used!");
 TAG_FLAG(remote_bootstrap_save_downloaded_metadata, advanced);
 TAG_FLAG(remote_bootstrap_save_downloaded_metadata, hidden);
-TAG_FLAG(remote_bootstrap_save_downloaded_metadata, runtime);
 
-DEFINE_int32(committed_config_change_role_timeout_sec, 30,
+DEFINE_UNKNOWN_int32(committed_config_change_role_timeout_sec, 30,
              "Number of seconds to wait for the CHANGE_ROLE to be in the committed config before "
              "timing out. ");
 TAG_FLAG(committed_config_change_role_timeout_sec, hidden);
@@ -98,6 +106,7 @@ DEFINE_test_flag(int32, simulate_long_remote_bootstrap_sec, 0,
                  "follower_unavailable_considered_failed_sec seconds.");
 
 DEFINE_test_flag(bool, download_partial_wal_segments, false, "");
+DEFINE_test_flag(bool, pause_rbs_before_download_wal, false, "Pause RBS before downloading WAL.");
 
 DECLARE_int32(bytes_remote_bootstrap_durable_write_mb);
 
@@ -106,6 +115,7 @@ namespace tserver {
 
 using consensus::ConsensusMetadata;
 using consensus::ConsensusStatePB;
+using consensus::PeerMemberType;
 using consensus::RaftConfigPB;
 using consensus::RaftPeerPB;
 using env_util::CopyFile;
@@ -113,6 +123,7 @@ using rpc::Messenger;
 using std::shared_ptr;
 using std::string;
 using std::vector;
+using std::min;
 using strings::Substitute;
 using tablet::TabletDataState;
 using tablet::TabletDataState_Name;
@@ -187,6 +198,7 @@ Status RemoteBootstrapClient::SetTabletToReplace(const RaftGroupMetadataPtr& met
 Status RemoteBootstrapClient::Start(const string& bootstrap_peer_uuid,
                                     rpc::ProxyCache* proxy_cache,
                                     const HostPort& bootstrap_peer_addr,
+                                    const ServerRegistrationPB& tablet_leader_conn_info,
                                     RaftGroupMetadataPtr* meta,
                                     TSTabletManager* ts_manager) {
   CHECK(!started_);
@@ -201,6 +213,11 @@ Status RemoteBootstrapClient::Start(const string& bootstrap_peer_uuid,
   BeginRemoteBootstrapSessionRequestPB req;
   req.set_requestor_uuid(permanent_uuid());
   req.set_tablet_id(tablet_id_);
+  // if tablet_leader_conn_info is populated, then propagate it through
+  // the BeginRemoteBootstrapSessionRequestPB req.
+  if (tablet_leader_conn_info.has_cloud_info()) {
+    *req.mutable_tablet_leader_conn_info() = tablet_leader_conn_info;
+  }
 
   rpc::RpcController controller;
   controller.set_timeout(MonoDelta::FromMilliseconds(
@@ -331,17 +348,23 @@ Status RemoteBootstrapClient::Start(const string& bootstrap_peer_uuid,
                                               &wal_root_dir);
     }
     auto table_info = std::make_shared<tablet::TableInfo>(
-        table_id, table.namespace_name(), table.table_name(), table.table_type(), schema,
-        IndexMap(table.indexes()),
+        consensus::MakeTabletLogPrefix(tablet_id_, fs_manager().uuid()),
+        tablet::Primary::kTrue, table_id, table.namespace_name(), table.table_name(),
+        table.table_type(), schema, IndexMap(table.indexes()),
         table.has_index_info() ? boost::optional<IndexInfo>(table.index_info()) : boost::none,
         table.schema_version(), partition_schema);
-    auto create_result = RaftGroupMetadata::CreateNew(tablet::RaftGroupMetadataData {
-        .fs_manager = &fs_manager(),
-        .table_info = table_info,
-        .raft_group_id = tablet_id_,
-        .partition = partition,
-        .tablet_data_state = tablet::TABLET_DATA_COPYING,
-        .colocated = colocated }, data_root_dir, wal_root_dir);
+    fs_manager().SetTabletPathByDataPath(tablet_id_, data_root_dir);
+    auto create_result = RaftGroupMetadata::CreateNew(
+        tablet::RaftGroupMetadataData {
+            .fs_manager = &fs_manager(),
+            .table_info = table_info,
+            .raft_group_id = tablet_id_,
+            .partition = partition,
+            .tablet_data_state = tablet::TABLET_DATA_COPYING,
+            .colocated = colocated,
+            .snapshot_schedules = {},
+        },
+        data_root_dir, wal_root_dir);
     if (ts_manager != nullptr && !create_result.ok()) {
       ts_manager->UnregisterDataWalDir(table_id, tablet_id_, data_root_dir, wal_root_dir);
     }
@@ -390,6 +413,8 @@ Status RemoteBootstrapClient::FetchAll(TabletStatusListener* status_listener) {
   new_superblock_.mutable_kv_store()->set_rocksdb_dir(meta_->rocksdb_dir());
 
   RETURN_NOT_OK(DownloadRocksDBFiles());
+  TEST_PAUSE_IF_FLAG_WITH_PREFIX(
+      TEST_pause_rbs_before_download_wal, LogPrefix() + tablet_id_ + ": ");
   RETURN_NOT_OK(DownloadWALs());
   for (const auto& component : components_) {
     RETURN_NOT_OK(component->Download());
@@ -421,7 +446,7 @@ Status RemoteBootstrapClient::Finish() {
   RETURN_NOT_OK(meta_->ReplaceSuperBlock(new_superblock_));
 
   if (FLAGS_remote_bootstrap_save_downloaded_metadata) {
-    string meta_path = fs_manager().GetRaftGroupMetadataPath(tablet_id_);
+    string meta_path = VERIFY_RESULT(fs_manager().GetRaftGroupMetadataPath(tablet_id_));
     string meta_copy_path = Substitute("$0.copy.$1.tmp", meta_path, start_time_micros_);
     RETURN_NOT_OK_PREPEND(CopyFile(Env::Default(), meta_path, meta_copy_path,
                                    WritableFileOptions()),
@@ -458,7 +483,8 @@ Status RemoteBootstrapClient::VerifyChangeRoleSucceeded(
         continue;
       }
 
-      if (peer.member_type() == RaftPeerPB::VOTER || peer.member_type() == RaftPeerPB::OBSERVER) {
+      if (peer.member_type() == PeerMemberType::VOTER ||
+          peer.member_type() == PeerMemberType::OBSERVER) {
         return Status::OK();
       } else {
         SleepFor(MonoDelta::FromMilliseconds(backoff_ms));
@@ -524,12 +550,12 @@ Status RemoteBootstrapClient::Remove() {
   rpc::RpcController controller;
   controller.set_timeout(MonoDelta::FromSeconds(FLAGS_remote_bootstrap_end_session_timeout_sec));
 
-  RemoveSessionRequestPB req;
+  RemoveRemoteBootstrapSessionRequestPB req;
   req.set_session_id(session_id());
-  RemoveSessionResponsePB resp;
+  RemoveRemoteBootstrapSessionResponsePB resp;
 
   LOG_WITH_PREFIX(INFO) << "Removing remote bootstrap session " << session_id();
-  const auto status = proxy_->RemoveSession(req, &resp, &controller);
+  const auto status = proxy_->RemoveRemoteBootstrapSession(req, &resp, &controller);
   if (status.ok()) {
     LOG_WITH_PREFIX(INFO) << "Remote bootstrap session " << session_id() << " removed successfully";
     return Status::OK();
@@ -599,7 +625,7 @@ Status RemoteBootstrapClient::DownloadWALs() {
       }
     }
   } else {
-    int num_segments = wal_seqnos_.size();
+    auto num_segments = wal_seqnos_.size();
     LOG_WITH_PREFIX(INFO) << "Starting download of " << num_segments << " WAL segments...";
     for (uint64_t seg_seqno : wal_seqnos_) {
       UpdateStatusMessage(Substitute("Downloading WAL segment with seq. number $0 ($1/$2)",
@@ -682,10 +708,8 @@ Status RemoteBootstrapClient::DownloadWAL(uint64_t wal_segment_seqno) {
     }
   });
 
-  WritableFileOptions opts;
-  opts.sync_on_close = true;
   std::unique_ptr<WritableFile> writer;
-  RETURN_NOT_OK_PREPEND(env().NewWritableFile(opts, temp_dest_path, &writer),
+  RETURN_NOT_OK_PREPEND(env().NewWritableFile(temp_dest_path, &writer),
                         "Unable to open file for writing");
 
   auto start = MonoTime::Now();
@@ -718,7 +742,7 @@ Status RemoteBootstrapClient::WriteConsensusMetadata() {
   RETURN_NOT_OK(cmeta_->Flush());
 
   if (FLAGS_remote_bootstrap_save_downloaded_metadata) {
-    string cmeta_path = fs_manager().GetConsensusMetadataPath(tablet_id_);
+    string cmeta_path = VERIFY_RESULT(fs_manager().GetConsensusMetadataPath(tablet_id_));
     string cmeta_copy_path = Substitute("$0.copy.$1.tmp", cmeta_path, start_time_micros_);
     RETURN_NOT_OK_PREPEND(CopyFile(Env::Default(), cmeta_path, cmeta_copy_path,
                                    WritableFileOptions()),

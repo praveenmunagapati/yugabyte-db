@@ -21,9 +21,11 @@
 #include "yb/rpc/strand.h"
 #include "yb/rpc/thread_pool.h"
 
+#include "yb/util/backoff_waiter.h"
 #include "yb/util/countdown_latch.h"
 #include "yb/util/test_util.h"
 #include "yb/util/thread.h"
+#include "yb/util/tsan_util.h"
 
 DECLARE_int32(TEST_strand_done_inject_delay_ms);
 
@@ -336,7 +338,7 @@ TEST_F(ThreadPoolTest, StrandShutdownAndDestroyRace) {
 
   auto task = []{};
 
-  for (auto iter = 0; iter < kNumIters; ++iter) {
+  for (size_t iter = 0; iter < kNumIters; ++iter) {
     Strand strand(&pool);
 
     ANNOTATE_UNPROTECTED_WRITE(FLAGS_TEST_strand_done_inject_delay_ms) = 0;

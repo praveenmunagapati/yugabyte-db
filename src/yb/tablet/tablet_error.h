@@ -13,14 +13,14 @@
 //
 //
 
-#ifndef YB_TABLET_TABLET_ERROR_H
-#define YB_TABLET_TABLET_ERROR_H
+#pragma once
 
 #include "yb/tablet/metadata.pb.h"
-#include "yb/util/status.h"
+#include "yb/util/status_ec.h"
 
 namespace yb {
 namespace tablet {
+
 struct RaftGroupStateErrorTag : IntegralErrorTag<tablet::RaftGroupStatePB> {
   // This category id is part of the wire protocol and should not be changed once released.
   static constexpr uint8_t kCategory = 10;
@@ -31,7 +31,6 @@ struct RaftGroupStateErrorTag : IntegralErrorTag<tablet::RaftGroupStatePB> {
 };
 
 typedef StatusErrorCodeImpl<RaftGroupStateErrorTag> RaftGroupStateError;
+
 } // namespace tablet
 } // namespace yb
-
-#endif // YB_TABLET_TABLET_ERROR_H

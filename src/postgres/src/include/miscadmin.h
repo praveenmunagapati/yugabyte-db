@@ -189,7 +189,9 @@ extern PGDLLIMPORT Oid MyDatabaseTableSpace;
 
 extern PGDLLIMPORT bool MyDatabaseColocated;
 
-extern PGDLLIMPORT bool TablegroupCatalogExists;
+extern PGDLLIMPORT bool MyColocatedDatabaseLegacy;
+
+extern PGDLLIMPORT bool YbTablegroupCatalogExists;
 
 /*
  * Date/Time Configuration

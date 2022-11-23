@@ -9,9 +9,7 @@ menu:
     name: Python
     identifier: python-3
     weight: 553
-type: page
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 <ul class="nav nav-tabs-alt nav-tabs-yb">
@@ -34,9 +32,15 @@ showAsideToc: true
     </a>
   </li>
   <li>
-    <a href="" class="nav-link active">
+    <a href="{{< relref "./ycql.md" >}}" class="nav-link active">
       <i class="icon-cassandra" aria-hidden="true"></i>
       YCQL
+    </a>
+  </li>
+  <li>
+    <a href="{{< relref "./ysql-django.md" >}}" class="nav-link">
+      <i class="icon-postgres" aria-hidden="true"></i>
+      YSQL - Django
     </a>
   </li>
 </ul>
@@ -46,8 +50,12 @@ showAsideToc: true
 To install the [Yugabyte Python Driver for YCQL](https://github.com/yugabyte/cassandra-python-driver), run the following command:
 
 ```sh
-$ pip install yb-cassandra-driver
+$ pip3 install yb-cassandra-driver --install-option="--no-cython"
 ```
+
+{{< note title="Note">}}
+The flag `--no-cython` is necessary on MacOS Catalina and further MacOS releases to avoid a failure while building the `yb-cassandra-driver`.
+{{< /note >}}
 
 ## Create a sample Python application
 
@@ -55,7 +63,7 @@ $ pip install yb-cassandra-driver
 
 This tutorial assumes that you have:
 
-- installed YugabyteDB, created a universe, and are able to interact with it using the YCQL shell. If not, follow the steps in [Quick start YCQL](../../../../api/ycql/quick-start/).
+- installed YugabyteDB, created a universe, and are able to interact with it using the YCQL shell. If not, follow the steps in [Quick start YCQL](../../../explore/ycql/).
 
 ### Write the sample Python application
 
@@ -104,12 +112,12 @@ cluster.shutdown()
 To run the application, type the following:
 
 ```sh
-$ python yb-cql-helloworld.py
+$ python3 yb-cql-helloworld.py
 ```
 
 You should see the following output.
 
-```
+```output
 Created keyspace ybdemo
 Created table employee
 Inserted (id, name, age, language) = (1, 'John', 35, 'Python')

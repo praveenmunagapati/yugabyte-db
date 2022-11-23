@@ -13,37 +13,38 @@
 
 package org.yb.pgsql;
 
-import org.junit.After;
+import static org.yb.AssertionWrappers.*;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+import org.apache.commons.io.FileUtils;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.yb.client.TestUtils;
-import org.yb.minicluster.LogPrinter;
-import org.yb.pgsql.PgRegressRunner;
-import org.yb.util.RandomNumberUtil;
+
+import org.yb.util.ProcessUtil;
 import org.yb.util.SideBySideDiff;
 import org.yb.util.StringUtil;
 import org.yb.util.YBTestRunnerNonTsanAsan;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
-import java.io.IOException;
-import java.lang.ProcessBuilder;
-import java.sql.*;
-import java.util.*;
-import java.util.regex.Pattern;
-
-import static org.yb.AssertionWrappers.*;
+import com.google.common.collect.Sets;
 
 @RunWith(value=YBTestRunnerNonTsanAsan.class)
 public class TestYsqlDump extends BasePgSQLTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestYsqlDump.class);
 
-  private static final int TURN_OFF_SEQUENCE_CACHE_FLAG = 0;
-
-  private LogPrinter stdoutLogPrinter, stderrLogPrinter;
+  private static enum IncludeYbMetadata { ON, OFF }
 
   @Override
   public int getTestMethodTimeoutSec() {
@@ -51,9 +52,17 @@ public class TestYsqlDump extends BasePgSQLTest {
   }
 
   @Override
+  protected Map<String, String> getMasterFlags() {
+    Map<String, String> flagMap = super.getMasterFlags();
+    flagMap.put("TEST_sequential_colocation_ids", "true");
+    return flagMap;
+  }
+
+  @Override
   protected Map<String, String> getTServerFlags() {
     Map<String, String> flagMap = super.getTServerFlags();
-    flagMap.put("ysql_sequence_cache_minval", Integer.toString(TURN_OFF_SEQUENCE_CACHE_FLAG));
+    // Turn off sequence cache.
+    flagMap.put("ysql_sequence_cache_minval", "0");
     return flagMap;
   }
 
@@ -62,119 +71,148 @@ public class TestYsqlDump extends BasePgSQLTest {
   // -- Dumped from database version 11.2-YB-1.3.2.0-b0
   // -- Dumped by ysql_dump version 11.2-YB-1.3.2.0-b0
 
-  private static String VERSION_STR_PREFIX = " version ";
   private static Pattern VERSION_NUMBER_PATTERN = Pattern.compile(
-      VERSION_STR_PREFIX + "[0-9]+[.][0-9]+-YB-([0-9]+[.]){3}[0-9]+-b[0-9]+");
-  private static String VERSION_NUMBER_REPLACEMENT_STR =
-      VERSION_STR_PREFIX + "X.X-YB-X.X.X.X-bX";
+      " version [0-9]+[.][0-9]+-YB-([0-9]+[.]){3}[0-9]+-b[0-9]+");
+
+  private static String  VERSION_NUMBER_REPLACEMENT_STR =
+      " version X.X-YB-X.X.X.X-bX";
 
   private String postprocessOutputLine(String s) {
     if (s == null)
       return null;
-    return StringUtil.rtrim(
+    return StringUtil.expandTabsAndRemoveTrailingSpaces(
       VERSION_NUMBER_PATTERN.matcher(s).replaceAll(VERSION_NUMBER_REPLACEMENT_STR));
   }
 
-  private static void expectOnlyEmptyLines(String message,
-                                           String curLine,
-                                           BufferedReader in) throws IOException {
-    while (curLine != null) {
-      assertEquals(message, "", curLine.trim());
-      curLine = in.readLine();
-    }
+  @Test
+  public void ysqlDumpWithYbMetadata() throws Exception {
+    ysqlDumpTester(
+        "ysql_dump" /* binaryName */,
+        "sql/yb_ysql_dump.sql" /* inputFileRelativePath */,
+        "sql/yb_ysql_dump_describe.sql" /* inputDescribeFileRelativePath */,
+        "data/yb_ysql_dump.data.sql" /* expectedDumpRelativePath */,
+        "expected/yb_ysql_dump_describe.out" /* expectedDescribeFileRelativePath */,
+        "results/yb_ysql_dump.out" /* outputFileRelativePath */,
+        "results/yb_ysql_dump_describe.out" /* outputDescribeFileRelativePath */,
+        IncludeYbMetadata.ON);
   }
 
   @Test
-  public void testPgDump() throws Exception {
-    testPgDumpHelper("ysql_dump" /* binaryName */,
-                     "sql/yb_ysql_dump.sql" /* inputFileRelativePath */,
-                     "output/yb_ysql_dump.out" /* outputFileRelativePath */,
-                     "expected/yb_ysql_dump.out" /* expectedFileRelativePath */,
-                     "ysql_dump_stdout.txt" /* stdoutFileRelativePath */);
+  public void ysqlDumpAllWithYbMetadata() throws Exception {
+    // Note that we're using the same describe input as for regular ysql_dump!
+    ysqlDumpTester(
+        "ysql_dumpall" /* binaryName */,
+        "sql/yb_ysql_dumpall.sql" /* inputFileRelativePath */,
+        "sql/yb_ysql_dump_describe.sql" /* inputDescribeFileRelativePath */,
+        "data/yb_ysql_dumpall.data.sql" /* expectedDumpRelativePath */,
+        "expected/yb_ysql_dumpall_describe.out" /* expectedDescribeFileRelativePath */,
+        "results/yb_ysql_dumpall.out" /* outputFileRelativePath */,
+        "results/yb_ysql_dumpall_describe.out" /* outputDescribeFileRelativePath */,
+        IncludeYbMetadata.ON);
   }
 
   @Test
-  public void testPgDumpAll() throws Exception {
-    testPgDumpHelper("ysql_dumpall" /* binaryName */,
-                     "sql/yb_ysql_dumpall.sql" /* inputFileRelativePath */,
-                     "output/yb_ysql_dumpall.out" /* outputFileRelativePath */,
-                     "expected/yb_ysql_dumpall.out" /* expectedFileRelativePath */,
-                     "ysql_dumpall_stdout.txt" /* stdoutFileRelativePath */);
+  public void ysqlDumpWithoutYbMetadata() throws Exception {
+    ysqlDumpTester(
+        "ysql_dump" /* binaryName */,
+        "sql/yb_ysql_dump_without_ybmetadata.sql" /* inputFileRelativePath */,
+        "sql/yb_ysql_dump_without_ybmetadata_describe.sql" /* inputDescribeFileRelativePath */,
+        "data/yb_ysql_dump_without_ybmetadata.data.sql" /* expectedDumpRelativePath */,
+        "expected/yb_ysql_dump_without_ybmetadata_describe.out"
+        /* expectedDescribeFileRelativePath */,
+        "results/yb_ysql_dump_without_ybmetadata.out" /* outputFileRelativePath */,
+        "results/yb_ysql_dump_without_ybmetadata_describe.out"
+        /* outputDescribeFileRelativePath */,
+        IncludeYbMetadata.OFF);
   }
 
-  void testPgDumpHelper(final String binaryName,
-                        final String inputFileRelativePath,
-                        final String outputFileRelativePath,
-                        final String expectedFileRelativePath,
-                        final String stdoutFileRelativePath) throws Exception {
+  void ysqlDumpTester(final String binaryName,
+                      final String inputFileRelativePath,
+                      final String inputDescribeFileRelativePath,
+                      final String expectedDumpRelativePath,
+                      final String expectedDescribeFileRelativePath,
+                      final String outputFileRelativePath,
+                      final String outputDescribeFileRelativePath,
+                      final IncludeYbMetadata includeYbMetadata) throws Exception {
     // Location of Postgres regression tests
-    File pgRegressDir = PgRegressBuilder.getPgRegressDir();
+    File pgRegressDir = PgRegressBuilder.PG_REGRESS_DIR;
 
     // Create the data
-    try (BufferedReader inputIn = createFileReader(new File(pgRegressDir,
-                                                            inputFileRelativePath))) {
-      try (Statement statement = connection.createStatement()) {
-        String inputLine = null;
-        while ((inputLine = inputIn.readLine()) != null) {
-          LOG.info(inputLine);
-          statement.execute(inputLine);
-          LOG.info("Executed");
-        }
-      }
-    }
+    int tserverIndex = 0;
+    File ysqlshExec = new File(pgBinDir, "ysqlsh");
+    File inputFile  = new File(pgRegressDir, inputFileRelativePath);
+    ProcessUtil.executeSimple(Arrays.asList(
+      ysqlshExec.toString(),
+      "-h", getPgHost(tserverIndex),
+      "-p", Integer.toString(getPgPort(tserverIndex)),
+      "-U", TEST_PG_USER,
+      "-f", inputFile.toString()
+    ), "ysqlsh");
 
     // Dump and validate the data
-    File pgBinDir = PgRegressBuilder.getPgBinDir();
+    File pgBinDir     = PgRegressBuilder.getPgBinDir();
     File ysqlDumpExec = new File(pgBinDir, binaryName);
 
-    final int tserverIndex = 0;
-    File actual = new File(pgRegressDir, outputFileRelativePath);
-    File expected = new File(pgRegressDir, expectedFileRelativePath);
-    ProcessBuilder pb = new ProcessBuilder(ysqlDumpExec.toString(), "-h", getPgHost(tserverIndex),
-                                           "-p", Integer.toString(getPgPort(tserverIndex)),
-                                           "-U", DEFAULT_PG_USER,
-                                           "-f", actual.toString(),
-                                           "-m", getMasterLeaderAddress().toString());
+    File expected = new File(pgRegressDir, expectedDumpRelativePath);
+    File actual   = new File(pgRegressDir, outputFileRelativePath);
+    actual.getParentFile().mkdirs();
 
-    // Handle the logs output by ysql_dump.
-    String logPrefix = "ysql_dump";
-    Process ysqlDumpProc = pb.start();
-    stdoutLogPrinter = new LogPrinter(
-        ysqlDumpProc.getInputStream(),
-        logPrefix + "|stdout ");
-    stderrLogPrinter = new LogPrinter(
-        ysqlDumpProc.getErrorStream(),
-        logPrefix + "|stderr ");
-
-    // Wait for the process to complete.
-    int exitCode = ysqlDumpProc.waitFor();
-    stdoutLogPrinter.stop();
-    stderrLogPrinter.stop();
-
-    // Compare the expected output and the actual output.
-    try (BufferedReader actualIn   = createFileReader(actual);
-         BufferedReader expectedIn = createFileReader(expected);) {
-
-      // Create the side-by-side diff between the actual output and expected output.
-      // The resulting string will be used to provide debug information if the below
-      // comparison between the two files fails.
-      String message = "Side-by-side diff between expected output and actual output:\n" +
-            new SideBySideDiff(actual, expected).getSideBySideDiff();
-
-      // Compare the actual output and expected output.
-      String actualLine = null, expectedLine = null;
-      while ((actualLine = actualIn.readLine()) != null &&
-             (expectedLine = expectedIn.readLine()) != null) {
-        assertEquals(message,
-                     postprocessOutputLine(expectedLine),
-                     postprocessOutputLine(actualLine));
-      }
-      expectOnlyEmptyLines(message, actualLine, actualIn);
-      expectOnlyEmptyLines(message, expectedLine, expectedIn);
+    List<String> args = new ArrayList<>(Arrays.asList(
+      ysqlDumpExec.toString(),
+      "-h", getPgHost(tserverIndex),
+      "-p", Integer.toString(getPgPort(tserverIndex)),
+      "-U", DEFAULT_PG_USER,
+      "-f", actual.toString()
+    ));
+    if (includeYbMetadata == IncludeYbMetadata.ON) {
+      args.add("--include-yb-metadata");
     }
+    ProcessUtil.executeSimple(args, binaryName);
+
+    assertOutputFile(expected, actual);
+
+    File inputDesc    = new File(pgRegressDir, inputDescribeFileRelativePath);
+    File expectedDesc = new File(pgRegressDir, expectedDescribeFileRelativePath);
+    File actualDesc   = new File(pgRegressDir, outputDescribeFileRelativePath);
+    actualDesc.getParentFile().mkdirs();
+
+    // Run some validations
+    ProcessUtil.executeSimple(Arrays.asList(
+      ysqlshExec.toString(),
+      "-h", getPgHost(tserverIndex),
+      "-p", Integer.toString(getPgPort(tserverIndex)),
+      "-U", DEFAULT_PG_USER,
+      "-f", inputDesc.toString(),
+      "-o", actualDesc.toString()
+    ), "ysqlsh (validate describes)");
+
+    assertOutputFile(expectedDesc, actualDesc);
   }
 
-  private BufferedReader createFileReader(File f) throws Exception {
-    return new BufferedReader(new FileReader(f));
+  /** Compare the expected output and the actual output. */
+  private void assertOutputFile(File expected, File actual) throws IOException {
+    List<String> expectedLines = FileUtils.readLines(expected, StandardCharsets.UTF_8);
+    List<String> actualLines   = FileUtils.readLines(actual, StandardCharsets.UTF_8);
+
+    // Create the side-by-side diff between the actual output and expected output.
+    // The resulting string will be used to provide debug information if the below
+    // comparison between the two files fails.
+    String message = "Side-by-side diff between expected output and actual output:\n" +
+          new SideBySideDiff(expected, actual).getSideBySideDiff();
+
+    int i = 0;
+    for (; i < expectedLines.size() && i < actualLines.size(); ++i) {
+      assertEquals(message,
+                   postprocessOutputLine(expectedLines.get(i)),
+                   postprocessOutputLine(actualLines.get(i)));
+    }
+    assertOnlyEmptyLines(message, expectedLines.subList(i, expectedLines.size()));
+    assertOnlyEmptyLines(message, actualLines.subList(i, actualLines.size()));
+  }
+
+  private void assertOnlyEmptyLines(String message, List<String> lines) {
+    Set<String> processedLinesSet =
+        lines.stream().map((l) -> l.trim()).collect(Collectors.toSet());
+    assertTrue(message, Sets.newHashSet("").containsAll(processedLinesSet));
   }
 }

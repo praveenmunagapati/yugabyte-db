@@ -1,14 +1,15 @@
 ---
-title: Troubleshoot 
+title: Troubleshoot
 linkTitle: Troubleshoot
 description: Troubleshoot
 image: /images/section_icons/troubleshoot/troubleshoot.png
-headcontent: Diagnose and troubleshoot universe and Yugabyte Platform issues.
+headcontent: Diagnose and troubleshoot issues that arise from YugabyteDB universes and YugabyteDB Anywhere.
 menu:
-  stable:
+  stable_yugabyte-platform:
+    parent: yugabytedb-anywhere
     identifier: troubleshoot-yp
-    parent: yugabyte-platform
     weight: 648
+type: indexpage
 ---
 
 <div class="row">
@@ -20,7 +21,7 @@ menu:
         <div class="title">Install and upgrade issues</div>
       </div>
       <div class="body">
-        Troubleshoot issues encountered when installing or upgrading Yugabyte Platform.
+        Troubleshoot issues encountered when installing or upgrading YugabyteDB Anywhere.
       </div>
     </a>
   </div>

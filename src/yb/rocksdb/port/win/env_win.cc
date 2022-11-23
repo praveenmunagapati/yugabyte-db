@@ -51,6 +51,8 @@
 #include <Rpc.h>  // For UUID generation
 #include <Windows.h>
 
+DECLARE_bool(never_fsync);
+
 namespace rocksdb {
 
 std::string GetWindowsErrSz(DWORD err) {
@@ -162,6 +164,9 @@ SSIZE_T pread(HANDLE hFile, char* src, size_t numBytes, uint64_t offset) {
 // to errno
 // is a sad business
 inline int fsync(HANDLE hFile) {
+  if (FLAGS_never_fsync) {
+    return 0;
+  }
   if (!FlushFileBuffers(hFile)) {
     return -1;
   }
@@ -1106,7 +1111,7 @@ class WinWritableFile : public WritableFile {
 
   Status Allocate(uint64_t offset, uint64_t len) override {
     Status status;
-    TEST_KILL_RANDOM("WinWritableFile::Allocate", rocksdb_kill_odds);
+    TEST_KILL_RANDOM("WinWritableFile::Allocate", test_kill_odds);
 
     // Make sure that we reserve an aligned amount of space
     // since the reservation block size is driven outside so we want

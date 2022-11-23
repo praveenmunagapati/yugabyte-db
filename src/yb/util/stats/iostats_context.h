@@ -18,13 +18,9 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_STATS_IOSTATS_CONTEXT_H
-#define YB_UTIL_STATS_IOSTATS_CONTEXT_H
+#pragma once
 
-#include <stdint.h>
 #include <string>
-
-#include "yb/util/stats/perf_level.h"
 
 // A thread local context for gathering io-stats efficiently and transparently.
 // Use SetPerfLevel(PerfLevel::kEnableTime) to enable time stats.
@@ -72,5 +68,3 @@ extern __thread IOStatsContext iostats_context;
 #endif  // IOS_CROSS_COMPILE
 
 }  // namespace yb
-
-#endif // YB_UTIL_STATS_IOSTATS_CONTEXT_H

@@ -11,14 +11,14 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_BYTES_FORMATTER_H
-#define YB_UTIL_BYTES_FORMATTER_H
+#pragma once
 
 #include <limits>
 #include <string>
 
-#include "yb/util/slice.h"
 #include "yb/util/enums.h"
+#include "yb/util/math_util.h"
+#include "yb/util/slice.h"
 
 namespace yb {
 
@@ -61,5 +61,3 @@ std::string FormatSliceAsStr(
     size_t max_length = std::numeric_limits<size_t>::max());
 
 }  // namespace yb
-
-#endif  // YB_UTIL_BYTES_FORMATTER_H

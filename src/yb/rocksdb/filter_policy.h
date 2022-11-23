@@ -31,8 +31,7 @@
 // Most people will want to use the builtin bloom filter support (see
 // NewBloomFilterPolicy() below).
 
-#ifndef YB_ROCKSDB_FILTER_POLICY_H
-#define YB_ROCKSDB_FILTER_POLICY_H
+#pragma once
 
 #include <string>
 #include <memory>
@@ -212,9 +211,7 @@ extern const FilterPolicy* NewBloomFilterPolicy(int bits_per_key,
 //
 // Callers must delete the result after any database that is using the filter policy has been
 // closed.
-extern const FilterPolicy* NewFixedSizeFilterPolicy(uint32_t total_bits,
+extern const FilterPolicy* NewFixedSizeFilterPolicy(size_t total_bits,
                                                     double error_rate,
                                                     Logger* logger);
 }  // namespace rocksdb
-
-#endif  // YB_ROCKSDB_FILTER_POLICY_H

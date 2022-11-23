@@ -12,17 +12,20 @@
 //
 
 #include "yb/integration-tests/cql_test_base.h"
-
-#include "yb/consensus/raft_consensus.h"
-
 #include "yb/integration-tests/mini_cluster_utils.h"
 
+#include "yb/util/atomic.h"
+#include "yb/util/backoff_waiter.h"
+#include "yb/util/logging.h"
 #include "yb/util/random_util.h"
-#include "yb/util/test_util.h"
+#include "yb/util/status_log.h"
+#include "yb/util/test_thread_holder.h"
+#include "yb/util/tsan_util.h"
 
 using namespace std::literals;
 
 DECLARE_bool(allow_index_table_read_write);
+DECLARE_int32(cql_prepare_child_threshold_ms);
 DECLARE_bool(disable_index_backfill);
 DECLARE_bool(transactions_poll_check_aborted);
 DECLARE_bool(TEST_disable_proactive_txn_cleanup_on_abort);
@@ -44,7 +47,7 @@ class CqlIndexTest : public CqlTestBase<MiniCluster> {
 
 YB_STRONGLY_TYPED_BOOL(UniqueIndex);
 
-CHECKED_STATUS CreateIndexedTable(
+Status CreateIndexedTable(
     CassandraSession* session, UniqueIndex unique_index = UniqueIndex::kFalse) {
   RETURN_NOT_OK(
       session->ExecuteQuery("CREATE TABLE IF NOT EXISTS t (key INT PRIMARY KEY, value INT) WITH "
@@ -167,6 +170,40 @@ TEST_F_EX(CqlIndexTest, ConcurrentIndexUpdate, CqlIndexSmallWorkersTest) {
   SetAtomicFlag(0, &FLAGS_TEST_inject_txn_get_status_delay_ms);
 }
 
+TEST_F(CqlIndexTest, TestSaturatedWorkers) {
+  /*
+   * (#11258) We set a very short timeout to force failure if child transaction
+   * is not created quickly enough.
+
+   * TODO: when switching to a fully asynchronous model, this failure will disappear.
+   */
+  FLAGS_cql_prepare_child_threshold_ms = 1;
+
+  auto session = ASSERT_RESULT(EstablishSession(driver_.get()));
+  ASSERT_OK(session.ExecuteQuery(
+      "CREATE TABLE t (key INT PRIMARY KEY, v1 INT, v2 INT) WITH "
+      "transactions = { 'enabled' : true }"));
+  ASSERT_OK(session.ExecuteQuery(
+      "CREATE INDEX i1 ON t(key, v1) WITH "
+      "transactions = { 'enabled' : true }"));
+  ASSERT_OK(session.ExecuteQuery(
+      "CREATE INDEX i2 ON t(key, v2) WITH "
+      "transactions = { 'enabled' : true }"));
+
+  constexpr int kKeys = 10000;
+  std::string expr = "BEGIN TRANSACTION ";
+  for (int i = 0; i < kKeys; i++) {
+    expr += Format("INSERT INTO t (key, v1, v2) VALUES ($0, $1, $2); ", i, i, i);
+  }
+  expr += "END TRANSACTION;";
+
+  // We should expect to see timed out error
+  auto status = session.ExecuteQuery(expr);
+  ASSERT_FALSE(status.ok());
+  ASSERT_NE(status.message().ToBuffer().find("Timed out waiting for prepare child status"),
+            std::string::npos) << status;
+}
+
 YB_STRONGLY_TYPED_BOOL(CheckReady);
 
 void CleanFutures(std::deque<CassandraFuture>* futures, CheckReady check_ready) {
@@ -229,6 +266,9 @@ void CqlIndexTest::TestConcurrentModify2Columns(const std::string& expr) {
       "CREATE TABLE t (key INT PRIMARY KEY, v1 INT, v2 INT) WITH "
       "transactions = { 'enabled' : true }"));
   ASSERT_OK(session.ExecuteQuery("CREATE INDEX v1_idx ON t (v1)"));
+
+  // Wait for the table alterations to complete.
+  std::this_thread::sleep_for(5000ms);
 
   auto prepared1 = ASSERT_RESULT(session.Prepare(Format(expr, "v1")));
   auto prepared2 = ASSERT_RESULT(session.Prepare(Format(expr, "v2")));

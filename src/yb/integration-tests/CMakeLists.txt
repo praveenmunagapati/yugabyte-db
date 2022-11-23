@@ -30,17 +30,28 @@
 # under the License.
 #
 
+set(YB_PCH_PREFIX integration-tests)
+set(YB_PCH_DEP_LIBS boost_regex opid_proto)
+
+ADD_YB_TEST_LIBRARY(
+    cdc_test_util
+    SRCS cdc_test_util.cc
+    DEPS yb_test_util cdc_service_proto tserver)
+
 YB_INCLUDE_EXTENSIONS()
 
 set(INTEGRATION_TESTS_SRCS
   cluster_itest_util.cc
   cluster_verifier.cc
+  create-table-itest-base.cc
   external_mini_cluster.cc
   external_mini_cluster_fs_inspector.cc
   load_balancer_test_util.cc
   load_generator.cc
   mini_cluster.cc
+  mini_cluster_base.cc
   mini_cluster_utils.cc
+  packed_row_test_base.cc
   redis_table_test_base.cc
   test_workload.cc
   ts_itest-base.cc
@@ -49,7 +60,7 @@ set(INTEGRATION_TESTS_SRCS
   ${INTEGRATION_TESTS_SRCS_EXTENSIONS}
 )
 
-add_library(integration-tests ${INTEGRATION_TESTS_SRCS})
+ADD_YB_TEST_LIBRARY(integration-tests SRCS ${INTEGRATION_TESTS_SRCS})
 target_link_libraries(integration-tests
   tserver
   tserver_test_util
@@ -68,21 +79,37 @@ target_link_libraries(integration-tests
   ${INTEGRATION_TESTS_LIB_EXTENSIONS})
 
 add_dependencies(integration-tests
-  yb-tserver
-  yb-master)
+  "${YB_MASTER_DYNAMIC_EXE_NAME}"
+  "${YB_TSERVER_DYNAMIC_EXE_NAME}"
+  yb-admin
+  gen_auto_flags_json
+  yb-ts-cli)
 
-add_library(cdc_test_util cdc_test_util.cc)
-target_link_libraries(cdc_test_util yb_test_util cdc_service_proto tserver)
+ADD_YB_TEST_LIBRARY(
+    cql_test_util
+    SRCS cql_test_base.cc cql_test_util.cc
+    DEPS cassandra integration-tests yb-cql yb_test_util tools_test_utils)
 
-add_library(cql_test_util cql_test_base.cc cql_test_util.cc)
-target_link_libraries(cql_test_util cassandra integration-tests yb-cql yb_test_util)
+# Requires ql-dml-test-base, so separating from integration-tests.
+add_library(tablet-split-itest-base tablet-split-itest-base.cc)
+target_link_libraries(tablet-split-itest-base integration-tests ql-dml-test-base)
 
 # Tests
 set(YB_TEST_LINK_LIBS
-    integration-tests yb_client yb_tools_util ql-dml-test-base rpc_test_util ${YB_MIN_TEST_LIBS})
+    integration-tests
+    yb_client
+    yb_tools_util
+    ql-dml-test-base
+    rpc_test_util
+    master_test_common
+    yb_common_test_util
+    tablet-split-itest-base
+    cql_test_util
+    ${YB_MIN_TEST_LIBS})
 
 ADD_YB_TEST(alter_table-test)
 ADD_YB_TEST(alter_table-randomized-test)
+ADD_YB_TEST(auto_flags-itest)
 ADD_YB_TEST(registration-test)
 ADD_YB_TEST(clock_synchronization-itest)
 ADD_YB_TEST(client_failover-itest)
@@ -90,6 +117,9 @@ ADD_YB_TEST(client-stress-test)
 ADD_YB_TEST(cluster_trace-test)
 ADD_YB_TEST(tablet_server-itest)
 ADD_YB_TEST(tablet-split-itest)
+ADD_YB_TEST(xcluster-tablet-split-itest)
+ADD_YB_TEST(cdcsdk_gflag-test)
+
 # Tests which fail on purpose for checking Jenkins test failures reporting, disabled
 # (commented out) by default:
 # ADD_YB_TEST(test_failures-test)
@@ -104,6 +134,7 @@ ADD_YB_TEST(master_sysnamespace-itest)
 ADD_YB_TEST(master_path_handlers-itest)
 ADD_YB_TEST(master_failover-itest)
 ADD_YB_TEST(master_config-itest)
+ADD_YB_TEST(master_tasks-test)
 ADD_YB_TEST(network_failure-test)
 ADD_YB_TEST(system_table_fault_tolerance)
 ADD_YB_TEST(raft_consensus-itest)
@@ -137,9 +168,12 @@ ADD_YB_TEST(load_balancer_respect_affinity-test)
 ADD_YB_TEST(load_balancer_placement_policy-test)
 ADD_YB_TEST(sys_catalog_respect_affinity-test)
 ADD_YB_TEST(restart-test)
+ADD_YB_TEST(yb-ts-cli-itest)
+ADD_YB_TEST_DEPENDENCIES(yb-ts-cli-itest
+  yb-ts-cli)
 
 set(YB_TEST_LINK_LIBS_SAVED ${YB_TEST_LINK_LIBS})
-set(YB_TEST_LINK_LIBS ${YB_TEST_LINK_LIBS} cassandra cql_test_util)
+set(YB_TEST_LINK_LIBS ${YB_TEST_LINK_LIBS} cassandra)
 set(CASS_DRIVER_VERSION "2.9.0-yb-4")
 set(CASS_DRIVER_INTERNAL_INCLUDE
     "${YB_THIRDPARTY_DIR}/src/cassandra-cpp-driver-${CASS_DRIVER_VERSION}/src")
@@ -160,8 +194,10 @@ function(ADD_YB_CQL_TEST TEST_NAME)
 endfunction()
 
 ADD_YB_CQL_TEST(cql-index-test)
-ADD_YB_CQL_TEST(cql-test)
+ADD_YB_CQL_TEST(cql-packed-row-test)
 ADD_YB_CQL_TEST(cql-tablet-split-test)
+ADD_YB_CQL_TEST(cql-test)
+ADD_YB_CQL_TEST(cql_geo_transactions-test)
 ADD_YB_CQL_TEST(external_mini_cluster_secure_test)
 
 set(YB_TEST_LINK_LIBS ${YB_TEST_LINK_LIBS_SAVED})

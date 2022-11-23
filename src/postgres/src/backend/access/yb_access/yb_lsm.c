@@ -23,6 +23,7 @@
  */
 
 #include "postgres.h"
+#include "pgstat.h"
 
 #include "miscadmin.h"
 #include "access/nbtree.h"
@@ -105,6 +106,93 @@ ybcinhandler(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(amroutine);
 }
 
+/*
+ * Utility method to bind const to column.
+ */
+static void
+bindColumn(YBCPgStatement stmt,
+		   int attr_num,
+		   Oid type_id,
+		   Oid collation_id,
+		   Datum datum,
+		   bool is_null)
+{
+	YBCPgExpr expr = YBCNewConstant(stmt, type_id, collation_id, datum,
+									is_null);
+	HandleYBStatus(YBCPgDmlBindColumn(stmt, attr_num, expr));
+}
+
+/*
+ * Utility method to set binds for index write statement.
+ */
+static void
+doBindsForIdxWrite(YBCPgStatement stmt,
+				   void *indexstate,
+				   Relation index,
+				   Datum *values,
+				   bool *isnull,
+				   int n_bound_atts,
+				   Datum ybbasectid,
+				   bool ybctid_as_value)
+{
+	TupleDesc tupdesc		= RelationGetDescr(index);
+	int		  indnkeyatts	= IndexRelationGetNumberOfKeyAttributes(index);
+
+	if (ybbasectid == 0)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Missing base table ybctid in index write request")));
+	}
+
+	bool has_null_attr = false;
+	for (AttrNumber attnum = 1; attnum <= n_bound_atts; ++attnum)
+	{
+		Oid			type_id = GetTypeId(attnum, tupdesc);
+		Oid			collation_id = YBEncodingCollation(stmt, attnum,
+													   ybc_get_attcollation(tupdesc, attnum));
+		Datum		value   = values[attnum - 1];
+		bool		is_null = isnull[attnum - 1];
+
+		bindColumn(stmt, attnum, type_id, collation_id, value, is_null);
+
+		/*
+		 * If any of the indexed columns is null, we need to take case of
+		 * SQL null != null semantics.
+		 * For details, see comment on kYBUniqueIdxKeySuffix.
+		 */
+		has_null_attr = has_null_attr || (is_null && attnum <= indnkeyatts);
+	}
+
+	const bool unique_index = index->rd_index->indisunique;
+
+	/*
+	 * For unique indexes we need to set the key suffix system column:
+	 * - to ybbasectid if at least one index key column is null.
+	 * - to NULL otherwise (setting is_null to true is enough).
+	 */
+	if (unique_index)
+		bindColumn(stmt,
+				   YBUniqueIdxKeySuffixAttributeNumber,
+				   BYTEAOID,
+				   InvalidOid,
+				   ybbasectid,
+				   !has_null_attr /* is_null */);
+
+	/*
+	 * We may need to set the base ctid column:
+	 * - for unique indexes only if we need it as a value (i.e. for inserts)
+	 * - for non-unique indexes always (it is a key column).
+	 */
+	if (ybctid_as_value || !unique_index)
+		bindColumn(stmt,
+				   YBIdxBaseTupleIdAttributeNumber,
+				   BYTEAOID,
+				   InvalidOid,
+				   ybbasectid,
+				   false /* is_null */);
+}
+
 static void
 ybcinbuildCallback(Relation index, HeapTuple heapTuple, Datum *values, bool *isnull,
 				   bool tupleIsAlive, void *state)
@@ -116,7 +204,9 @@ ybcinbuildCallback(Relation index, HeapTuple heapTuple, Datum *values, bool *isn
 							  values,
 							  isnull,
 							  heapTuple->t_ybctid,
-							  buildstate->backfill_write_time);
+							  buildstate->backfill_write_time,
+							  doBindsForIdxWrite,
+							  NULL /* indexstate */);
 
 	buildstate->index_tuples += 1;
 }
@@ -210,7 +300,9 @@ ybcininsert(Relation index, Datum *values, bool *isnull, Datum ybctid, Relation 
 										   values,
 										   isnull,
 										   ybctid,
-										   NULL /* backfill_write_time */);
+										   NULL /* backfill_write_time */,
+										   doBindsForIdxWrite,
+										   NULL /* indexstate */);
 			}
 			YB_FOR_EACH_DB_END;
 		}
@@ -219,7 +311,9 @@ ybcininsert(Relation index, Datum *values, bool *isnull, Datum ybctid, Relation 
 								  values,
 								  isnull,
 								  ybctid,
-								  NULL /* backfill_write_time */);
+								  NULL /* backfill_write_time */,
+								  doBindsForIdxWrite,
+								  NULL /* indexstate */);
 	}
 
 	return index->rd_index->indisunique ? true : false;
@@ -230,7 +324,8 @@ ybcindelete(Relation index, Datum *values, bool *isnull, Datum ybctid, Relation 
 			struct IndexInfo *indexInfo)
 {
 	if (!index->rd_index->indisprimary)
-		YBCExecuteDeleteIndex(index, values, isnull, ybctid);
+		YBCExecuteDeleteIndex(index, values, isnull, ybctid,
+							  doBindsForIdxWrite, NULL /* indexstate */);
 }
 
 IndexBulkDeleteResult *
@@ -268,20 +363,24 @@ ybcincostestimate(struct PlannerInfo *root, struct IndexPath *path, double loop_
 				  Cost *indexStartupCost, Cost *indexTotalCost, Selectivity *indexSelectivity,
 				  double *indexCorrelation, double *indexPages)
 {
-	ybcIndexCostEstimate(path, indexSelectivity, indexStartupCost, indexTotalCost);
+	/*
+	 * Information is lacking for hypothetical index in order for estimation
+	 * in YB to work.
+	 * So we skip hypothetical index.
+	 */
+	if (path->indexinfo->hypothetical)
+		return;
+	ybcIndexCostEstimate(root,
+						 path,
+						 indexSelectivity,
+						 indexStartupCost,
+						 indexTotalCost);
 }
 
 bytea *
 ybcinoptions(Datum reloptions, bool validate)
 {
-	/*
-	 * For now we only need to validate the reloptions, as we currently have no
-	 * need for a special struct similar to BrinOptions or GinOptions.
-	 * Thus, we will still return NULL for now.
-	 */
-	int numoptions;
-	(void) parseRelOptions(reloptions, validate, RELOPT_KIND_INDEX, &numoptions);
-	return NULL;
+	return default_reloptions(reloptions, validate, RELOPT_KIND_YB_LSM);
 }
 
 bool
@@ -310,7 +409,7 @@ ybcinbeginscan(Relation rel, int nkeys, int norderbys)
 	/* get the scan */
 	scan = RelationGetIndexScan(rel, nkeys, norderbys);
 	scan->opaque = NULL;
-
+	pgstat_count_index_scan(rel);
 	return scan;
 }
 
@@ -324,8 +423,10 @@ ybcinrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,	ScanKey orderbys
 		scan->opaque = NULL;
 	}
 
-	YbScanDesc ybScan = ybcBeginScan(scan->heapRelation, scan->indexRelation, scan->xs_want_itup,
-	                                 nscankeys, scankey, scan->yb_scan_plan);
+	YbScanDesc ybScan = ybcBeginScan(scan->heapRelation, scan->indexRelation,
+									 scan->xs_want_itup, nscankeys, scankey,
+									 scan->yb_scan_plan, scan->yb_rel_pushdown,
+									 scan->yb_idx_pushdown);
 	scan->opaque = ybScan;
 }
 
@@ -348,8 +449,6 @@ ybcingettuple(IndexScanDesc scan, ScanDirection dir)
 	ybscan->exec_params = scan->yb_exec_params;
 	if (!ybscan->exec_params) {
 		ereport(DEBUG1, (errmsg("null exec_params")));
-	} else {
-		ybscan->exec_params->read_from_followers = YBReadFromFollowersEnabled();
 	}
 	Assert(PointerIsValid(ybscan));
 
@@ -369,9 +468,6 @@ ybcingettuple(IndexScanDesc scan, ScanDirection dir)
 	}
 	else
 	{
-		if (ybscan->exec_params && ybscan->exec_params->read_from_followers) {
-			ereport(DEBUG2, (errmsg("ybcingettuple read from followers")));
-		}
 		HeapTuple tuple = ybc_getnext_heaptuple(ybscan, is_forward_scan, &scan->xs_recheck);
 		if (tuple)
 		{
@@ -387,7 +483,5 @@ ybcingettuple(IndexScanDesc scan, ScanDirection dir)
 void
 ybcinendscan(IndexScanDesc scan)
 {
-	YbScanDesc ybscan = (YbScanDesc)scan->opaque;
-	Assert(PointerIsValid(ybscan));
-	pfree(ybscan);
+	ybc_free_ybscan((YbScanDesc)scan->opaque);
 }

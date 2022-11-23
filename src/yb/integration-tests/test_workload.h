@@ -29,11 +29,15 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_INTEGRATION_TESTS_TEST_WORKLOAD_H_
-#define YB_INTEGRATION_TESTS_TEST_WORKLOAD_H_
+#pragma once
 
-#include "yb/client/client.h"
+#include "yb/client/client_fwd.h"
 #include "yb/client/table.h"
+#include "yb/client/yb_table_name.h"
+
+#include "yb/common/transaction.pb.h"
+
+#include "yb/util/monotime.h"
 
 namespace yb {
 
@@ -43,7 +47,7 @@ class Thread;
 struct TestWorkloadOptions {
   static const client::YBTableName kDefaultTableName;
 
-  int payload_bytes = 11;
+  size_t payload_bytes = 11;
   int num_write_threads = 4;
   int num_read_threads = 0;
   int write_batch_size = 50;
@@ -82,7 +86,7 @@ class TestWorkload {
 
   void operator=(TestWorkload&& rhs);
 
-  void set_payload_bytes(int n) {
+  void set_payload_bytes(size_t n) {
     options_.payload_bytes = n;
   }
 
@@ -118,7 +122,7 @@ class TestWorkload {
     options_.write_timeout = value;
   }
 
-  void set_write_timeout_millis(int t) {
+  void set_write_timeout_millis(int64_t t) {
     options_.write_timeout = std::chrono::milliseconds(t);
   }
 
@@ -220,4 +224,3 @@ class TestWorkload {
 };
 
 }  // namespace yb
-#endif  // YB_INTEGRATION_TESTS_TEST_WORKLOAD_H_

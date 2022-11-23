@@ -2,23 +2,34 @@
 
 package com.yugabyte.yw.common.alerts;
 
+import static io.swagger.annotations.ApiModelProperty.AccessMode.READ_WRITE;
+
 import com.fasterxml.jackson.annotation.JsonTypeName;
+import io.swagger.annotations.ApiModel;
+import io.swagger.annotations.ApiModelProperty;
 import javax.validation.constraints.NotNull;
 import javax.validation.constraints.Size;
+import lombok.Data;
 import lombok.EqualsAndHashCode;
-import lombok.ToString;
 import org.hibernate.validator.constraints.URL;
 
+@Data
 @EqualsAndHashCode(callSuper = false)
-@ToString
 @JsonTypeName("Slack")
+@ApiModel(parent = AlertChannelParams.class)
 public class AlertChannelSlackParams extends AlertChannelParams {
 
   @NotNull
   @Size(min = 1)
-  public String username;
+  @ApiModelProperty(value = "Slack username", accessMode = READ_WRITE)
+  private String username;
 
-  @NotNull @URL public String webhookUrl;
+  @ApiModelProperty(value = "Slack webhook URL", accessMode = READ_WRITE)
+  @NotNull
+  @URL
+  private String webhookUrl;
 
-  @URL public String iconUrl;
+  @ApiModelProperty(value = "Slack icon URL", accessMode = READ_WRITE)
+  @URL
+  private String iconUrl;
 }

@@ -11,10 +11,15 @@
 // under the License.
 //
 
-#ifndef YB_YQL_PGGATE_PG_GATE_FWD_H
-#define YB_YQL_PGGATE_PG_GATE_FWD_H
+#pragma once
+
+#include <memory>
 
 #include "yb/gutil/ref_counted.h"
+
+#include "yb/common/common_fwd.h"
+
+#include "yb/util/strongly_typed_bool.h"
 
 namespace google {
 namespace protobuf {
@@ -34,9 +39,14 @@ class PgTableDesc;
 using PgTableDescPtr = scoped_refptr<PgTableDesc>;
 
 class PgsqlOp;
+class PgsqlReadOp;
+class PgsqlWriteOp;
 using PgsqlOpPtr = std::shared_ptr<PgsqlOp>;
+using PgsqlReadOpPtr = std::shared_ptr<PgsqlReadOp>;
+using PgsqlWriteOpPtr = std::shared_ptr<PgsqlWriteOp>;
+using PgsqlOps = std::vector<PgsqlOpPtr>;
+
+YB_STRONGLY_TYPED_BOOL(Commit);
 
 }  // namespace pggate
 }  // namespace yb
-
-#endif  // YB_YQL_PGGATE_PG_GATE_FWD_H

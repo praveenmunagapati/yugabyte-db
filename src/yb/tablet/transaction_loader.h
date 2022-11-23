@@ -11,12 +11,14 @@
 // under the License.
 //
 
-#ifndef YB_TABLET_TRANSACTION_LOADER_H
-#define YB_TABLET_TRANSACTION_LOADER_H
+#pragma once
 
 #include <condition_variable>
+#include <thread>
 
 #include "yb/common/transaction.h"
+
+#include "yb/gutil/thread_annotations.h"
 
 #include "yb/docdb/docdb.h"
 
@@ -91,5 +93,3 @@ class TransactionLoader {
 
 } // namespace tablet
 } // namespace yb
-
-#endif // YB_TABLET_TRANSACTION_LOADER_H

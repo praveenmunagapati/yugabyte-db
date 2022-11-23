@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.TreeMap;
+import org.junit.Ignore;
 
 import org.apache.commons.text.RandomStringGenerator;
 import org.junit.Test;
@@ -34,6 +35,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.yb.Common;
+import org.yb.CommonNet;
 import org.yb.YBParameterizedTestRunner;
 import org.yb.client.GetTableSchemaResponse;
 import org.yb.client.LocatedTablet;
@@ -42,7 +44,9 @@ import org.yb.client.ModifyClusterConfigReadReplicas;
 import org.yb.client.TestUtils;
 import org.yb.client.YBClient;
 import org.yb.client.YBTable;
-import org.yb.master.Master;
+import org.yb.master.CatalogEntityInfo;
+import org.yb.master.CatalogEntityInfo.PlacementBlockPB;
+import org.yb.master.CatalogEntityInfo.PlacementInfoPB;
 import org.yb.minicluster.MiniYBDaemon;
 
 import com.google.common.collect.ImmutableMap;
@@ -54,6 +58,7 @@ import redis.clients.jedis.JedisCommands;
 import redis.clients.jedis.YBJedis;
 import redis.clients.util.JedisClusterCRC16;
 
+@Ignore("Redis is not supported anymore")
 @RunWith(value=YBParameterizedTestRunner.class)
 public class TestReadFromFollowers extends BaseJedisTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestReadFromFollowers.class);
@@ -102,7 +107,7 @@ public class TestReadFromFollowers extends BaseJedisTest {
         YBClient.REDIS_KEYSPACE_NAME, YBClient.REDIS_DEFAULT_TABLE_NAME);
 
     assertEquals(Common.PartitionSchemaPB.HashSchema.REDIS_HASH_SCHEMA,
-        tableSchema.getPartitionSchema().getHashSchema());
+                 tableSchema.getPartitionSchema().getHashSchema());
 
     setUpJedisClient();
   }
@@ -206,49 +211,49 @@ public class TestReadFromFollowers extends BaseJedisTest {
               ImmutableMap.of("placement_zone", PLACEMENT_ZONE1),
               ImmutableMap.of("placement_zone", PLACEMENT_ZONE2),
               ImmutableMap.of("placement_zone", PLACEMENT_ZONE2)));
-        });
+        }, Collections.emptyMap());
 
     waitForTServersAtMasterLeader();
 
     YBClient syncClient = miniCluster.getClient();
 
     // Create the cluster config pb to be sent to the masters
-    org.yb.Common.CloudInfoPB cloudInfo0 = org.yb.Common.CloudInfoPB.newBuilder()
+    org.yb.CommonNet.CloudInfoPB cloudInfo0 = org.yb.CommonNet.CloudInfoPB.newBuilder()
         .setPlacementCloud(PLACEMENT_CLOUD)
         .setPlacementRegion(PLACEMENT_REGION)
         .setPlacementZone(PLACEMENT_ZONE0)
         .build();
 
     // Create the cluster config pb to be sent to the masters
-    org.yb.Common.CloudInfoPB cloudInfo1 = org.yb.Common.CloudInfoPB.newBuilder()
+    org.yb.CommonNet.CloudInfoPB cloudInfo1 = org.yb.CommonNet.CloudInfoPB.newBuilder()
         .setPlacementCloud(PLACEMENT_CLOUD)
         .setPlacementRegion(PLACEMENT_REGION)
         .setPlacementZone(PLACEMENT_ZONE1)
         .build();
 
     // Create the cluster config pb to be sent to the masters
-    org.yb.Common.CloudInfoPB cloudInfo2 = org.yb.Common.CloudInfoPB.newBuilder()
+    org.yb.CommonNet.CloudInfoPB cloudInfo2 = org.yb.CommonNet.CloudInfoPB.newBuilder()
         .setPlacementCloud(PLACEMENT_CLOUD)
         .setPlacementRegion(PLACEMENT_REGION)
         .setPlacementZone(PLACEMENT_ZONE2)
         .build();
 
-    Master.PlacementBlockPB placementBlock0 =
-        Master.PlacementBlockPB.newBuilder().setCloudInfo(cloudInfo0).setMinNumReplicas(1).build();
+    PlacementBlockPB placementBlock0 =
+        PlacementBlockPB.newBuilder().setCloudInfo(cloudInfo0).setMinNumReplicas(1).build();
 
-    Master.PlacementBlockPB placementBlock1 =
-        Master.PlacementBlockPB.newBuilder().setCloudInfo(cloudInfo1).setMinNumReplicas(1).build();
+    PlacementBlockPB placementBlock1 =
+        PlacementBlockPB.newBuilder().setCloudInfo(cloudInfo1).setMinNumReplicas(1).build();
 
-    Master.PlacementBlockPB placementBlock2 =
-        Master.PlacementBlockPB.newBuilder().setCloudInfo(cloudInfo2).setMinNumReplicas(1).build();
+    PlacementBlockPB placementBlock2 =
+        PlacementBlockPB.newBuilder().setCloudInfo(cloudInfo2).setMinNumReplicas(1).build();
 
-    List<Master.PlacementBlockPB> placementBlocksLive = new ArrayList<Master.PlacementBlockPB>();
+    List<PlacementBlockPB> placementBlocksLive = new ArrayList<PlacementBlockPB>();
     placementBlocksLive.add(placementBlock0);
     placementBlocksLive.add(placementBlock1);
     placementBlocksLive.add(placementBlock2);
 
-    Master.PlacementInfoPB livePlacementInfo =
-        Master.PlacementInfoPB.newBuilder().addAllPlacementBlocks(placementBlocksLive).
+    PlacementInfoPB livePlacementInfo =
+        PlacementInfoPB.newBuilder().addAllPlacementBlocks(placementBlocksLive).
             setPlacementUuid(ByteString.copyFromUtf8(PLACEMENT_UUID)).build();
 
     ModifyClusterConfigLiveReplicas liveOperation =
@@ -315,7 +320,7 @@ public class TestReadFromFollowers extends BaseJedisTest {
                   "TEST_follower_reject_update_consensus_requests_seconds", "300"),
               ImmutableMap.of(),
               ImmutableMap.of()));
-        });
+        }, Collections.emptyMap());
 
     // Setup the Jedis client.
     setUpJedis();
@@ -435,7 +440,7 @@ public class TestReadFromFollowers extends BaseJedisTest {
               ImmutableMap.of("lookup_cache_refresh_secs", "1"),
               ImmutableMap.of(),
               ImmutableMap.of()));
-        });
+        }, Collections.emptyMap());
 
     // Setup the Jedis client.
     setUpJedis();
@@ -556,10 +561,10 @@ public class TestReadFromFollowers extends BaseJedisTest {
               ImmutableMap.of("placement_uuid", readReplicaUuid)));
 
           cb.perTServerFlags(perTserverFlags);
-        });
+        }, Collections.emptyMap());
 
-    Master.PlacementInfoPB livePlacementInfo =
-        Master.PlacementInfoPB.newBuilder()
+    PlacementInfoPB livePlacementInfo =
+        PlacementInfoPB.newBuilder()
             .setNumReplicas(3)
             .setPlacementUuid(ByteString.copyFromUtf8(liveReplicaUuid ))
             .build();
@@ -567,12 +572,12 @@ public class TestReadFromFollowers extends BaseJedisTest {
         new ModifyClusterConfigLiveReplicas(miniCluster.getClient(), livePlacementInfo);
     liveOperation.doCall();
 
-    Master.PlacementInfoPB readOnlyPlacementInfo =
-        Master.PlacementInfoPB.newBuilder()
+    PlacementInfoPB readOnlyPlacementInfo =
+        PlacementInfoPB.newBuilder()
             .setNumReplicas(3)
             .setPlacementUuid(ByteString.copyFromUtf8(readReplicaUuid))
             .build();
-    List<Master.PlacementInfoPB> readOnlyPlacements = Arrays.asList(readOnlyPlacementInfo);
+    List<PlacementInfoPB> readOnlyPlacements = Arrays.asList(readOnlyPlacementInfo);
     ModifyClusterConfigReadReplicas readReplicasConfigChange =
         new ModifyClusterConfigReadReplicas(miniCluster.getClient(), readOnlyPlacements);
     readReplicasConfigChange.doCall();

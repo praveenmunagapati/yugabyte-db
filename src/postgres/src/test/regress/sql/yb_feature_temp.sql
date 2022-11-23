@@ -101,25 +101,25 @@ DROP TABLE temptest;
 -- test ON COMMIT DROP
 -- TODO(dmitry) ON COMMIT DROP should be fixed in context of #7926
 
-BEGIN;
+-- BEGIN;
 
-CREATE TEMP TABLE temptest(col int) ON COMMIT DROP;
+-- CREATE TEMP TABLE temptest(col int) ON COMMIT DROP;
 
-INSERT INTO temptest VALUES (1);
-INSERT INTO temptest VALUES (2);
+-- INSERT INTO temptest VALUES (1);
+-- INSERT INTO temptest VALUES (2);
 
-SELECT * FROM temptest;
-COMMIT;
+-- SELECT * FROM temptest;
+-- COMMIT;
 
-SELECT * FROM temptest;
+-- SELECT * FROM temptest;
 
-BEGIN;
-CREATE TEMP TABLE temptest(col) ON COMMIT DROP AS SELECT 1;
+-- BEGIN;
+-- CREATE TEMP TABLE temptest(col) ON COMMIT DROP AS SELECT 1;
 
-SELECT * FROM temptest;
-COMMIT;
+-- SELECT * FROM temptest;
+-- COMMIT;
 
-SELECT * FROM temptest;
+-- SELECT * FROM temptest;
 
 -- ON COMMIT is only allowed for TEMP
 
@@ -296,7 +296,16 @@ SELECT pg_sleep(10);
 CREATE TEMP TABLE temptest (k int PRIMARY KEY, v1 int, v2 int);
 CREATE UNIQUE INDEX ON temptest (v1);
 CREATE INDEX ON temptest USING hash (v2);
+
+-- \d temptest has unstable output due to temporary schemaname
+-- such as pg_temp_1, pg_temp_2, etc. Use regexp_replace to change
+-- it to pg_temp_xxx so that the result is stable.
+select current_setting('data_directory') || 'describe.out' as desc_output_file
+\gset
+\o :desc_output_file
 \d temptest
+\o
+select regexp_replace(pg_read_file(:'desc_output_file'), 'pg_temp_\d+', 'pg_temp_xxx', 'g');
 
 INSERT INTO temptest VALUES (1, 2, 3), (4, 5, 6);
 INSERT INTO temptest VALUES (2, 2, 3);
@@ -327,3 +336,32 @@ INSERT INTO test1 VALUES (1, 2, 3);
 CREATE TEMP TABLE test2 as table test1;
 UPDATE test1 SET z = 2 FROM test2 WHERE test1.x = test2.x;
 SELECT * FROM test1;
+
+-- test temp table ORDER BY and WHERE clause after failed insertion into unique indexed column
+CREATE TEMP TABLE IF NOT EXISTS t1(c0 TEXT  DEFAULT '3.61.4.60' PRIMARY KEY NOT NULL, c1 DECIMAL);;
+INSERT INTO t1(c1) VALUES(0.835), (0.703);
+SELECT t1.c0 FROM t1 ORDER BY t1.c0;
+SELECT t1.c0 FROM t1 where c0 in ('3.61.4.60');
+
+-- test temp table UPDATE on unique indexed column
+CREATE temp TABLE t4(c0 DECIMAL NULL, UNIQUE(c0));
+INSERT INTO t4(c0) VALUES(0.03);
+UPDATE t4 SET c0 = (0.05) WHERE t4.c0 = 0.03;
+SELECT ALL t4.c0 FROM t4 ORDER BY t4.c0 ASC;
+
+CREATE TEMP TABLE tempt (k int PRIMARY KEY, v1 int, v2 int);
+CREATE UNIQUE INDEX ON tempt (v1);
+INSERT INTO tempt VALUES (1, 2, 3), (4, 5, 6);
+INSERT INTO tempt VALUES (2, 2, 3);
+SELECT * FROM tempt ORDER BY k;
+
+-- types in temp schema
+set search_path = pg_temp, public;
+create domain pg_temp.nonempty as text check (value <> '');
+-- function-syntax invocation of types matches rules for functions
+select nonempty('');
+select pg_temp.nonempty('');
+-- other syntax matches rules for tables
+select ''::nonempty;
+
+reset search_path;

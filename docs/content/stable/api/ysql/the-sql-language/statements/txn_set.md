@@ -8,8 +8,7 @@ menu:
   stable:
     identifier: txn_set
     parent: statements
-isTocNested: true
-showAsideToc: true
+type: docs
 ---
 
 ## Synopsis
@@ -21,30 +20,32 @@ Use the `SET TRANSACTION` statement to set the current transaction isolation lev
 <ul class="nav nav-tabs nav-tabs-yb">
   <li >
     <a href="#grammar" class="nav-link active" id="grammar-tab" data-toggle="tab" role="tab" aria-controls="grammar" aria-selected="true">
-      <i class="fas fa-file-alt" aria-hidden="true"></i>
+      <i class="fa-solid fa-file-lines" aria-hidden="true"></i>
       Grammar
     </a>
   </li>
   <li>
     <a href="#diagram" class="nav-link" id="diagram-tab" data-toggle="tab" role="tab" aria-controls="diagram" aria-selected="false">
-      <i class="fas fa-project-diagram" aria-hidden="true"></i>
+      <i class="fa-solid fa-diagram-project" aria-hidden="true"></i>
       Diagram
     </a>
   </li>
 </ul>
 
-<div class="tab-content"> 
+<div class="tab-content">
   <div id="grammar" class="tab-pane fade show active" role="tabpanel" aria-labelledby="grammar-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/set_transaction,transaction_mode,isolation_level,read_write_mode,deferrable_mode.grammar.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/set_transaction,transaction_mode,isolation_level,read_write_mode,deferrable_mode.grammar.md" %}}
   </div>
   <div id="diagram" class="tab-pane fade" role="tabpanel" aria-labelledby="diagram-tab">
-    {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/set_transaction,transaction_mode,isolation_level,read_write_mode,deferrable_mode.diagram.md" /%}}
+  {{% includeMarkdown "../../syntax_resources/the-sql-language/statements/set_transaction,transaction_mode,isolation_level,read_write_mode,deferrable_mode.diagram.md" %}}
   </div>
 </div>
 
 ## Semantics
 
-Supports both Serializable and Snapshot Isolation using the PostgreSQL isolation level syntax of `SERIALIZABLE` and `REPEATABLE READ` respectively. Even `READ COMMITTED` and `READ UNCOMMITTED` isolation levels are mapped to Snapshot Isolation.
+Supports Serializable, Snapshot and Read Committed Isolation<sup>$</sup> using the PostgreSQL isolation level syntax of `SERIALIZABLE`, `REPEATABLE READ` and `READ COMMITTED` respectively. PostgreSQL's `READ UNCOMMITTED` also maps to Read Committed Isolation.
+
+<sup>$</sup> Read Committed Isolation is supported only if the gflag `yb_enable_read_committed_isolation` is set to `true`. By default this gflag is `false` and in this case the Read Committed isolation level of Yugabyte's transactional layer falls back to the stricter Snapshot Isolation (in which case `READ COMMITTED` and `READ UNCOMMITTED` of YSQL also in turn use Snapshot Isolation). Read Committed support is currently in [Beta](/preview/faq/general/#what-is-the-definition-of-the-beta-feature-tag).
 
 ### *transaction_mode*
 
@@ -62,20 +63,19 @@ Default in ANSI SQL standard.
 
 #### REPEATABLE READ
 
-Also referred to as "snapshot isolation" in YugabyteDB.
-Default.
+Maps to Snapshot Isolation of YugabyteDB.
 
 #### READ COMMITTED
 
-A statement can only see rows committed before it begins.
+Default in PostgreSQL and YSQL.
 
-`READ COMMITTED` is mapped to `REPEATABLE READ`.
+If `yb_enable_read_committed_isolation=true`, `READ COMMITTED` is mapped to Read Committed of YugabyteDB's transactional layer (i.e., a statement will see all rows that are committed before it begins). But, by default `yb_enable_read_committed_isolation=false` and in this case Read Committed of YugabyteDB's transactional layer falls back to the stricter Snapshot Isolation. Read Committed support is currently in [Beta](/preview/faq/general/#what-is-the-definition-of-the-beta-feature-tag).
 
-Default in PostgreSQL.
+Essentially this boils down to the fact that Snapshot Isolation is the default in YSQL.
 
 #### READ UNCOMMITTED
 
-`READ UNCOMMITTED` is mapped to `REPEATABLE READ`.
+`READ UNCOMMITTED` maps to Read Committed of YugabyteDB's transactional layer (note that Read Committed in the transactional layer might in turn map to Snapshot Isolation if `yb_enable_read_committed_isolation=false`).
 
 In PostgreSQL, `READ UNCOMMITTED` is mapped to `READ COMMITTED`.
 

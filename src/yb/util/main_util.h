@@ -12,17 +12,22 @@
 
 // Utilities to be used in the main() function.
 
-#ifndef YB_UTIL_MAIN_UTIL_H
-#define YB_UTIL_MAIN_UTIL_H
+#pragma once
 
+#include <fcntl.h>
+#include <string.h>
+
+#include <cstdarg>
 #include <cstdlib>
 #include <iostream>
 
-#include "yb/util/env.h"
-#include "yb/util/logging.h"
-#include "yb/util/result.h"
-#include "yb/util/status.h"
 #include "yb/gutil/strings/split.h"
+
+#include "yb/util/status_fwd.h"
+#include "yb/util/env.h"
+#include "yb/util/faststring.h"
+#include "yb/util/fault_injection.h"
+#include "yb/util/logging.h"
 #include "yb/util/path_util.h"
 
 namespace yb {
@@ -43,7 +48,7 @@ namespace yb {
 
 // Given a status, return a copy of it.
 // For use in the above macro, so it works with both Status and Result.
-Status ToStatus(const Status& status) {
+inline Status ToStatus(const Status& status) {
   return status;
 }
 
@@ -54,5 +59,3 @@ Status ToStatus(const Result<T>& result) {
 }
 
 } // namespace yb
-
-#endif // YB_UTIL_MAIN_UTIL_H

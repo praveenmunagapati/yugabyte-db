@@ -9,10 +9,12 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
-
 #include "yb/common/ybc-internal.h"
 
-#include "yb/util/logging.h"
+#include "yb/util/status.h"
+#include "yb/util/status_format.h"
+
+using std::string;
 
 namespace yb {
 
@@ -50,26 +52,14 @@ YBCStatus ToYBCStatus(Status&& status) {
 }
 
 void FreeYBCStatus(YBCStatus status) {
-  // Create Status object that receives control over provided status, so it will be destoyed with
+  // Create Status object that receives control over provided status, so it will be destroyed with
   // yb_status.
   Status yb_status(status, AddRef::kFalse);
 }
 
-YBCStatus YBCStatusOK() {
-  return nullptr;
-}
-
-YBCStatus YBCStatusNotSupport(const string& feature_name) {
-  if (feature_name.empty()) {
-    return ToYBCStatus(STATUS(NotSupported, "Feature is not supported"));
-  } else {
-    return ToYBCStatus(STATUS_FORMAT(NotSupported, "Feature '$0' not supported", feature_name));
-  }
-}
-
 const char* YBCPAllocStdString(const std::string& s) {
   const size_t len = s.size();
-  char* result = reinterpret_cast<char*>(YBCPAlloc(len + 1));
+  char* result = static_cast<char*>(YBCPAlloc(len + 1));
   memcpy(result, s.c_str(), len);
   result[len] = 0;
   return result;

@@ -10,17 +10,16 @@
 // or implied.  See the License for the specific language governing permissions and limitations
 // under the License.
 //
-#ifndef YB_UTIL_UINT_SET_H
-#define YB_UTIL_UINT_SET_H
-
-#include <unordered_set>
+#pragma once
 
 #include <boost/icl/discrete_interval.hpp>
 #include <boost/icl/interval_set.hpp>
 #include <google/protobuf/repeated_field.h>
 
 #include "yb/gutil/strings/join.h"
-#include "yb/util/result.h"
+
+#include "yb/util/status.h"
+#include "yb/util/status_format.h"
 
 namespace yb {
 
@@ -40,7 +39,7 @@ class UnsignedIntSet {
 
   // Set the indexes of this set in [lo, hi] to "on". It is perfectly valid to call SetRange with
   // lo = hi.
-  CHECKED_STATUS SetRange(T lo, T hi) {
+  Status SetRange(T lo, T hi) {
     SCHECK_LE(lo, hi, InvalidArgument, Format("Called SetRange with lo ($0) > hi ($1).", lo, hi));
     interval_set_ += ElementRange::closed(lo, hi);
     return Status::OK();
@@ -56,7 +55,8 @@ class UnsignedIntSet {
     return interval_set_.empty();
   }
 
-  static Result<UnsignedIntSet<T>> FromPB(const google::protobuf::RepeatedField<T>& container) {
+  template <class Container>
+  static Result<UnsignedIntSet<T>> FromPB(const Container& container) {
     UnsignedIntSet set;
 
     auto run_length_size = container.size();
@@ -72,9 +72,9 @@ class UnsignedIntSet {
     }
 
     uint32_t prev = 0;
-    for (auto run = container.begin(); run != container.end(); run += 2) {
-      auto start = prev += *run;
-      auto finish = (prev += *(run + 1)) - 1;
+    for (auto run = container.begin(); run != container.end();) {
+      auto start = prev += *run++;
+      auto finish = (prev += *run++) - 1;
       RETURN_NOT_OK(set.SetRange(start, finish));
     }
 
@@ -98,6 +98,10 @@ class UnsignedIntSet {
     return JoinStrings(parts, ", ");
   }
 
+  bool operator==(const UnsignedIntSet<T>& other) const {
+    return boost::icl::is_element_equal(interval_set_, other.interval_set_);
+  }
+
  private:
   using ElementType = uint32_t;
   using ElementRange = boost::icl::discrete_interval<ElementType>;
@@ -106,5 +110,3 @@ class UnsignedIntSet {
 };
 
 } // namespace yb
-
-#endif // YB_UTIL_UINT_SET_H

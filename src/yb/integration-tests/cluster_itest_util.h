@@ -38,62 +38,76 @@
 // belonging in the MiniCluster / ExternalMiniCluster classes themselves. But
 // consider just putting stuff like that in those classes.
 
-#ifndef YB_INTEGRATION_TESTS_CLUSTER_ITEST_UTIL_H_
-#define YB_INTEGRATION_TESTS_CLUSTER_ITEST_UTIL_H_
+#pragma once
 
+#include <inttypes.h>
+
+#include <cstdint>
+#include <iosfwd>
+#include <limits>
 #include <memory>
+#include <ostream>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
+
 #include <boost/optional/optional_fwd.hpp>
 
-#include "yb/gutil/ref_counted.h"
 #include "yb/client/client_fwd.h"
+
 #include "yb/common/entity_ids.h"
-#include "yb/consensus/consensus.h"
-#include "yb/consensus/consensus.pb.h"
-#include "yb/consensus/consensus.proxy.h"
-#include "yb/consensus/opid_util.h"
+#include "yb/common/hybrid_time.h"
+
+#include "yb/consensus/consensus_fwd.h"
+#include "yb/consensus/consensus_types.pb.h"
 #include "yb/consensus/leader_lease.h"
-#include "yb/master/master.pb.h"
-#include "yb/master/master.proxy.h"
-#include "yb/server/server_base.pb.h"
-#include "yb/server/server_base.proxy.h"
-#include "yb/tserver/tserver_admin.proxy.h"
-#include "yb/tserver/tserver_service.proxy.h"
+#include "yb/consensus/metadata.pb.h"
+
+#include "yb/gutil/ref_counted.h"
+
+#include "yb/master/master_fwd.h"
+#include "yb/master/master_client.fwd.h"
+
+#include "yb/rpc/rpc_controller.h"
+
+#include "yb/server/server_fwd.h"
+
+#include "yb/tablet/metadata.pb.h"
+
+#include "yb/tserver/tserver_fwd.h"
+#include "yb/tserver/tserver_types.pb.h"
+
+#include "yb/util/format.h"
+#include "yb/util/monotime.h"
+#include "yb/util/result.h"
+#include "yb/util/opid.h"
 
 using namespace std::literals;
 
 namespace yb {
+
+class ExternalMiniCluster;
 class HostPort;
 class MonoDelta;
+class MiniCluster;
 class Schema;
 class Status;
 
-namespace client {
-class YBClient;
-class YBSchema;
-class YBTable;
-class YBTableName;
-}
-
-namespace tserver {
-class ListTabletsResponsePB_StatusAndSchemaPB;
-class TabletServerErrorPB;
-}
-
-using consensus::ConsensusServiceProxy;
-using consensus::OpIdType;
+using yb::OpId;
 
 namespace itest {
 
 struct TServerDetails {
   NodeInstancePB instance_id;
-  master::TSRegistrationPB registration;
+  std::unique_ptr<master::TSRegistrationPB> registration;
   std::unique_ptr<tserver::TabletServerServiceProxy> tserver_proxy;
   std::unique_ptr<tserver::TabletServerAdminServiceProxy> tserver_admin_proxy;
   std::unique_ptr<consensus::ConsensusServiceProxy> consensus_proxy;
   std::unique_ptr<server::GenericServiceProxy> generic_proxy;
+
+  TServerDetails();
+  ~TServerDetails();
 
   // Convenience function to get the UUID from the instance_id struct.
   const std::string& uuid() const;
@@ -116,9 +130,9 @@ client::YBSchema SimpleIntKeyYBSchema();
 // Create a populated TabletServerMap by interrogating the master.
 // Note: The bare-pointer TServerDetails values must be deleted by the caller!
 // Consider using ValueDeleter (in gutil/stl_util.h) for that.
-Status CreateTabletServerMap(master::MasterServiceProxy* master_proxy,
-                             rpc::ProxyCache* proxy_cache,
-                             TabletServerMap* ts_map);
+Result<TabletServerMap> CreateTabletServerMap(
+    const master::MasterClusterProxy& proxy, rpc::ProxyCache* cache);
+Result<TabletServerMap> CreateTabletServerMap(ExternalMiniCluster* cluster);
 
 template <class Getter>
 auto GetForEachReplica(const std::vector<TServerDetails*>& replicas,
@@ -150,21 +164,27 @@ Result<std::vector<OpId>> GetLastOpIdForEachReplica(
     consensus::OperationType op_type = consensus::OperationType::UNKNOWN_OP);
 
 // Like the above, but for a single replica.
-inline Result<OpId> GetLastOpIdForReplica(
+Result<OpId> GetLastOpIdForReplica(
     const TabletId& tablet_id,
     TServerDetails* replica,
     consensus::OpIdType opid_type,
-    const MonoDelta& timeout) {
-  return VERIFY_RESULT(GetLastOpIdForEachReplica(tablet_id, {replica}, opid_type, timeout))[0];
-}
+    const MonoDelta& timeout);
 
 // Creates server vector from map.
-vector<TServerDetails*> TServerDetailsVector(const TabletServerMap& tablet_servers);
-vector<TServerDetails*> TServerDetailsVector(const TabletServerMapUnowned& tablet_servers);
+std::vector<TServerDetails*> TServerDetailsVector(const TabletReplicaMap& tablet_servers);
+std::vector<TServerDetails*> TServerDetailsVector(const TabletServerMap& tablet_servers);
+std::vector<TServerDetails*> TServerDetailsVector(const TabletServerMapUnowned& tablet_servers);
 
-// Creates copy of tablet server map, which does not own TServerDetails.
+// Creates copy of tablet server map, which does n  ot own TServerDetails.
 TabletServerMapUnowned CreateTabletServerMapUnowned(const TabletServerMap& tablet_servers,
                                                     const std::set<std::string>& exclude = {});
+
+// Wait until the latest op on the target replica is from the current term.
+Status WaitForOpFromCurrentTerm(TServerDetails* replica,
+                                const std::string& tablet_id,
+                                consensus::OpIdType opid_type,
+                                const MonoDelta& timeout,
+                                yb::OpId* opid = nullptr);
 
 // Wait until all of the servers have converged on the same log index.
 // The converged index must be at least equal to 'minimum_index'.
@@ -194,11 +214,33 @@ Status WaitForServersToAgree(const MonoDelta& timeout,
                              MustBeCommitted must_be_committed = MustBeCommitted::kFalse);
 
 Status WaitForServersToAgree(const MonoDelta& timeout,
-                             const vector<TServerDetails*>& tablet_servers,
-                             const string& tablet_id,
+                             const std::vector<TServerDetails*>& tablet_servers,
+                             const TabletId& tablet_id,
                              int64_t minimum_index,
                              int64_t* actual_index = nullptr,
                              MustBeCommitted must_be_committed = MustBeCommitted::kFalse);
+
+// Wait until all of the servers have converged on some log operation.
+//
+// Requires that all servers are running. Returns Status::TimedOut if servers were not converge
+// within the given timeout.
+//
+// If last_logged_opid is specified, the OpId that the servers have agreed on is written to
+// last_logged_opid. If the servers fail to agree, it is not updated.
+//
+// If must_be_committed is false, the converge is happening only for recieved operations, and if
+// the parameter is true, both received and commited operations are taken into account.
+Status WaitForServerToBeQuite(const MonoDelta& timeout,
+                              const TabletServerMap& tablet_servers,
+                              const TabletId& tablet_id,
+                              OpId* last_logged_opid = nullptr,
+                              MustBeCommitted must_be_committed = MustBeCommitted::kFalse);
+
+Status WaitForServerToBeQuite(const MonoDelta& timeout,
+                              const std::vector<TServerDetails*>& tablet_servers,
+                              const TabletId& tablet_id,
+                              OpId* last_logged_opid = nullptr,
+                              MustBeCommitted must_be_committed = MustBeCommitted::kFalse);
 
 // Wait until all specified replicas have logged at least the given index.
 // Unlike WaitForServersToAgree(), the servers do not actually have to converge
@@ -213,7 +255,7 @@ Status WaitUntilAllReplicasHaveOp(const int64_t log_index,
 // that has heartbeated the master at least once in the last FLAGS_raft_heartbeat_interval_ms
 // milliseconds.
 Status WaitUntilNumberOfAliveTServersEqual(int n_tservers,
-                                           master::MasterServiceProxy* master_proxy,
+                                           const master::MasterClusterProxy& master_proxy,
                                            const MonoDelta& timeout);
 
 // Get the consensus state from the given replica.
@@ -226,18 +268,34 @@ Status GetConsensusState(const TServerDetails* replica,
 
 // Wait until the number of servers with the specified member type in the committed consensus
 // configuration is equal to config_size.
-Status WaitUntilCommittedConfigMemberTypeIs(int config_size,
+Status WaitUntilCommittedConfigMemberTypeIs(size_t config_size,
                                             const TServerDetails* replica,
                                             const TabletId& tablet_id,
                                             const MonoDelta& timeout,
-                                            consensus::RaftPeerPB::MemberType member_type);
+                                            consensus::PeerMemberType member_type);
 
 // Wait until the number of voters in the committed consensus configuration is
 // 'quorum_size', according to the specified replica.
-Status WaitUntilCommittedConfigNumVotersIs(int config_size,
+Status WaitUntilCommittedConfigNumVotersIs(size_t config_size,
                                            const TServerDetails* replica,
                                            const TabletId& tablet_id,
                                            const MonoDelta& timeout);
+
+enum WaitForLeader {
+  DONT_WAIT_FOR_LEADER = 0,
+  WAIT_FOR_LEADER = 1
+};
+
+// Wait for the specified number of replicas to be reported by the master for
+// the given tablet. Fails when leader is not found or number of replicas
+// did not match up, or timeout waiting for leader.
+Status WaitForReplicasReportedToMaster(
+    ExternalMiniCluster* cluster,
+    int num_replicas, const std::string& tablet_id,
+    const MonoDelta& timeout,
+    WaitForLeader wait_for_leader,
+    bool* has_leader,
+    master::TabletLocationsPB* tablet_locations);
 
 // Used to specify committed entry type.
 enum class CommittedEntryType {
@@ -300,14 +358,20 @@ Status FindTabletLeader(const TabletServerMap& tablet_servers,
                         TServerDetails** leader);
 
 Status FindTabletLeader(const TabletServerMapUnowned& tablet_servers,
-                        const string& tablet_id,
+                        const std::string& tablet_id,
                         const MonoDelta& timeout,
                         TServerDetails** leader);
 
-Status FindTabletLeader(const vector<TServerDetails*>& tservers,
-                        const string& tablet_id,
+Status FindTabletLeader(const std::vector<TServerDetails*>& tservers,
+                        const std::string& tablet_id,
                         const MonoDelta& timeout,
                         TServerDetails** leader);
+
+// Grabs list of followers using FindTabletLeader() above.
+Status FindTabletFollowers(const TabletServerMapUnowned& tablet_servers,
+                           const std::string& tablet_id,
+                           const MonoDelta& timeout,
+                           std::vector<TServerDetails*>* followers);
 
 // Start an election on the specified tserver.
 // 'timeout' only refers to the RPC asking the peer to start an election. The
@@ -363,7 +427,7 @@ Status WriteSimpleTestRow(const TServerDetails* replica,
 Status AddServer(const TServerDetails* leader,
                  const TabletId& tablet_id,
                  const TServerDetails* replica_to_add,
-                 consensus::RaftPeerPB::MemberType member_type,
+                 consensus::PeerMemberType member_type,
                  const boost::optional<int64_t>& cas_config_opid_index,
                  const MonoDelta& timeout,
                  tserver::TabletServerErrorPB::Code* error_code = nullptr,
@@ -390,22 +454,30 @@ Status ListRunningTabletIds(const TServerDetails* ts,
                             std::vector<TabletId>* tablet_ids);
 
 // Get the list of tablet locations for the specified tablet from the Master.
-Status GetTabletLocations(const std::shared_ptr<master::MasterServiceProxy>& master_proxy,
+Status GetTabletLocations(ExternalMiniCluster* cluster,
                           const TabletId& tablet_id,
                           const MonoDelta& timeout,
                           master::TabletLocationsPB* tablet_locations);
 
 // Get the list of tablet locations for all tablets in the specified table from the Master.
-Status GetTableLocations(const std::shared_ptr<master::MasterServiceProxy>& master_proxy,
+Status GetTableLocations(ExternalMiniCluster* cluster,
                          const client::YBTableName& table_name,
                          const MonoDelta& timeout,
                          RequireTabletsRunning require_tablets_running,
                          master::GetTableLocationsResponsePB* table_locations);
 
+Status GetTableLocations(MiniCluster* cluster,
+                         const client::YBTableName& table_name,
+                         RequireTabletsRunning require_tablets_running,
+                         master::GetTableLocationsResponsePB* table_locations);
+
+// Get number of tablets of given table hosted by tserver.
+int GetNumTabletsOfTableOnTS(tserver::TabletServer* const tserver, const TableId& table_id);
+
 // Wait for the specified number of voters to be reported to the config on the
 // master for the specified tablet.
 Status WaitForNumVotersInConfigOnMaster(
-    const std::shared_ptr<master::MasterServiceProxy>& master_proxy,
+    ExternalMiniCluster* cluster,
     const TabletId& tablet_id,
     int num_voters,
     const MonoDelta& timeout);
@@ -414,9 +486,9 @@ Status WaitForNumVotersInConfigOnMaster(
 // specified 'count' number of replicas.
 Status WaitForNumTabletsOnTS(
     TServerDetails* ts,
-    int count,
+    size_t count,
     const MonoDelta& timeout,
-    std::vector<tserver::ListTabletsResponsePB::StatusAndSchemaPB>* tablets);
+    std::vector<tserver::ListTabletsResponsePB_StatusAndSchemaPB>* tablets);
 
 // Wait until the specified replica is in the specified state.
 Status WaitUntilTabletInState(TServerDetails* ts,
@@ -425,10 +497,23 @@ Status WaitUntilTabletInState(TServerDetails* ts,
                               const MonoDelta& timeout,
                               const MonoDelta& list_tablets_timeout = 10s);
 
+Status WaitUntilTabletInState(const master::TabletInfoPtr tablet,
+                              const std::string& ts_uuid,
+                              tablet::RaftGroupStatePB state);
+
+// Wait until tablet config change is relected to master.
+Status WaitForTabletConfigChange(const master::TabletInfoPtr tablet,
+                                 const std::string& ts_uuid,
+                                 consensus::ChangeConfigType type);
+
 // Wait until the specified tablet is in RUNNING state.
 Status WaitUntilTabletRunning(TServerDetails* ts,
                               const TabletId& tablet_id,
                               const MonoDelta& timeout);
+
+Status WaitUntilAllTabletReplicasRunning(const std::vector<TServerDetails*>& tservers,
+                                         const std::string& tablet_id,
+                                         const MonoDelta& timeout);
 
 // Send a DeleteTablet() to the server at 'ts' of the specified 'delete_type'.
 Status DeleteTablet(const TServerDetails* ts,
@@ -449,14 +534,13 @@ Status StartRemoteBootstrap(const TServerDetails* ts,
 
 // Get the latest OpId for the given master replica proxy. Note that this works for tablet servers
 // also, though GetLastOpIdForReplica is customized for tablet server for now.
-Status GetLastOpIdForMasterReplica(const std::shared_ptr<ConsensusServiceProxy>& consensus_proxy,
-                                   const TabletId& tablet_id,
-                                   const std::string& dest_uuid,
-                                   const OpIdType opid_type,
-                                   const MonoDelta& timeout,
-                                   OpIdPB* op_id);
+Status GetLastOpIdForMasterReplica(
+    const std::shared_ptr<consensus::ConsensusServiceProxy>& consensus_proxy,
+    const TabletId& tablet_id,
+    const std::string& dest_uuid,
+    const consensus::OpIdType opid_type,
+    const MonoDelta& timeout,
+    OpIdPB* op_id);
 
 } // namespace itest
 } // namespace yb
-
-#endif // YB_INTEGRATION_TESTS_CLUSTER_ITEST_UTIL_H_

@@ -21,15 +21,9 @@
 // * In addition we support variable length "varint" encoding
 // * Strings are encoded prefixed by their length in varint format
 
-#ifndef YB_UTIL_CODING_CONSTS_H
-#define YB_UTIL_CODING_CONSTS_H
+#pragma once
 
-#include <stdint.h>
-#include <string.h>
-#include <string>
 
-#include "yb/util/slice.h"
-#include "yb/util/faststring.h"
 
 namespace yb {
 
@@ -38,5 +32,3 @@ constexpr const unsigned int kMaxVarint32Length = 5;
 constexpr const unsigned int kMaxVarint64Length = 10;
 
 }  // namespace yb
-
-#endif  // YB_UTIL_CODING_CONSTS_H

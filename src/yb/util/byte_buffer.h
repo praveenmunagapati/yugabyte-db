@@ -11,13 +11,10 @@
 // under the License.
 //
 
-#ifndef YB_UTIL_BYTE_BUFFER_H
-#define YB_UTIL_BYTE_BUFFER_H
+#pragma once
 
 #include <cstddef>
 #include <string>
-
-#include <boost/container_hash/extensions.hpp>
 
 #include "yb/util/slice.h"
 
@@ -159,8 +156,15 @@ class ByteBuffer {
     EnsureCapacity(capacity, size_);
   }
 
+  char* GrowByAtLeast(size_t size) {
+    size += size_;
+    auto result = EnsureCapacity(size, size_) + size_;
+    size_ = size;
+    return result;
+  }
+
   void PushBack(char ch) {
-    *(EnsureCapacity(size_ + 1, size_) + size_) = ch;
+    EnsureCapacity(size_ + 1, size_)[size_] = ch;
     ++size_;
   }
 
@@ -174,6 +178,10 @@ class ByteBuffer {
 
   Slice AsSlice() const {
     return Slice(ptr(), size_);
+  }
+
+  uint8_t* mutable_data() {
+    return pointer_cast<uint8_t*>(ptr());
   }
 
   // STL container compatibility
@@ -278,5 +286,3 @@ struct ByteBufferHash {
 };
 
 } // namespace yb
-
-#endif // YB_UTIL_BYTE_BUFFER_H

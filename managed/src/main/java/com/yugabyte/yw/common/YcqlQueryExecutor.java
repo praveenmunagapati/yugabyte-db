@@ -1,3 +1,5 @@
+// Copyright (c) YugaByte, Inc.
+
 package com.yugabyte.yw.common;
 
 import static play.libs.Json.newObject;
@@ -8,6 +10,7 @@ import com.datastax.driver.core.ColumnDefinitions;
 import com.datastax.driver.core.ResultSet;
 import com.datastax.driver.core.Row;
 import com.datastax.driver.core.Session;
+import com.datastax.driver.core.exceptions.AuthenticationException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.inject.Singleton;
@@ -31,6 +34,7 @@ public class YcqlQueryExecutor {
   private static final Logger LOG = LoggerFactory.getLogger(YcqlQueryExecutor.class);
   private static final String DEFAULT_DB_USER = Util.DEFAULT_YCQL_USERNAME;
   private static final String DEFAULT_DB_PASSWORD = Util.DEFAULT_YCQL_PASSWORD;
+  private static final String AUTH_ERR_MSG = "Provided username and/or password are incorrect";
 
   public void createUser(Universe universe, DatabaseUserFormData data) {
     // Create user for customer CQL.
@@ -49,6 +53,22 @@ public class YcqlQueryExecutor {
     if (ycqlResponse.has("error")) {
       throw new PlatformServiceException(
           Http.Status.BAD_REQUEST, ycqlResponse.get("error").asText());
+    }
+  }
+
+  public void validateAdminPassword(Universe universe, DatabaseSecurityFormData data) {
+    CassandraConnection cc = null;
+    try {
+      cc =
+          createCassandraConnection(
+              universe.universeUUID, true, data.ycqlAdminUsername, data.ycqlAdminPassword);
+    } catch (AuthenticationException e) {
+      LOG.warn(e.getMessage());
+      throw new PlatformServiceException(Http.Status.UNAUTHORIZED, e.getMessage());
+    } finally {
+      if (cc != null) {
+        cc.close();
+      }
     }
   }
 
@@ -131,6 +151,15 @@ public class YcqlQueryExecutor {
     return command;
   }
 
+  // TODO This is a temporary workaround until it is fixed in the server side.
+  private String removeQueryFromErrorMessage(String errMsg, String queryString) {
+    // An error message contains the actual query sent to the server.
+    if (errMsg != null) {
+      errMsg = errMsg.replace(queryString, "<Query>");
+    }
+    return errMsg;
+  }
+
   public JsonNode executeQuery(
       Universe universe, RunQueryFormData queryParams, Boolean authEnabled) {
     return executeQuery(universe, queryParams, authEnabled, DEFAULT_DB_USER, DEFAULT_DB_PASSWORD);
@@ -143,8 +172,14 @@ public class YcqlQueryExecutor {
       String username,
       String password) {
     ObjectNode response = newObject();
-    CassandraConnection cc =
-        createCassandraConnection(universe.universeUUID, authEnabled, username, password);
+    CassandraConnection cc = null;
+    try {
+      cc = createCassandraConnection(universe.universeUUID, authEnabled, username, password);
+    } catch (AuthenticationException e) {
+      response.put("error", AUTH_ERR_MSG);
+      return response;
+    }
+
     try {
       ResultSet rs = cc.session.execute(queryParams.query);
       if (rs.iterator().hasNext()) {
@@ -157,9 +192,11 @@ public class YcqlQueryExecutor {
         response.put("queryType", getQueryType(queryParams.query));
       }
     } catch (Exception e) {
-      response.put("error", e.getMessage());
+      response.put("error", removeQueryFromErrorMessage(e.getMessage(), queryParams.query));
     } finally {
-      cc.close();
+      if (cc != null) {
+        cc.close();
+      }
     }
     return response;
   }

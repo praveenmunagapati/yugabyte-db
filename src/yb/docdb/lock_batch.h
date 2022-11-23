@@ -11,15 +11,20 @@
 // under the License.
 //
 
-#ifndef YB_DOCDB_LOCK_BATCH_H
-#define YB_DOCDB_LOCK_BATCH_H
+#pragma once
 
 #include <string>
 
 #include <glog/logging.h>
 
-#include "yb/docdb/doc_key.h"
-#include "yb/docdb/value_type.h"
+#include "yb/docdb/docdb_fwd.h"
+#include "yb/docdb/intent.h"
+
+#include "yb/gutil/macros.h"
+
+#include "yb/util/monotime.h"
+#include "yb/util/ref_cnt_buffer.h"
+#include "yb/util/status.h"
 
 namespace yb {
 
@@ -40,12 +45,10 @@ struct LockBatchEntry {
   // Memory is owned by SharedLockManager.
   LockedBatchEntry* locked = nullptr;
 
-  std::string ToString() const {
-    return Format("{ key: $0 intent_types: $1 }", key.as_slice().ToDebugHexString(), intent_types);
-  }
+  std::string ToString() const;
 };
 
-typedef std::vector<LockBatchEntry> LockBatchEntries;
+class UnlockedBatch;
 
 // A LockBatch encapsulates a mapping from lock keys to lock types (intent types) to be acquired
 // for each key. It also keeps track of a lock manager when locked, and auto-releases the locks
@@ -74,8 +77,18 @@ class LockBatch {
   // Unlocks this batch if it is non-empty.
   void Reset();
 
+  // Unlock the keys of this LockBatch and move all associated data into the returned Unlocked
+  // instance. The returned instance can be used to construct another LockBatch, which in turn will
+  // re-lock the keys.
+  std::optional<UnlockedBatch> Unlock();
+
  private:
   void MoveFrom(LockBatch* other);
+
+  // Initializes the LockBatch and locks the specified keys. Updates data_.status in case of error.
+  void Init(CoarseTimePoint deadline);
+
+  void DoUnlock();
 
   struct Data {
     Data() = default;
@@ -98,7 +111,30 @@ class LockBatch {
   Data data_;
 };
 
+// A container which houses all data needed to re-lock the LockBatch which generated an
+// UnlockedBatch via LockBatch::Unlock(). Recreates a LockBatch with the same keys via Lock().
+class UnlockedBatch {
+ public:
+  UnlockedBatch(LockBatchEntries&& key_to_type_, SharedLockManager* shared_lock_manager_);
+
+  UnlockedBatch(UnlockedBatch&& other) { MoveFrom(&other); }
+
+  // Invalidates the provided UnlockedBatch instance and returns a new LockBatch which locks the
+  // keys specified in "unlocked". An rvalue is required for the UnlockedBatch argument to ensure
+  // that the caller does not expect the fields of "unlocked" to be in a valid state -- they will
+  // be moved into the returned LockBatch instance.
+  LockBatch Lock(CoarseTimePoint deadline) &&;
+
+  UnlockedBatch& operator=(UnlockedBatch&& other) { MoveFrom(&other); return *this; }
+ private:
+  void MoveFrom(UnlockedBatch* other);
+
+  LockBatchEntries key_to_type_;
+
+  SharedLockManager* shared_lock_manager_ = nullptr;
+
+  DISALLOW_COPY_AND_ASSIGN(UnlockedBatch);
+};
+
 }  // namespace docdb
 }  // namespace yb
-
-#endif // YB_DOCDB_LOCK_BATCH_H
